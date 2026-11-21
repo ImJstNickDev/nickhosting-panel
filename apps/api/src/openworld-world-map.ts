@@ -22,6 +22,7 @@ const processRef = z.string().regex(/^[a-f0-9]{64}$/);
 const session = z.strictObject({ processRef });
 const world = openworldMapWorldKey;
 const selected = session.extend({ world });
+const creatureQuery = selected.extend({ markers: z.literal('1').optional() });
 const face = integer(5);
 const stamp = integer(0xffffffff);
 const column = integer(maxOpenworldMapColumn);
@@ -81,7 +82,9 @@ export function registerOpenworldWorldMapRoutes(
     },
   }),
 ) {
-  const routes = new Hono<{ Variables: Variables }>().basePath('/v1/servers/:id/openworld/map');
+  const base = '/v1/servers/:id/openworld';
+  const routes = new Hono<{ Variables: Variables }>().basePath(base);
+
   // Coalesced requests receive the same rejected provider read throughout its cooldown.
   const retryUntil = new WeakMap<PterodactylError, number>();
   routes.onError((error, c) => {
@@ -92,14 +95,32 @@ export function registerOpenworldWorldMapRoutes(
     c.header('Retry-After', String(Math.max(1, Math.ceil((until - now) / 1000))));
     throw new DomainError('rate_limited');
   });
-  routes.use('*', async (c, next) => {
+  routes.use('/map/*', async (c, next) => {
     c.header('cache-control', 'private, no-store');
     await next();
   });
-  routes.get('/', async (c) =>
+  routes.get('/factories', async (c) => {
+    c.header('cache-control', 'private, no-store');
+    return c.json(await service.factories(await options.principal(c), c.req.param('id')));
+  });
+  routes.get('/map/creatures', async (c) => {
+    const who = await options.principal(c);
+    const q = parse(creatureQuery, c.req.query());
+    return c.json(await service.creatures(who, c.req.param('id'), q, q.markers === '1'));
+  });
+  routes.get('/map/space', async (c) =>
+    c.json(
+      await service.space(
+        await options.principal(c),
+        c.req.param('id'),
+        parse(session, c.req.query()).processRef,
+      ),
+    ),
+  );
+  routes.get('/map', async (c) =>
     c.json(await service.info(await options.principal(c), c.req.param('id'))),
   );
-  routes.get('/players', async (c) =>
+  routes.get('/map/players', async (c) =>
     c.json(
       await service.players(
         await options.principal(c),
@@ -108,7 +129,7 @@ export function registerOpenworldWorldMapRoutes(
       ),
     ),
   );
-  routes.get('/index', async (c) =>
+  routes.get('/map/index', async (c) =>
     c.json(
       await service.index(
         await options.principal(c),
@@ -117,7 +138,7 @@ export function registerOpenworldWorldMapRoutes(
       ),
     ),
   );
-  routes.get('/columns', async (c) =>
+  routes.get('/map/columns', async (c) =>
     c.json(
       await service.columns(
         await options.principal(c),
@@ -126,7 +147,7 @@ export function registerOpenworldWorldMapRoutes(
       ),
     ),
   );
-  routes.get('/changes', async (c) =>
+  routes.get('/map/changes', async (c) =>
     c.json(
       await service.changes(
         await options.principal(c),
@@ -135,7 +156,7 @@ export function registerOpenworldWorldMapRoutes(
       ),
     ),
   );
-  routes.get('/surface', async (c) =>
+  routes.get('/map/surface', async (c) =>
     c.json(
       await service.surface(
         await options.principal(c),
@@ -144,7 +165,7 @@ export function registerOpenworldWorldMapRoutes(
       ),
     ),
   );
-  routes.get('/checkpoints', async (c) =>
+  routes.get('/map/checkpoints', async (c) =>
     c.json(
       await service.checkpoints(
         await options.principal(c),
@@ -153,7 +174,7 @@ export function registerOpenworldWorldMapRoutes(
       ),
     ),
   );
-  routes.post('/checkpoints', async (c) => {
+  routes.post('/map/checkpoints', async (c) => {
     const who = await options.principal(c);
     if (c.req.header('content-type')?.split(';')[0]?.trim().toLowerCase() !== 'application/json')
       throw new DomainError('validation_failed');

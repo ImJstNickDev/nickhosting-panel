@@ -1,6 +1,11 @@
 import { createHash } from 'node:crypto';
 import { type AuthContext, DomainError } from '@nickhosting/core';
 import { sql } from 'kysely';
+import { readOpenworldFactories } from '../../../games/openworld/src/factories.js';
+import {
+  readOpenworldCreatures,
+  readOpenworldSpace,
+} from '../../../games/openworld/src/map-layers.js';
 import {
   readMapChanges,
   readMapColumns,
@@ -98,6 +103,9 @@ export function createOpenworldWorldMap(options: OpenworldNativeOptions) {
   const columns = sharedReads<Uint32Array>(8, now, 1000);
   const deltas = sharedReads<Awaited<ReturnType<typeof readMapChanges>>>(8, now, 500);
   const tiles = sharedReads<Awaited<ReturnType<typeof readMapTile>>>(256, now, 500);
+  const factories = sharedReads<Awaited<ReturnType<typeof readOpenworldFactories>>>(64, now, 1000);
+  const creatures = sharedReads<Awaited<ReturnType<typeof readOpenworldCreatures>>>(64, now, 1000);
+  const space = sharedReads<Awaited<ReturnType<typeof readOpenworldSpace>>>(32, now, 1000);
   const players = sharedReads<Awaited<ReturnType<typeof readMapPlayers>>>(64, now, 1000);
   const key = (scope: OpenworldScope, ...args: (string | number | undefined)[]) =>
     JSON.stringify([scope.liveKey, ...args]);
@@ -120,10 +128,12 @@ export function createOpenworldWorldMap(options: OpenworldNativeOptions) {
     id: string,
     processRef: string | undefined,
     work: (scope: OpenworldScope) => Promise<T>,
-    requirePlayerInspection = false,
+    access: { resource: 'map'; requirePlayerInspection?: boolean } | { resource: 'factories' } = {
+      resource: 'map',
+    },
     project?: (result: T, current: OpenworldScope) => T,
   ) {
-    const reader = { who, resource: 'map' as const, requirePlayerInspection };
+    const reader = { who, ...access };
     const scope = await readOpenworldScope(db, id, reader);
     if (scope.reason) throw new DomainError('game_not_ready');
     if (processRef !== undefined && openworldProcessRef(scope) !== processRef)
@@ -151,7 +161,7 @@ export function createOpenworldWorldMap(options: OpenworldNativeOptions) {
           throw new DomainError('not_found');
         return work(scope);
       },
-      false,
+      { resource: 'map' },
       project,
     );
   }
@@ -171,7 +181,47 @@ export function createOpenworldWorldMap(options: OpenworldNativeOptions) {
           ...(await players.get(scope.liveKey, 2000, () => withNative(scope, readMapPlayers))),
           processRef,
         }),
-        true,
+        { resource: 'map', requirePlayerInspection: true },
+      );
+    },
+    factories(who: AuthContext, id: string) {
+      return read(
+        who,
+        id,
+        undefined,
+        (scope) =>
+          factories.get(scope.liveKey, 3000, () => withNative(scope, readOpenworldFactories)),
+        { resource: 'factories' },
+      );
+    },
+    creatures(who: AuthContext, id: string, q: MapQuery, markers: boolean) {
+      return worldRead(who, id, q, (scope) =>
+        creatures.get(key(scope, q.world, markers ? 1 : 0), 3000, () =>
+          withNative(scope, (n) => readOpenworldCreatures(n, q.world, markers)),
+        ),
+      );
+    },
+    space(who: AuthContext, id: string, processRef: string) {
+      return read(
+        who,
+        id,
+        processRef,
+        async (scope) => {
+          // The native dashboard and other API processes can change checkpoint visibility.
+          // Share only an in-flight sample; a later viewer needs a fresh visibility decision.
+          const pending = space.get(scope.liveKey, 0, () => withNative(scope, readOpenworldSpace));
+          const snapshot = await pending;
+          if (!space.current(scope.liveKey, pending)) throw new DomainError('conflict');
+          return snapshot;
+        },
+        { resource: 'map' },
+        (data, current) => ({
+          ...data,
+          players: current.canInspectPlayers ? data.players : [],
+          checkpoints: current.canManageCheckpoints
+            ? data.checkpoints
+            : data.checkpoints.filter((c) => c.visibility === 'players'),
+        }),
       );
     },
     index(who: AuthContext, id: string, q: MapQuery) {
@@ -303,7 +353,12 @@ export function createOpenworldWorldMap(options: OpenworldNativeOptions) {
               assertCurrentOpenworldScope(scope, await readOpenworldScope(tx, id, reader));
               if (n.signal.aborted) throw new DomainError('game_not_ready');
               markDispatched();
-              await dispatchOpenworldCheckpoint(n, world, action);
+              try {
+                await dispatchOpenworldCheckpoint(n, world, action);
+              } finally {
+                // The game may have applied a visibility change even if its reply was lost.
+                space.invalidate(scope.liveKey);
+              }
             });
           }),
         false,

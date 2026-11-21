@@ -9,6 +9,7 @@ import {
   useState,
 } from 'react';
 import { Link } from 'react-router';
+import type { OpenworldCreatureLayer } from '../../../../../games/openworld/src/map-layers.js';
 import { maxOpenworldMapColumn } from '../../../../../games/openworld/src/world-map.js';
 import { useT } from '../../app/i18n.js';
 import { ErrorNotice } from '../../components/ui.js';
@@ -111,6 +112,7 @@ export function MapViewport({
   processRef,
   checkpoints,
   players,
+  creatures,
   focus,
   selectedId,
   onSelect,
@@ -128,6 +130,7 @@ export function MapViewport({
   processRef: string;
   checkpoints: MapCheckpoint[];
   players: MapPlayer[];
+  creatures?: OpenworldCreatureLayer;
   focus: MapPoint | null;
   selectedId: number | null;
   onSelect: (c: MapCheckpoint) => void;
@@ -226,6 +229,10 @@ export function MapViewport({
   };
   const [draftPan, setDraftPan] = useState<{ dx: number; dy: number } | null>(null);
   const [pick, setPick] = useState(false);
+  const canPlace = onCreate !== undefined;
+  useEffect(() => {
+    if (!canPlace) setPick(false);
+  }, [canPlace]);
   const drag = useRef<{ id: number; x: number; y: number } | null>(null);
   useEffect(() => {
     if (focus?.face === face) {
@@ -436,6 +443,18 @@ export function MapViewport({
     if (x < 0 || y < 0 || x > size.width || y > size.height) return null;
     return { left: x, top: y } as CSSProperties;
   };
+  const speciesNames = useMemo(
+    () => new Map(creatures?.species.map((s) => [s.id, s.name || s.key])),
+    [creatures],
+  );
+  // Coincident positions for the same species share a single marker.
+  const creaturePins = useMemo(() => {
+    const pins = new Map<string, OpenworldCreatureLayer['markers'][number]>();
+    for (const marker of creatures?.markers ?? []) {
+      if (marker.face === face) pins.set(`${marker.species}/${marker.x}/${marker.z}`, marker);
+    }
+    return [...pins];
+  }, [creatures, face]);
   const scale = 10 ** Math.floor(Math.log10(Math.max(1, area.span * 0.16)));
   const scaleBar =
     (area.span * 0.16) / scale >= 5
@@ -493,7 +512,11 @@ export function MapViewport({
         onPointerDown={(e) => {
           if (
             e.button !== 0 ||
-            (e.target !== e.currentTarget && e.target !== canvas.current) ||
+            (e.target !== e.currentTarget &&
+              e.target !== canvas.current &&
+              !(
+                e.target instanceof HTMLElement && e.target.classList.contains('ow-creature-pin')
+              )) ||
             drag.current
           )
             return;
@@ -525,6 +548,23 @@ export function MapViewport({
             style={pin(focus) ?? undefined}
           />
         )}
+        {creaturePins.map(([markerKey, m]) => {
+          const style = pin(m);
+          if (!style) return null;
+          const name =
+            speciesNames.get(m.species) || t(k('layers.unknownSpecies'), { id: m.species });
+          const label = t(k('layers.creatureMarker'), { name });
+          return (
+            <span
+              key={markerKey}
+              className="ow-creature-pin"
+              role="img"
+              aria-label={label}
+              title={label}
+              style={style}
+            />
+          );
+        })}
         {checkpoints.map((c) => {
           const style = pin(c.pos);
           return (
@@ -596,6 +636,12 @@ export function MapViewport({
           <span>
             <i className="known" />
             {t(k('explored'))}
+          </span>
+        )}
+        {creatures && (
+          <span>
+            <i className="ow-creature-dot" />
+            {t(k('layers.markerLegend'))}
           </span>
         )}
         <span>{t(k(pick ? 'placeHint' : 'panHint'))}</span>

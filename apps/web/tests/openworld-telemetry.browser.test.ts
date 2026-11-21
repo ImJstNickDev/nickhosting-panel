@@ -811,6 +811,70 @@ async function mapRoutes(
       });
       return route.fulfill({ json: { side: 32, samples } });
     }
+    if (path === '/creatures') {
+      const world = u.searchParams.get('world'),
+        earth = world === 'earth';
+      const markers = u.searchParams.get('markers') === '1' && earth;
+      return route.fulfill({
+        json: {
+          world,
+          total: earth ? 7 : 0,
+          items: earth ? 31 : 0,
+          species: earth
+            ? [{ id: 3, key: 'marsh_toad', name: 'Marsh toad', count: 7, hostile: false }]
+            : [],
+          markers: markers ? [{ species: 3, face: 0, x: 131, z: 128 }] : [],
+          markersTruncated: markers,
+        },
+      });
+    }
+    if (path === '/space')
+      return route.fulfill({
+        json: {
+          t: 123456,
+          bodies: [
+            {
+              index: 0,
+              name: 'Sol',
+              world: null,
+              parent: null,
+              radiusMeters: 2000,
+              position: [0, 0, 0],
+              atmosphere: false,
+              isLight: true,
+            },
+            {
+              index: 1,
+              name: 'Earth',
+              world: 'earth',
+              parent: 0,
+              radiusMeters: 900,
+              position: [400000, 100, 40000],
+              atmosphere: true,
+              isLight: false,
+            },
+            {
+              index: 2,
+              name: 'Moon',
+              world: 'moon',
+              parent: 1,
+              radiusMeters: 200,
+              position: [404000, 30, 110000],
+              atmosphere: false,
+              isLight: false,
+            },
+          ],
+          players: [{ id: 4, name: 'Night sail', world: null, position: [100000, 11, 72000] }],
+          checkpoints: ['players', 'admins'].map((visibility, i) => ({
+            id: i + 1,
+            name: i ? 'Private beacon' : 'Public beacon',
+            world: 'earth',
+            visibility,
+            color: '#998855',
+            position: [400700, 0, 40000],
+          })),
+        },
+      });
     if (path === '/players') return route.fulfill({ json: { processRef, players: [] } });
     if (path === '/checkpoints' && route.request().method() === 'POST') {
       const body = route.request().postDataJSON();
@@ -1202,5 +1266,127 @@ it('uses a bounded sample to frame a larger map and fetches the actual overview 
     await fits(page);
   } finally {
     await page.close();
+  }
+});
+
+it('loads creature populations on demand, requests markers only when selected, and switches world and face', async () => {
+  const context = await browser.newContext({
+    locale: 'en-GB',
+    viewport: { width: 1280, height: 900 },
+  });
+  const page = await context.newPage();
+  try {
+    const { paths } = await mapRoutes(page);
+    await page.goto(`${url}telemetry-fixture?section=map&cartographer`);
+    await check(page.getByRole('button', { name: 'Creatures', exact: true })).toBeVisible();
+    expect(paths.filter((p) => /\/(creatures|space)$/.test(p.pathname))).toHaveLength(0);
+    const place = page.getByRole('button', { name: 'Place checkpoint', exact: true });
+    await place.click();
+    await check(place).toHaveAttribute('aria-pressed', 'true');
+    await page.getByRole('button', { name: 'Creatures', exact: true }).click();
+    await check(page.getByRole('heading', { name: 'Active population in Earth' })).toBeVisible();
+    await check(page.getByRole('row', { name: 'Marsh toad 7' })).toBeVisible();
+    await check(
+      page.locator('.ow-map-counts div').filter({ hasText: 'Items on the ground' }),
+    ).toContainText('31');
+    expect(
+      paths
+        .filter((p) => p.pathname.endsWith('/creatures'))
+        .map((p) => p.searchParams.get('markers')),
+    ).toEqual([null]);
+    await check(page.locator('.ow-map-picking')).toHaveCount(0);
+    await page.getByRole('button', { name: 'Terrain', exact: true }).click();
+    await check(place).toHaveAttribute('aria-pressed', 'false');
+    await page.getByRole('button', { name: 'Creatures', exact: true }).click();
+    await page.getByLabel('Show creature positions').check();
+    const toad = page.getByRole('img', { name: 'Creature · Marsh toad', exact: true });
+    await toad.hover();
+    await check(toad).toHaveAttribute('title', 'Creature · Marsh toad');
+    const box = await toad.boundingBox();
+    if (!box) throw Error('Marker is outside the viewport');
+    await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(box.x + box.width / 2 + 36, box.y + box.height / 2 + 14);
+    await page.mouse.up();
+    await check.poll(async () => (await toad.boundingBox())?.x ?? 0).toBeGreaterThan(box.x + 25);
+    await page.getByRole('button', { name: 'Recenter' }).click();
+    await check(page.getByText('The map shows a sample of the creature positions.')).toBeVisible();
+    await fits(page);
+    await page.screenshot({ path: `${shots}/world-map-creatures-en.png` });
+    await page.getByLabel('Face', { exact: true }).selectOption('3');
+    await check(page.getByRole('img', { name: /^Creature ·/ })).toHaveCount(0);
+    await page.getByLabel('World', { exact: true }).selectOption('moon');
+    await check(page.getByRole('heading', { name: 'Active population in Moon' })).toBeVisible();
+    await check(page.getByText('No species recorded in this world.')).toBeVisible();
+    expect(paths.filter((p) => p.pathname.endsWith('/space'))).toHaveLength(0);
+    expect(
+      paths
+        .filter((p) => p.searchParams.get('markers') === '1')
+        .every((p) => p.searchParams.get('world') === 'earth'),
+    ).toBe(true);
+  } finally {
+    await context.close();
+  }
+});
+
+it('centers on an orbital body, opens its terrain and clears space markers when authorization changes', async () => {
+  const context = await browser.newContext({
+    locale: 'en-GB',
+    viewport: { width: 1280, height: 900 },
+  });
+  const page = await context.newPage();
+  try {
+    await mapRoutes(page);
+    await page.goto(`${url}telemetry-fixture?section=map&cartographer`);
+    await page.getByRole('button', { name: 'Space', exact: true }).click();
+    await check(page.getByRole('img', { name: 'Orbital view centered on Sol' })).toBeVisible();
+    await check(page.getByRole('listitem').filter({ hasText: 'Night sail' })).toBeVisible();
+    await check(page.getByRole('listitem').filter({ hasText: 'Private beacon' })).toBeVisible();
+    await page.getByRole('button', { name: 'Center on Moon', exact: true }).click();
+    await check(page.getByLabel('Celestial body')).toHaveValue('2');
+    await check(page.getByRole('button', { name: 'Earth', exact: true })).toBeVisible();
+    await page.getByRole('button', { name: 'Open terrain map' }).click();
+    await check(page.getByLabel('World', { exact: true })).toHaveValue('moon');
+    await page.getByRole('button', { name: 'Space', exact: true }).click();
+    await check(page.getByRole('heading', { name: 'Sol', exact: true })).toBeVisible();
+    await page.route('**/map/space?**', (r) =>
+      r.fulfill({ status: 403, json: { code: 'forbidden', messageKey: 'errors.forbidden' } }),
+    );
+    await page.evaluate(() => window.dispatchEvent(new Event('visibilitychange')));
+    await check(page.getByRole('alert')).toBeVisible();
+    await check(page.getByRole('listitem').filter({ hasText: 'Private beacon' })).toHaveCount(0);
+    await check(page.getByRole('img', { name: 'Orbital view centered on Sol' })).toHaveCount(0);
+  } finally {
+    await context.close();
+  }
+});
+
+it('keeps reader-only space and factory positions accessible on mobile without reading player locations', async () => {
+  const context = await browser.newContext({
+    locale: 'it-IT',
+    viewport: { width: 390, height: 844 },
+  });
+  const page = await context.newPage();
+  try {
+    const { paths } = await mapRoutes(page);
+    await page.goto(
+      `${url}telemetry-fixture?section=map&reader#origin=factories&world=moon&face=3&x=123&z=145`,
+    );
+    await check(page.getByLabel('Mondo', { exact: true })).toHaveValue('moon');
+    await check(page.locator('.ow-map-location')).toBeVisible();
+    await page.getByRole('button', { name: 'Spazio', exact: true }).click();
+    await check(page.getByRole('heading', { name: 'Sol', exact: true })).toBeVisible();
+    await check(page.getByRole('listitem').filter({ hasText: 'Public beacon' })).toBeVisible();
+    await check(page.getByText('Private beacon', { exact: true })).toHaveCount(0);
+    await check(page.getByText('Night sail', { exact: true })).toHaveCount(0);
+    await check(page.getByText('Giocatori nello spazio', { exact: true })).toHaveCount(0);
+    await fits(page);
+    await page.screenshot({ path: `${shots}/world-map-space-it-mobile.png` });
+    await page.getByLabel('Corpo celeste').selectOption('1');
+    await check(page.getByRole('heading', { name: 'Earth', exact: true })).toBeVisible();
+    expect(paths.some((p) => p.pathname.endsWith('/players'))).toBe(false);
+    expect(paths.some((p) => p.pathname.endsWith('/creatures'))).toBe(false);
+  } finally {
+    await context.close();
   }
 });

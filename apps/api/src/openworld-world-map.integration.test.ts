@@ -111,6 +111,7 @@ async function fixture() {
     changes: [[0, 4, 3, 4]],
     reset: false,
   };
+  const creatureLimits: string[] = [];
   const writes: string[] = [],
     reads: string[] = [];
   const fetcher: typeof fetch = async (url, init) => {
@@ -160,6 +161,59 @@ async function fixture() {
             },
           ],
         });
+      case 'ovm':
+        return Response.json({
+          enabled: true,
+          hz: 19.9,
+          targetHz: 20,
+          stepMs: { p95: 0.06 },
+          counts: { nodes: 34 },
+          privateField: 'internal',
+        });
+      case 'entities': {
+        const limit = remote.searchParams.get('limit') ?? '';
+        creatureLimits.push(limit);
+        const sample = { species: 11, face: 1, x: 112, z: 48, privateField: 'internal' };
+        return Response.json({
+          total: 300,
+          items: 7,
+          bySpecies: [{ id: 11, key: 'fox', name: 'Fox', count: 300, hostile: false }],
+          list: [sample],
+        });
+      }
+      case 'space': {
+        const checkpoint = { ...state.checkpoint, helio: [1, 2, 3] };
+        return Response.json({
+          t: 5,
+          bodies: [
+            {
+              index: 0,
+              name: 'Earth',
+              world: 'earth',
+              parent: -1,
+              radiusMeters: 100,
+              position: [3, 2, 1],
+              atmosphere: true,
+              isLight: false,
+            },
+          ],
+          players: [
+            {
+              id: 2,
+              name: 'Ada',
+              world: null,
+              inSpace: true,
+              helio: [1, 2, 3],
+              account: 'internal',
+            },
+          ],
+          checkpoints: [
+            checkpoint,
+            { ...checkpoint, id: 2, name: 'Public', visibility: 'players' },
+            { ...checkpoint, id: 3, name: 'Unknown', visibility: 'other' },
+          ],
+        });
+      }
       case 'checkpoints':
         return Response.json({ checkpoints: [state.checkpoint] });
       default:
@@ -183,8 +237,13 @@ async function fixture() {
       },
       createOpenworldWorldMap({ db, target, fetcher, now: () => state.clock }),
     );
-    return (path: string, body?: unknown, as: 'owner' | 'sub' = 'sub') =>
-      app.request(`/v1/servers/${id}/openworld/map${path}`, {
+    return (
+      path: string,
+      body?: unknown,
+      as: 'owner' | 'sub' = 'sub',
+      area: 'map' | 'factories' = 'map',
+    ) =>
+      app.request(`/v1/servers/${id}/openworld/${area}${path}`, {
         headers: { 'content-type': 'application/json', 'X-Reader': as },
         method: body ? 'POST' : 'GET',
         body: body ? JSON.stringify(body) : undefined,
@@ -193,7 +252,20 @@ async function fixture() {
   const request = router();
   const ref = async () =>
     (await (await request('', undefined, 'owner')).json()).processRef as string;
-  return { id, db, grant, power, ref, reads, writes, state, target, request, router };
+  return {
+    id,
+    db,
+    grant,
+    power,
+    ref,
+    reads,
+    creatureLimits,
+    writes,
+    state,
+    target,
+    request,
+    router,
+  };
 }
 
 it('requires map access and a matching private process, bounds reads and returns only visible explored columns', async () => {
@@ -559,4 +631,141 @@ it('reports the provider cooldown for map metadata and reuses its verification a
   } finally {
     now.mockRestore();
   }
+});
+
+it('loads factories only with performance access and only while the bound server is running', async () => {
+  const f = await fixture();
+  const factories = () => f.request('', undefined, 'sub', 'factories');
+  await f.grant(read);
+  expect((await factories()).status).toBe(403);
+  await f.grant('game.openworld.performance.read');
+  expect(await (await factories()).json()).toEqual({ error: 'game_not_ready' });
+  expect(f.target).not.toHaveBeenCalled();
+  await f.power('running');
+  const processRef = await f.ref();
+  expect((await f.request(`/space?processRef=${processRef}`)).status).toBe(403);
+  expect((await f.request(`/creatures?world=earth&processRef=${processRef}`)).status).toBe(403);
+  expect(f.reads).toEqual(['chunks']);
+  const responses = await Promise.all([factories(), factories()]);
+  for (const response of responses) {
+    expect(response.headers.get('cache-control')).toBe('private, no-store');
+    expect(await response.json()).toEqual({
+      enabled: true,
+      hz: 19.9,
+      targetHz: 20,
+      stepMs: { p95: 0.06 },
+      counts: { nodes: 34 },
+    });
+  }
+  expect(f.reads.filter((r) => r === 'ovm')).toHaveLength(1);
+  await f.grant(read);
+  expect((await factories()).status).toBe(403);
+  expect(f.writes).toEqual([]);
+});
+
+it('requests the smallest population sample until markers are opened and fences the selected world and process', async () => {
+  const f = await fixture();
+  await f.grant(read);
+  await f.power('running');
+  const processRef = await f.ref();
+  const path = `/creatures?processRef=${processRef}&world=earth`;
+  const counts = await (await f.request(path)).json();
+  expect(counts).toMatchObject({
+    total: 300,
+    items: 7,
+    species: [{ name: 'Fox', count: 300 }],
+    markers: [],
+    markersTruncated: false,
+  });
+  expect(await (await f.request(`${path}&markers=1`)).json()).toMatchObject({
+    markers: [{ species: 11, face: 1, x: 112, z: 48 }],
+    markersTruncated: true,
+  });
+  await f.request(path);
+  expect((await f.request(`${path}&markers=true`)).status).toBe(400);
+  expect((await f.request(`/creatures?processRef=${processRef}&world=unlisted`)).status).toBe(404);
+  expect((await f.request(`/creatures?world=earth&processRef=${'0'.repeat(64)}`)).status).toBe(409);
+  expect(f.creatureLimits).toEqual(['1', '256']);
+  expect(f.writes).toEqual([]);
+});
+
+it('filters a shared orbital snapshot for the current reader, including a revocation during the native read', async () => {
+  const f = await fixture();
+  await f.power('running');
+  const path = `/space?processRef=${await f.ref()}`;
+  const roster = 'game.openworld.players.read',
+    inspect = 'game.openworld.players.inspect';
+  const full = await (await f.request(path, undefined, 'owner')).json();
+  expect(full.players).toEqual([{ id: 2, name: 'Ada', world: null, position: [1, 2, 3] }]);
+  expect(full.checkpoints.map((c: { name: string }) => c.name)).toEqual(['Refuge', 'Public']);
+  expect(JSON.stringify(full)).not.toMatch(/private notes|private owner IP|internal|Unknown/);
+  for (const permissions of [[read], [read, roster], [read, inspect]]) {
+    await f.grant(...permissions);
+    const limited = await (await f.request(path)).json();
+    expect(limited).toMatchObject({
+      bodies: [{ name: 'Earth' }],
+      players: [],
+      checkpoints: [{ name: 'Public' }],
+    });
+  }
+  expect(f.reads.filter((r) => r === 'space')).toHaveLength(4);
+  await f.grant(read, roster, inspect, manage);
+  f.state.clock += 5000;
+  const enter = Promise.withResolvers<void>(),
+    release = Promise.withResolvers<void>();
+  f.state.onRead = async (resource) => {
+    if (resource === 'space') {
+      enter.resolve();
+      await release.promise;
+    }
+  };
+  const pending = f.request(path);
+  await enter.promise;
+  const owner = f.request(path, undefined, 'owner');
+  await f.grant(read, roster);
+  release.resolve();
+  expect(await (await pending).json()).toMatchObject({
+    players: [],
+    checkpoints: [{ name: 'Public' }],
+  });
+  expect((await (await owner).json()).players).toEqual(full.players);
+  expect(f.reads.filter((r) => r === 'space')).toHaveLength(5);
+  await f.grant(roster, inspect, manage);
+  expect((await f.request(path)).status).toBe(403);
+  expect(f.writes).toEqual([]);
+});
+
+it('refreshes orbital checkpoint visibility immediately after an edit on a separate API process', async () => {
+  const f = await fixture();
+  await f.power('running');
+  await f.grant(read);
+  f.state.checkpoint.visibility = 'players';
+  const processRef = await f.ref();
+  const orbital = `/space?processRef=${processRef}`;
+  const mapRead = await f.request(
+    `/checkpoints?world=earth&processRef=${processRef}`,
+    undefined,
+    'owner',
+  );
+  const [checkpoint] = (await mapRead.json()).checkpoints;
+  expect((await (await f.request(orbital)).json()).checkpoints).toHaveLength(2);
+  f.state.onWrite = () => {
+    f.state.checkpoint.visibility = 'admins';
+    return Response.json(f.state.checkpoint);
+  };
+  const change = await f.router()(
+    '/checkpoints',
+    {
+      world: 'earth',
+      processRef,
+      requestId: randomUUID(),
+      action: { kind: 'update', id: checkpoint.id, revision: checkpoint.revision, fields },
+    },
+    'owner',
+  );
+  expect(change.ok).toBe(true);
+  expect(
+    (await (await f.request(orbital)).json()).checkpoints.map((row: { name: string }) => row.name),
+  ).toEqual(['Public']);
+  expect(f.reads.filter((r) => r === 'space')).toHaveLength(2);
 });

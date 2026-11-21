@@ -37,6 +37,7 @@ export type OpenworldScope = {
   liveKey: string;
   origin: string;
   canManageCheckpoints?: boolean;
+  canInspectPlayers?: boolean;
   reason: OpenworldObservationReason | null;
 };
 export type OpenworldPlayerSelection = { id: number; name: string; joinedAt?: number };
@@ -102,7 +103,7 @@ export async function readOpenworldScope(
   db: Kysely<Database>,
   serverId: string,
   reader?:
-    | { who: AuthContext; resource: Resource; playerGrant?: OpenworldPlayerGrant }
+    | { who: AuthContext; resource: Resource | 'factories'; playerGrant?: OpenworldPlayerGrant }
     | {
         who: AuthContext;
         resource: 'map';
@@ -169,6 +170,7 @@ export async function readOpenworldScope(
     .executeTakeFirst();
   if (!scope) throw new DomainError('not_found');
   let canManageCheckpoints = false;
+  let canInspectPlayers = false;
   if (reader) {
     const { who, resource } = reader;
     const definitions = serverPermissionDefinitionsForGame('openworld');
@@ -185,12 +187,13 @@ export async function readOpenworldScope(
           );
     if (reader.resource === 'map') {
       canManageCheckpoints = keys.includes('game.openworld.checkpoints.manage');
+      canInspectPlayers =
+        keys.includes('game.openworld.players.read') &&
+        keys.includes('game.openworld.players.inspect');
       if (
         !keys.includes('game.openworld.map.read') ||
         (reader.manageCheckpoints && !canManageCheckpoints) ||
-        (reader.requirePlayerInspection &&
-          (!keys.includes('game.openworld.players.read') ||
-            !keys.includes('game.openworld.players.inspect')))
+        (reader.requirePlayerInspection && !canInspectPlayers)
       )
         throw new DomainError('forbidden');
     } else {
@@ -258,6 +261,7 @@ export async function readOpenworldScope(
     binding,
     liveKey,
     canManageCheckpoints,
+    canInspectPlayers,
     reason: null,
     origin: `http://${host}:${scope.port}`,
   };

@@ -137,6 +137,23 @@ return to the player's position. A reconnected player's previous marker cannot o
 the new session. The existing moderation grant still covers teleport to the game's
 checkpoint destinations.
 
+**Factories** uses the performance permission. It shows the factory simulation's
+measured and target frequency, step time (including p95), power production and
+consumption, battery storage, and items and fluids in transit. The most expensive
+columns link to their location when the reader also has map access.
+
+In **Map**, select **Creatures** to see the active population by species and the
+number of items on the ground in the selected world. Enable creature positions to
+request up to 256 markers. The population totals cover the active simulation even
+when the map displays a sample. Creatures stored in a save can be outside this
+population.
+
+Select **Space** to explore the celestial system and its checkpoints. A body with a
+terrain map can be opened directly. Orbital player positions require roster and
+inspection access. Administrative checkpoints require the checkpoint management
+permission. The orbital view omits checkpoint notes. Opening the terrain map alone
+does not request the factory, creature or orbital feeds.
+
 The verified Linux builds are a1.0.11–a1.0.13, a1.1.0–a1.1.3, a1.2.0–a1.2.9 and
 pre-a1.2.0-1. The a1.0.10 package requires glibc 2.38 and cannot run on the Debian
 Bookworm image used by this egg. When that release is present in the catalog, the

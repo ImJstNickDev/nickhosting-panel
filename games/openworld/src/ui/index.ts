@@ -14,7 +14,9 @@ import {
 } from '../dashboard-ui.js';
 import { openworldSupportsRuntime, openworldVersionDelivery } from '../version-policy.js';
 import { openworldGameArtwork, openworldRuntimeArtwork } from './artwork.js';
+import { openworldFactoriesCatalogs } from './factories-catalog.js';
 import { openworldMapCatalogs } from './map-catalog.js';
+import { openworldMapLayerCatalogs } from './map-layers-catalog.js';
 import { openworldTelemetryCatalogs } from './telemetry-catalog.js';
 
 const catalogSchema = z.object({
@@ -148,6 +150,17 @@ export const openworldUiModule = defineTrustedGameUiModule({
         columns: [],
         forms: [],
       },
+      {
+        id: 'factories',
+        titleKey: 'games.openworld.factories.title',
+        loader: 'telemetry',
+        renderer: 'openworld-factories',
+        navigation: { group: 'tools', order: 35, icon: 'network', placement: 'sidebar' },
+        requiredPermissions: ['game.openworld.performance.read'],
+        requiredCapabilities: [],
+        columns: [],
+        forms: [],
+      },
       openworldDashboardSection,
     ],
     ports: [
@@ -187,6 +200,8 @@ export const openworldUiModule = defineTrustedGameUiModule({
       ...openworldDashboardCatalogs.en,
       ...openworldTelemetryCatalogs.en,
       ...openworldMapCatalogs.en,
+      ...openworldFactoriesCatalogs.en,
+      ...openworldMapLayerCatalogs.en,
       'games.openworld.permissions.viewPlayers': 'View players',
       'games.openworld.permissions.inspect': 'Inspect player details',
       'games.openworld.permissions.inspectHelp':
@@ -197,7 +212,7 @@ export const openworldUiModule = defineTrustedGameUiModule({
       'games.openworld.permissions.screenshots': 'Request and view game screenshots',
       'games.openworld.permissions.screenshotsHelp':
         'Request a capture from a connected player and view the shared gallery for this server. Requires access to the player list.',
-      'games.openworld.permissions.viewPerformance': 'View overview and performance',
+      'games.openworld.permissions.viewPerformance': 'View overview, performance and factories',
     },
     it: {
       'games.openworld.gamePort': 'Gioco',
@@ -212,6 +227,8 @@ export const openworldUiModule = defineTrustedGameUiModule({
       ...openworldDashboardCatalogs.it,
       ...openworldTelemetryCatalogs.it,
       ...openworldMapCatalogs.it,
+      ...openworldFactoriesCatalogs.it,
+      ...openworldMapLayerCatalogs.it,
       'games.openworld.permissions.viewPlayers': 'Visualizza i giocatori',
       'games.openworld.permissions.inspect': 'Ispeziona i dettagli dei giocatori',
       'games.openworld.permissions.inspectHelp':
@@ -222,7 +239,8 @@ export const openworldUiModule = defineTrustedGameUiModule({
       'games.openworld.permissions.screenshots': 'Richiedi e visualizza screenshot di gioco',
       'games.openworld.permissions.screenshotsHelp':
         'Richiedi una cattura a un giocatore connesso e consulta la galleria condivisa del server. Richiede l’accesso all’elenco dei giocatori.',
-      'games.openworld.permissions.viewPerformance': 'Visualizza panoramica e prestazioni',
+      'games.openworld.permissions.viewPerformance':
+        'Visualizza panoramica, prestazioni e fabbriche',
     },
   },
   handlers: {
