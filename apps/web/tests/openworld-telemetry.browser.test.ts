@@ -58,6 +58,7 @@ const sample = {
     players: { online: 2, slots: 12 },
     tickMs: { mean: 12, p99: 25, max: 36 },
     tickBudgetMs: 50,
+    worldTime: { dayFraction: 0.65625, dayLengthS: 1200 },
     phasesMs: { net: 0.4, chunks: 6.5, sim: 3.1 },
     memory: { rssMB: 140 },
     uptimeS: 7250,
@@ -259,7 +260,61 @@ it('displays independent performance resources and current bitrates on mobile It
     await page.goto(`${url}telemetry-fixture?section=overview`);
     await check(page.getByText('2 / 12', { exact: true })).toBeVisible();
     await check(page.getByText('10 Mb/s', { exact: true })).toBeVisible();
+    const clock = page.locator('.ow-world-clock');
+    await check(clock).toContainText('Ora del mondo');
+    await check(clock.locator('time')).toHaveText('15:45');
+    await check(clock.locator('.ow-cycle')).toHaveAttribute('aria-hidden', 'true');
+    expect(
+      Number.parseFloat((await clock.locator('circle').getAttribute('cy')) ?? ''),
+    ).toBeLessThan(50);
     await fits(page);
+    await page.locator('.ow-workspace').screenshot({ path: `${shots}/world-clock-mobile-it.png` });
+  } finally {
+    await context.close();
+  }
+});
+it('keeps the last observed world time while offline and leaves a missing clock unknown', async () => {
+  const context = await browser.newContext({
+    locale: 'en-GB',
+    viewport: { width: 1280, height: 800 },
+  });
+  const page = await context.newPage();
+  try {
+    await serve(page, true);
+    let worldTime: { dayFraction: number } | undefined = { dayFraction: 0 };
+    let statusReads = 0;
+    await page.route('**/telemetry/status', (route) => {
+      statusReads++;
+      return route.fulfill({
+        json: {
+          data: { ...sample.status, worldTime },
+          source: 'snapshot',
+          observedAt: instant,
+          reason: 'offline',
+        },
+      });
+    });
+    await page.clock.install();
+    await page.goto(`${url}telemetry-fixture?section=overview&offline`);
+    const clock = page.locator('.ow-world-clock');
+    await check(page.locator('.ow-stamp time')).toHaveAttribute('datetime', instant);
+    await check(clock.locator('time')).toHaveText('00:00');
+    expect(
+      Number.parseFloat((await clock.locator('circle').getAttribute('cy')) ?? ''),
+    ).toBeGreaterThan(50);
+    await page.clock.fastForward(60000);
+    await check(clock.locator('time')).toHaveText('00:00');
+    expect(statusReads).toBe(1);
+    await fits(page);
+    await page
+      .locator('.ow-workspace')
+      .screenshot({ path: `${shots}/world-clock-midnight-en.png` });
+
+    worldTime = undefined;
+    await page.reload();
+    await check(page.getByText('2 / 12', { exact: true })).toBeVisible();
+    await check(clock.getByText('Unavailable', { exact: true })).toBeVisible();
+    await check(clock.locator('time')).toHaveCount(0);
   } finally {
     await context.close();
   }

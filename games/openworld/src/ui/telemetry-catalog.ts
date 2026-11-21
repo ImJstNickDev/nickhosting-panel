@@ -128,6 +128,7 @@ const messages: Record<string, [string, string]> = {
   admitted: ['In game', 'In gioco'],
   tps: ['Ticks per second', 'Tick al secondo'],
   uptime: ['Uptime', 'Tempo di attività'],
+  worldTime: ['World time', 'Ora del mondo'],
   memory: ['Game process memory', 'Memoria del processo di gioco'],
   gameTick: ['Game tick', 'Tick di gioco'],
   tickMean: ['Mean tick', 'Tick medio'],

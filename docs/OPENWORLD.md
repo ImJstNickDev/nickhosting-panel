@@ -88,7 +88,8 @@ The browser uses a separate, host-only dashboard cookie. Native credentials stay
 private side of the proxy.
 
 Inside NickPanel, **Overview** shows player counts, TPS, memory, current inbound and
-outbound traffic, and world generation. **Performance** adds tick timings, the game's
+outbound traffic, and world generation. Its 24-hour clock plots the observed world time
+on a day/night curve. **Performance** adds tick timings, the game's
 recent metric history, chunks and storage. Both use the Openworld performance read
 permission. **Players** lists the current roster. Opening a player's detailed statistics,
 position and inventory also requires the separate inspection permission. These tabs use

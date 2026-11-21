@@ -139,6 +139,44 @@
 .ow-pair .ow-metrics {
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }
+.ow-world-clock {
+  display: grid;
+  grid-template-columns: minmax(max-content, 1fr) minmax(0, 2fr);
+  align-items: center;
+  gap: 20px;
+  margin-top: 20px;
+  padding: 14px 5px 0 0;
+  border-top: 1px solid var(--line);
+}
+.ow-world-clock h3 {
+  margin: 0 0 4px;
+  color: var(--muted);
+  font-size: 0.8rem;
+  font-weight: 500;
+}
+.ow-world-clock time {
+  font-size: 1.25rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.ow-world-clock span {
+  color: var(--muted);
+  font-size: 0.88rem;
+}
+.ow-cycle {
+  display: block;
+  justify-self: end;
+  overflow: visible;
+  width: 100%;
+  max-width: 520px;
+  height: 52px;
+}
+.ow-cycle-day {
+  color: #ac772f;
+}
+.ow-cycle-night {
+  color: #647c97;
+}
 .ow-disclosure {
   margin-top: 18px;
   padding-top: 14px;
