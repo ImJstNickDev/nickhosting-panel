@@ -61,17 +61,26 @@
 .installer-actions button {
   min-width: 6rem;
 }
+.installer-shell:has(.installer-games) {
+  width: min(100%, 72rem);
+}
+.installer-form:has(.installer-games) {
+  grid-template-rows: none;
+  row-gap: 1rem;
+}
+.installer-form .installer-content:has(.installer-games) {
+  container-type: inline-size;
+  overflow: visible;
+}
 .installer-games {
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: center;
-  align-items: stretch;
-  gap: 16px;
-  padding: 4px;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 14rem), 1fr));
+  gap: 1rem;
 }
 .installer-games .game-card {
-  flex: 0 0 min(100%, 256px);
-  width: min(100%, 256px);
+  width: 100%;
+  max-width: 26rem;
+  justify-self: center;
   min-width: 0;
   gap: 0;
   padding: 0;
@@ -97,6 +106,21 @@
   min-height: 3.5rem;
   padding: 0.75rem 1rem;
   overflow-wrap: anywhere;
+}
+@container (max-width: 29rem) {
+  .installer-games {
+    grid-template-columns: 1fr;
+    gap: 0.625rem;
+  }
+  .installer-games .game-card {
+    display: grid;
+    grid-template-columns: min(30%, 7rem) minmax(0, 1fr);
+  }
+  .installer-game-art {
+    height: 100%;
+    min-height: 3.5rem;
+    aspect-ratio: auto;
+  }
 }
 .installer-game-selected {
   flex: 0 0 1rem;
