@@ -22,6 +22,11 @@ The node needs a private backend pool even when gameplay uses direct delivery. D
 also needs an explicitly configured advertised endpoint. Openworld uses an address and
 port. No SRV or hostname-based multiplexing is declared.
 
+The wizard filters versions when the user selects a node. A node configured exclusively
+for Gateway delivery offers a1.2.9. A node configured for direct delivery can also offer
+other releases published in the catalog. NickHosting checks available allocations when
+the user submits the request.
+
 For standalone installations, the egg can retrieve the requested release from the publisher.
 NickHosting issues a short-lived URL for the pinned ZIP during provider handoff.
 The upstream bearer stays in NickHosting. The installer verifies the package, stages its
@@ -33,8 +38,9 @@ After changing the installer or launch helper, regenerate the JSON using
 
 Under **Owner → Settings → Credentials**, set the global Metiva access token.
 Under **Owner → Integrations → Openworld → General**, an integration token overrides it.
-Removing the override restores inheritance. The fields are write-only. Environment
-overrides are documented in [.env.example](../.env.example).
+Removing the override restores inheritance. The fields are write-only. Container overrides use the
+`NH_DEV_` or `NH_PROD_` prefix for their deployment. Both scopes are listed in
+[.env.example](../.env.example).
 
 The Linux x64 catalog comes from Metiva first. If unavailable, NickHosting reads the
 publisher's paginated manifests. Downloads from either source must match the selected

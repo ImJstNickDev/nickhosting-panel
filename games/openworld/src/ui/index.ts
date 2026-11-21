@@ -4,6 +4,7 @@ import {
   type GameUiHandler,
   gameUiDescriptorSchema,
   type UiOption,
+  type UiValues,
 } from '@nickhosting/game-sdk/ui';
 import { z } from 'zod';
 import {
@@ -11,10 +12,17 @@ import {
   openworldDashboardHandlers,
   openworldDashboardSection,
 } from '../dashboard-ui.js';
+import { openworldVersionDelivery } from '../version-policy.js';
 import { openworldGameArtwork, openworldRuntimeArtwork } from './artwork.js';
 
 const catalogSchema = z.object({
-  mappings: z.array(z.object({ mappingId: z.uuid(), node: z.number().int() })),
+  mappings: z.array(
+    z.object({
+      mappingId: z.uuid(),
+      node: z.number().int(),
+      delivery: z.object({ direct: z.boolean(), gateway: z.boolean() }),
+    }),
+  ),
   versions: z.array(z.string()),
 });
 const catalog = async (client: GameUiClient, signal?: AbortSignal) =>
@@ -24,29 +32,35 @@ const runtimeArtwork = {
   presentation: openworldRuntimeArtwork.presentation,
   tone: openworldRuntimeArtwork.tone,
 };
-function options(raw: unknown, handler: string): UiOption[] {
+function options(raw: unknown, handler: string, values: UiValues): UiOption[] {
   const { mappings, versions } = catalogSchema.parse(raw);
-  if (handler === 'versions')
-    return versions.map((version, index) => ({
-      value: version,
-      label: version,
-      latest: index === 0,
-      disabled: false,
-    }));
-  return mappings.map(({ mappingId, node }) => ({
+  if (handler === 'versions') {
+    const mapping = mappings.find((m) => m.mappingId === values.mappingId);
+    if (!mapping) return [];
+    return versions
+      .filter((version) => openworldVersionDelivery(version, mapping.delivery))
+      .map((version, index) => ({
+        value: version,
+        label: version,
+        latest: version === versions[0],
+        recommended: index === 0,
+        disabled: false,
+      }));
+  }
+  return mappings.map(({ mappingId, node, delivery }) => ({
     value: mappingId,
     ...(mappings.length === 1
       ? { labelKey: 'games.openworld.runtime' }
       : { label: `Openworld · #${node}` }),
     ...(openworldRuntimeArtwork.src ? { artwork: runtimeArtwork } : {}),
     recommended: mappings.length === 1,
-    disabled: false,
+    disabled: !versions.some((version) => openworldVersionDelivery(version, delivery)),
   }));
 }
 const choicesHandler =
   (handler: string): GameUiHandler =>
   async (client, ctx) =>
-    options(await catalog(client, ctx.signal), handler);
+    options(await catalog(client, ctx.signal), handler, ctx.values);
 
 export const openworldUiModule = defineTrustedGameUiModule({
   descriptor: gameUiDescriptorSchema.parse({
@@ -68,13 +82,14 @@ export const openworldUiModule = defineTrustedGameUiModule({
           type: 'choice',
           labelKey: 'games.openworld.version',
           required: true,
-          source: { handler: 'versions' },
+          source: { handler: 'versions', dependsOn: ['mappingId'] },
         },
       ],
       pages: [
         {
           id: 'runtime',
           field: 'mappingId',
+          resetFields: ['version'],
           kind: 'choice-list',
           titleKey: 'games.openworld.runtime',
         },

@@ -3,8 +3,10 @@ import { createSocket } from 'node:dgram';
 import { isIP } from 'node:net';
 import type { GatewayProtocolAdapter, GatewayProtocolContext } from '@nickhosting/game-sdk';
 
+import { openworldGatewayVersion } from './version-policy.js';
+
 const magic = Buffer.from('OWMU');
-const statusVersion = 'a1.2.9';
+
 const maxStatusBytes = 8192;
 const utf8 = new TextDecoder('utf-8', { fatal: true });
 
@@ -107,7 +109,7 @@ export const openworldGatewayAdapter: GatewayProtocolAdapter = {
   startupHint: 'provider_running',
   supports: (route) =>
     route.protocol?.handlerId === 'openworld' &&
-    route.protocol.gameVersion === statusVersion &&
+    route.protocol.gameVersion === openworldGatewayVersion &&
     route.protocol.role === 'game' &&
     route.public.transport === 'udp',
   isStatusDatagram(input, direction) {

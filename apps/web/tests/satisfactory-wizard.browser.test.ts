@@ -12,6 +12,7 @@ import { createServer, type ViteDevServer } from 'vite';
 import { afterAll, afterEach, beforeAll, beforeEach, expect, it } from 'vitest';
 
 const id = '10000000-0000-4000-8000-000000000001';
+const directMappingId = '10000000-0000-4000-8000-000000000002';
 let vite: ViteDevServer, browser: Browser, context: BrowserContext, page: Page, origin: string;
 let writes: Record<string, unknown>[], errors: string[];
 beforeAll(async () => {
@@ -71,7 +72,13 @@ beforeEach(async () => {
       });
     }
     if (path === '/v1/games/openworld/choices')
-      return response({ mappings: [{ mappingId: id, node: 1 }], versions: ['a1.2.9', 'a1.2.8'] });
+      return response({
+        mappings: [
+          { mappingId: id, node: 1, delivery: { gateway: true, direct: false } },
+          { mappingId: directMappingId, node: 2, delivery: { gateway: false, direct: true } },
+        ],
+        versions: ['a1.2.10', 'a1.2.9', 'a1.2.8'],
+      });
     if (path === '/v1/games')
       return response([
         { id: 'openworld', access: { canCreate: true }, manifest: { runtimes: ['dedicated'] } },
@@ -249,18 +256,21 @@ it.each(['en', 'it'])(
       .getByLabel(locale === 'en' ? 'Server name' : 'Nome del server', { exact: true })
       .fill('Openworld QA');
     await next(locale);
-    await page
-      .locator('.installer-choice-card')
-      .filter({
-        has: page.getByRole('radio', {
-          name: locale === 'en' ? /Dedicated server/ : /Server dedicato/,
-        }),
-      })
-      .click();
+    await select('Openworld · #2');
     await next(locale);
     await page
       .locator('.installer-version')
-      .filter({ has: page.getByRole('radio', { name: 'a1.2.8', exact: true }) })
+      .filter({ has: page.getByRole('radio', { name: /a1\.2\.8/ }) })
+      .click();
+    await page
+      .getByRole('button', { name: locale === 'en' ? 'Back' : 'Indietro', exact: true })
+      .click();
+    await select('Openworld · #1');
+    await next(locale);
+    await check(page.getByRole('radio', { name: /a1\.2\.(8|10)/ })).toHaveCount(0);
+    await page
+      .locator('.installer-version')
+      .filter({ has: page.getByRole('radio', { name: /a1\.2\.9/ }) })
       .click();
     await page.screenshot({ path: `test-results/openworld-wizard-${locale}.png`, fullPage: true });
     await next(locale);
@@ -272,7 +282,7 @@ it.each(['en', 'it'])(
     expect(writes).toHaveLength(1);
     expect(writes[0]).toMatchObject({
       mappingId: id,
-      game: { id: 'openworld', configuration: { version: 'a1.2.8' } },
+      game: { id: 'openworld', configuration: { version: 'a1.2.9' } },
     });
   },
 );

@@ -53,6 +53,7 @@ import {
   assertBackendPoolNamespace,
   assignRoleAllocations,
   canonicalAllocationAddress,
+  gatewayListenerConflicts,
   poolAllowsLoopbackEgg,
   validatedBackendInventory,
 } from './allocation-pool.js';
@@ -836,12 +837,32 @@ export async function createManagedServer(
         ?.manifest.ports.filter((port) => port.visibility === 'private')
         .map((port) => port.role),
     );
+    const gatewayAddress =
+      pool.gatewayBindAddresses.length === 1 ? pool.gatewayBindAddresses[0] : undefined;
+    const listener =
+      connectionMode === 'gateway' &&
+      gatewayAddress &&
+      config.gatewayId &&
+      config.gatewayPhysicalHostId === node.physical_host_id &&
+      module?.gatewayPolicyBinding &&
+      module.manifest.capabilities.readiness
+        ? {
+            address: gatewayAddress,
+            conflicts: await gatewayListenerConflicts(
+              tx,
+              node.physical_host_id,
+              config.gatewayId,
+              env,
+            ),
+          }
+        : undefined;
     const assignedRoles = assignRoleAllocations(
       roles,
       privateRoles,
       free,
       connectionMode,
       pool.gatewayBindAddresses.length > 0,
+      listener,
     );
     const serverId = randomUUID(),
       jobId = randomUUID(),

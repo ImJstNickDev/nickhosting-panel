@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
-import { SecretCodec } from '@nickhosting/core';
+import { DomainError, SecretCodec } from '@nickhosting/core';
 import { createTestDatabase } from '@nickhosting/database/testing';
 import type { Egg, ProvisionPlan } from '@nickhosting/pterodactyl-adapter';
 import { Hono } from 'hono';
@@ -33,11 +33,15 @@ afterAll(async () => {
 });
 
 it.each([
-  ['a1.2.9', 'gateway'],
-  ['a1.2.8', 'direct'],
+  ['a1.2.9', 'gateway', 'gateway-only'],
+  ['a1.2.8', 'direct', 'mixed'],
+  ['a1.2.9', 'direct', 'direct-only'],
+  ['a1.2.9', 'gateway', 'local-conflict'],
+  ['a1.2.9', 'gateway', 'sibling-conflict'],
+  ['a1.2.9', 'direct', 'all-conflict'],
 ] as const)(
-  'pins %s in the creation API and selects %s transport with a private dashboard',
-  async (version, mode) => {
+  'pins %s in the creation API and selects %s transport with a private dashboard in %s pools',
+  async (version, mode, poolMode) => {
     const f = await managementFixture(database.db, { interactive: true });
     const env = {
       NH_GATEWAY_ENABLED: 'true',
@@ -58,7 +62,7 @@ it.each([
       .values({ integration_id: 'openworld', state: 'public', allowlist: [] })
       .onConflict((c) => c.column('integration_id').doNothing())
       .execute();
-    if (mode === 'direct') {
+    if (poolMode !== 'gateway-only') {
       const pool = (
         await f.db
           .selectFrom('managed_nodes')
@@ -68,14 +72,50 @@ it.each([
       ).backend_allocation_pool;
       const allocation = f.inventory[0];
       if (!pool || !allocation) throw new Error('Missing fixture allocation');
-      allocation.ip = '192.0.2.120';
-      pool.allocations[0] = {
-        allocationId: allocation.id,
-        address: allocation.ip,
-        port: allocation.port,
-        delivery: 'direct',
-        directEndpoint: { hostname: 'instance.test', port: allocation.port },
-      };
+      if (poolMode.endsWith('-conflict')) {
+        pool.allocations = pool.allocations.slice(0, 2);
+        const gatewayAddress = pool.gatewayBindAddresses[0];
+        if (!gatewayAddress) throw new Error('Missing fixture gateway');
+        const pins = (poolMode === 'all-conflict' ? [0, 1] : [1]).map((index) => {
+          const providerPin = f.inventory[2 + index];
+          const privatePin = f.inventory[index];
+          if (!providerPin || !privatePin) throw new Error('Missing fixture allocation');
+          providerPin.ip = gatewayAddress;
+          providerPin.port = privatePin.port;
+          return {
+            allocationId: providerPin.id,
+            address: providerPin.ip,
+            port: providerPin.port,
+            delivery: 'direct' as const,
+            directEndpoint: { hostname: `${poolMode}.instance.test`, port: providerPin.port },
+          };
+        });
+        if (poolMode === 'sibling-conflict') {
+          const sibling = await managementFixture(database.db);
+          await f.db
+            .updateTable('managed_nodes')
+            .set({
+              physical_host_id: f.hostId,
+              enabled: false,
+              backend_allocation_pool: JSON.stringify({
+                gatewayBindAddresses: [],
+                allocations: pins,
+              }),
+            })
+            .where('id', '=', sibling.nodeId)
+            .execute();
+        } else pool.allocations.push(...pins);
+      } else {
+        if (poolMode === 'direct-only') pool.gatewayBindAddresses = [];
+        allocation.ip = '192.0.2.120';
+        pool.allocations[0] = {
+          allocationId: allocation.id,
+          address: allocation.ip,
+          port: allocation.port,
+          delivery: 'direct',
+          directEndpoint: { hostname: `${poolMode}.instance.test`, port: allocation.port },
+        };
+      }
       await f.db
         .updateTable('managed_nodes')
         .set({ backend_allocation_pool: JSON.stringify(pool) })
@@ -120,6 +160,14 @@ it.each([
       enabled: true,
     });
     const app = new Hono<{ Variables: Variables }>();
+    app.onError((err) => {
+      if (err instanceof DomainError)
+        return new Response(JSON.stringify({ code: err.code }), {
+          status: err.status,
+          headers: { 'content-type': 'application/json' },
+        });
+      throw err;
+    });
     const options = {
       db: f.db,
       env,
@@ -135,10 +183,20 @@ it.each([
     };
     registerOpenworldRoutes(app, options);
     registerServerRoutes(app, options);
+    const requestsBeforeChoices = vi.mocked(f.adapter.listAllocations).mock.calls.length;
     const choices = await app.request('/v1/games/openworld/choices');
+    expect(f.adapter.listAllocations).toHaveBeenCalledTimes(requestsBeforeChoices);
     expect(await choices.json()).toMatchObject({
       versions: [version],
-      mappings: expect.arrayContaining([expect.objectContaining({ mappingId: mapping.id })]),
+      mappings: expect.arrayContaining([
+        expect.objectContaining({
+          mappingId: mapping.id,
+          delivery: {
+            gateway: poolMode !== 'direct-only' && poolMode !== 'all-conflict',
+            direct: poolMode !== 'gateway-only' && poolMode !== 'sibling-conflict',
+          },
+        }),
+      ]),
     });
     const request = f.input({
       mappingId: mapping.id,
@@ -150,6 +208,19 @@ it.each([
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify(request),
       });
+    if (poolMode === 'gateway-only') {
+      const rejected = await app.request('/v1/servers', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          ...request,
+          game: { id: 'openworld', configuration: { version: 'a1.2.8' } },
+        }),
+      });
+      expect(rejected.status).toBe(409);
+      expect(await rejected.json()).toEqual({ code: 'direct_connection_unavailable' });
+      expect(f.adapter.listAllocations).toHaveBeenCalledTimes(requestsBeforeChoices);
+    }
     const accepted = await submit();
     expect(accepted.status).toBe(202);
     const created = (await accepted.json()) as { serverId: string; jobId: string };
@@ -167,6 +238,10 @@ it.each([
       .execute();
     expect(row.connection_mode).toBe(mode);
     const dashboard = allocations.find((alloc) => alloc.role === 'dashboard');
+    if (poolMode === 'local-conflict' || poolMode === 'sibling-conflict') {
+      expect(allocations.find((a) => a.role === 'game')?.port).toBe(f.inventory[0]?.port);
+      expect(dashboard?.port).toBe(f.inventory[1]?.port);
+    }
     expect(dashboard).toMatchObject({
       private_only: true,
       direct_endpoint: null,

@@ -10,7 +10,7 @@ export function registerOpenworldRoutes(
   { db, codec, env, principal }: Pick<ServerRouteOptions, 'db' | 'env' | 'codec' | 'principal'>,
 ) {
   app.get('/v1/games/openworld/choices', async (c) => {
-    const mappings = await openworldCreationChoices(db, await principal(c));
+    const mappings = await openworldCreationChoices(db, await principal(c), env);
     if (!codec) throw new DomainError('integration_unavailable');
     const releases = mappings.length ? await listOpenworldReleases(db, codec, env) : [];
     return c.json({ mappings, versions: releases.map(({ version }) => version) });

@@ -190,10 +190,23 @@ export function gameMetivaSecret(gameId: string): `metiva:${string}` {
 
 type StoredSecret = SecretName | ReturnType<typeof gameMetivaSecret>;
 
-function envName(name: StoredSecret): string {
-  if (name.startsWith('metiva:'))
-    return `NH_METIVA_ACCESS_TOKEN_${name.slice(7).toUpperCase().replaceAll('-', '_')}`;
-  return secretEnv[name as SecretName];
+function envName(name: StoredSecret, env: Environment): string {
+  if (name !== 'metivaAccessToken' && !name.startsWith('metiva:'))
+    return secretEnv[name as SecretName];
+  const suffix =
+    name === 'metivaAccessToken' ? '' : `_${name.slice(7).toUpperCase().replaceAll('-', '_')}`;
+  // The container entrypoint preserves its own deployment's scoped variables.
+  // A deployed process must not consume a local or other deployment's credential.
+  switch (env.NH_DEPLOYMENT_ENV) {
+    case 'development':
+      return `NH_DEV_METIVA_ACCESS_TOKEN${suffix}`;
+    case 'production':
+      return `NH_PROD_METIVA_ACCESS_TOKEN${suffix}`;
+    case undefined:
+      return `NH_METIVA_ACCESS_TOKEN${suffix}`;
+    default:
+      throw new DomainError('configuration_invalid');
+  }
 }
 
 export async function getSecret(
@@ -202,7 +215,7 @@ export async function getSecret(
   name: StoredSecret,
   env: Environment = {},
 ) {
-  const override = env[envName(name)];
+  const override = env[envName(name, env)];
   if (override !== undefined) {
     if (!override.trim()) throw new DomainError('configuration_invalid');
     return override;
@@ -222,9 +235,9 @@ export async function secretStatus(db: DB, env: Environment = {}) {
     .filter((name) => name !== 'pterodactylClientKey')
     .map((name) => ({
       name,
-      configured: env[envName(name)] !== undefined || rows.some((r) => r.name === name),
-      source: env[envName(name)] !== undefined ? 'environment' : 'database',
-      locked: env[envName(name)] !== undefined,
+      configured: env[envName(name, env)] !== undefined || rows.some((r) => r.name === name),
+      source: env[envName(name, env)] !== undefined ? 'environment' : 'database',
+      locked: env[envName(name, env)] !== undefined,
     }));
 }
 
@@ -237,7 +250,7 @@ export async function storeSecret(
   env: Environment = {},
 ) {
   regularOwner(context);
-  if (env[envName(name)] !== undefined) throw new DomainError('conflict');
+  if (env[envName(name, env)] !== undefined) throw new DomainError('conflict');
   if (
     (name === 'metivaAccessToken' || name.startsWith('metiva:')) &&
     !/^mtv_[A-Za-z0-9_-]{1,1024}$/.test(value)
@@ -261,7 +274,7 @@ export async function clearMetivaSecret(
   env: Environment = {},
 ) {
   regularOwner(context);
-  if (env[envName(name)] !== undefined) throw new DomainError('conflict');
+  if (env[envName(name, env)] !== undefined) throw new DomainError('conflict');
   await db.transaction().execute(async (tx) => {
     await tx.deleteFrom('encrypted_secrets').where('name', '=', name).execute();
     await recordAudit(tx, context, 'secret.removed', { name });
@@ -282,11 +295,11 @@ export async function getGameMetivaStatus(
     .where('name', 'in', [name, 'metivaAccessToken'])
     .execute();
   const configured = (id: StoredSecret) =>
-    env[envName(id)] !== undefined || rows.some((row) => row.name === id);
+    env[envName(id, env)] !== undefined || rows.some((row) => row.name === id);
   return {
     configured: configured(name),
     inherited: configured('metivaAccessToken'),
-    locked: env[envName(name)] !== undefined,
+    locked: env[envName(name, env)] !== undefined,
   };
 }
 
@@ -341,7 +354,7 @@ export async function saveBootstrapConfiguration(
     ['pterodactylApplicationKey', input.pterodactylApplicationKey],
   ];
   for (const [name, value] of entries) {
-    if (value && env[envName(name)] === undefined)
+    if (value && env[envName(name, env)] === undefined)
       await client.query(
         'INSERT INTO encrypted_secrets(name,envelope) VALUES ($1,$2) ON CONFLICT(name) DO UPDATE SET envelope=excluded.envelope,updated_at=now()',
         [name, JSON.stringify(codec.encrypt(value, name))],

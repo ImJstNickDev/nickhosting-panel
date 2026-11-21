@@ -1,4 +1,9 @@
-import { type AuthContext, DomainError, type SecretCodec } from '@nickhosting/core';
+import {
+  type AuthContext,
+  DomainError,
+  type PlatformConfig,
+  type SecretCodec,
+} from '@nickhosting/core';
 import { gameCatalog, getSettings } from '@nickhosting/database';
 import { z } from 'zod';
 import {
@@ -7,7 +12,19 @@ import {
   openworldTransientConfig,
 } from '../../../games/openworld/src/dashboard-launch.js';
 import { openworldManifest } from '../../../games/openworld/src/manifest.js';
+import {
+  openworldGatewayVersion,
+  openworldVersionDelivery,
+} from '../../../games/openworld/src/version-policy.js';
 import type { DB, Environment } from './admission.js';
+import {
+  assignRoleAllocations,
+  backendAllocationAddress,
+  effectiveBackendAllocationPool,
+  type GatewayListenerConflict,
+  gatewayListenerConflicts,
+  poolAllowsLoopbackEgg,
+} from './allocation-pool.js';
 import type { GameRuntimeHooks, TrustedGameModule } from './game-modules.js';
 import type { GameLifecycleContext } from './lifecycle.js';
 import { issueOpenworldArtifactUrl, listOpenworldReleases } from './openworld-catalog.js';
@@ -18,7 +35,18 @@ function eligibleMappings(db: DB) {
   return db
     .selectFrom('runtime_egg_mappings as m')
     .innerJoin('managed_nodes as n', 'n.id', 'm.node_id')
-    .select(['m.id as mappingId', 'n.pterodactyl_node_id as node'])
+    .innerJoin('physical_hosts as h', 'h.id', 'n.physical_host_id')
+    .select([
+      'm.id as mappingId',
+      'm.nest_id',
+      'm.egg_id',
+      'm.port_roles',
+      'n.id',
+      'n.physical_host_id',
+      'n.backend_allocation_pool',
+      'n.pterodactyl_node_id as node',
+    ])
+    .where('h.enabled', '=', true)
     .where('m.game_id', '=', id)
     .where('m.runtime_id', '=', 'dedicated')
     .where('m.enabled', '=', true)
@@ -26,13 +54,92 @@ function eligibleMappings(db: DB) {
     .orderBy('n.pterodactyl_node_id');
 }
 
-export async function openworldCreationChoices(db: DB, context: AuthContext) {
-  const game = (await gameCatalog(db, context)).find((entry) => entry.id === id);
-  if (!game?.access.canCreate) throw new DomainError('forbidden');
-  return eligibleMappings(db).execute();
+type Mapping = Awaited<ReturnType<ReturnType<typeof eligibleMappings>['execute']>>[number];
+const privateRoles = new Set(
+  openworldManifest.ports.filter((p) => p.visibility === 'private').map((p) => p.role),
+);
+
+function configuredDelivery(
+  mapping: Mapping,
+  settings: PlatformConfig,
+  env: Environment,
+  conflicts?: GatewayListenerConflict,
+) {
+  const pool = effectiveBackendAllocationPool(mapping, env);
+  if (!pool) return { gateway: false, direct: false };
+  const allowLoopback = poolAllowsLoopbackEgg(pool, mapping);
+  const candidates = pool.allocations
+    .filter((pin) => pin.address !== '127.0.0.1' || allowLoopback)
+    .map((pin) => ({
+      ...pin,
+      backendAddress: backendAllocationAddress(pin),
+      id: pin.allocationId,
+      ip: pin.address,
+      assigned: false,
+    }));
+  const bind = pool.gatewayBindAddresses[0];
+  const gateway = Boolean(
+    settings.gatewayEnabled &&
+      settings.gatewayId &&
+      settings.gatewayPhysicalHostId === mapping.physical_host_id &&
+      pool.gatewayBindAddresses.length === 1 &&
+      conflicts,
+  );
+  // Test the configured pins with the same distinct-port/private-dashboard rules
+  // as admission; live provider occupancy is checked only when reserving.
+  const canAssign = (mode: 'gateway' | 'direct') => {
+    try {
+      assignRoleAllocations(
+        mapping.port_roles,
+        privateRoles,
+        candidates,
+        mode,
+        gateway,
+        mode === 'gateway' && bind && conflicts ? { address: bind, conflicts } : undefined,
+      );
+      return true;
+    } catch (error) {
+      if (error instanceof DomainError && error.code === 'allocation_unavailable') return false;
+      throw error;
+    }
+  };
+  return {
+    gateway: gateway && canAssign('gateway'),
+    direct: candidates.some((pin) => pin.directEndpoint) && canAssign('direct'),
+  };
 }
 
-const supportsGateway = (version: string) => version === 'a1.2.9';
+async function configuredMappings(db: DB, env: Environment, mappingId?: string) {
+  const mappings = eligibleMappings(db);
+  const [rows, { values }] = await Promise.all([
+    (mappingId ? mappings.where('m.id', '=', mappingId) : mappings).execute(),
+    getSettings(db, env),
+  ]);
+  const conflicts =
+    values.gatewayEnabled &&
+    values.gatewayId &&
+    values.gatewayPhysicalHostId &&
+    rows.some((row) => row.physical_host_id === values.gatewayPhysicalHostId)
+      ? await gatewayListenerConflicts(db, values.gatewayPhysicalHostId, values.gatewayId, env)
+      : undefined;
+  return rows.map((row) => ({
+    mappingId: row.mappingId,
+    node: row.node,
+    delivery: configuredDelivery(row, values, env, conflicts),
+  }));
+}
+
+export async function openworldCreationChoices(
+  db: DB,
+  context: AuthContext,
+  env: Environment,
+  mappingId?: string,
+) {
+  const game = (await gameCatalog(db, context)).find((entry) => entry.id === id);
+  if (!game?.access.canCreate) throw new DomainError('forbidden');
+  return configuredMappings(db, env, mappingId);
+}
+
 const configurationSchema = z.strictObject({ version: z.string().min(1).max(128) });
 
 export const openworldModule: TrustedGameModule = {
@@ -77,15 +184,17 @@ export const openworldModule: TrustedGameModule = {
   async prepareCreation({ db, codec, context, env, mappingId, configuration, name }) {
     const input = configurationSchema.safeParse(configuration);
     if (!input.success) throw new DomainError('validation_failed');
-    const mappings = await openworldCreationChoices(db, context);
-    if (!mappings.some((row) => row.mappingId === mappingId)) throw new DomainError('not_found');
+    const [selected] = await openworldCreationChoices(db, context, env, mappingId);
+    if (!selected) throw new DomainError('not_found');
+    const delivery = openworldVersionDelivery(input.data.version, selected.delivery);
+    if (!delivery) throw new DomainError('direct_connection_unavailable');
     if (!codec) throw new DomainError('integration_unavailable');
     const release = (await listOpenworldReleases(db, codec, env)).find(
       (item) => item.version === input.data.version,
     );
     if (!release) throw new DomainError('not_found');
     return {
-      gateway: supportsGateway(release.version),
+      gateway: delivery === 'gateway',
       environment: {
         OW_VERSION: release.version,
         OW_SHA256: release.sha256,
@@ -112,7 +221,7 @@ export const openworldModule: TrustedGameModule = {
       .select('version')
       .where('server_id', '=', server.id)
       .executeTakeFirst();
-    return profile && supportsGateway(profile.version)
+    return profile?.version === openworldGatewayVersion
       ? { protocolId: id, gameVersion: profile.version }
       : null;
   },
@@ -131,8 +240,11 @@ export const openworldModule: TrustedGameModule = {
     )
       throw new DomainError('configuration_invalid');
   },
-  async filterCatalog(db, _context, entry) {
-    if (!entry.access.canCreate || (await eligibleMappings(db).limit(1).executeTakeFirst()))
+  async filterCatalog(db, _context, entry, env) {
+    if (
+      !entry.access.canCreate ||
+      (await configuredMappings(db, env)).some((row) => row.delivery.direct || row.delivery.gateway)
+    )
       return entry;
     return { ...entry, access: { ...entry.access, canCreate: false } };
   },
