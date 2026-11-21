@@ -50,19 +50,34 @@ it('opens an authenticated private dashboard on desktop and presents read-only s
     });
     const page = await context.newPage();
     let enabled = !owner;
+    let configurationReads = 0;
+    let statusReads = 0;
+    let simulateLimit = owner;
     await page.route('**/v1/servers/**/openworld/dashboard**', async (route) => {
       const req = route.request(),
         path = new URL(req.url()).pathname;
       if (path.endsWith('/password'))
         return route.fulfill({ json: { password: 'isolated native dashboard password' } });
-      if (path.endsWith('/status'))
+      if (path.endsWith('/status')) {
+        statusReads++;
         return route.fulfill({
           json: { tps: 19.8, players: { online: 2, slots: 8 }, memory: { rssMB: 70 } },
         });
-      if (req.method() === 'PUT') {
-        enabled = req.postDataJSON().enabled;
-        return route.fulfill({ status: 204 });
       }
+      if (req.method() === 'PUT') {
+        if (simulateLimit) {
+          simulateLimit = false;
+          return route.fulfill({
+            status: 429,
+            headers: { 'Retry-After': '3' },
+            json: {
+              error: { code: 'rate_limited', messageKey: 'errors.rate_limited' },
+              requestId: 'test-reference',
+            },
+          });
+        }
+        enabled = req.postDataJSON().enabled;
+      } else configurationReads++;
       return route.fulfill({
         json: {
           enabled,
@@ -79,7 +94,17 @@ it('opens an authenticated private dashboard on desktop and presents read-only s
       await check(toggle).not.toBeChecked();
       await toggle.focus();
       await page.keyboard.press('Space');
+      await check(page.getByRole('alert')).toContainText('Try again in 3 s.');
+      await check(page.getByRole('alert')).toContainText('test-reference');
+      await check(toggle).not.toBeChecked();
+      await toggle.click();
       await check(toggle).toBeChecked();
+      expect(configurationReads).toBe(1);
+      await check(
+        page.getByText('Restart the game server to start the web dashboard.'),
+      ).toBeVisible();
+      expect(statusReads).toBe(0);
+      await page.getByRole('button', { name: 'Refresh', exact: true }).click();
       await check(page.getByRole('link', { name: 'Open native dashboard' })).toHaveAttribute(
         'href',
         'http://10.0.0.2:23001',

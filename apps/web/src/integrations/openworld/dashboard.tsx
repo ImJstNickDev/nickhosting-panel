@@ -1,5 +1,6 @@
-import { useQuery } from '@tanstack/react-query';
-import { useState } from 'react';
+import type { UiSectionData } from '@nickhosting/game-sdk/ui';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { useEffect, useState } from 'react';
 import {
   dashboardStateSchema,
   dashboardStatusSchema,
@@ -18,20 +19,24 @@ export function OpenworldDashboard({
   canManage,
   pending,
   runtimeState,
-  reload,
 }: GameSectionViewProps) {
   const t = useT();
+  const cache = useQueryClient();
   const state = dashboardStateSchema.parse(data.metadata);
   const base = `/v1/servers/${serverId}/openworld/dashboard`;
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>();
   const [secret, setSecret] = useState('');
+  const [waitingForRestart, setWaitingForRestart] = useState(false);
+  useEffect(() => {
+    if (runtimeState !== 'running') setWaitingForRestart(false);
+  }, [runtimeState]);
   const canConfigure = canManage && state.canConfigure;
   const live = useQuery({
     queryKey: ['openworld', serverId, 'dashboard-status'],
     queryFn: async ({ signal }) =>
       dashboardStatusSchema.parse(await api(`${base}/status`, { signal })),
-    enabled: state.enabled && runtimeState === 'running',
+    enabled: state.enabled && runtimeState === 'running' && !waitingForRestart,
     retry: false,
   });
   async function change(enabled: boolean) {
@@ -39,8 +44,15 @@ export function OpenworldDashboard({
     setSecret('');
     setError(undefined);
     try {
-      await api(base, { method: 'PUT', body: { enabled } });
-      await reload();
+      const confirmed = dashboardStateSchema.parse(
+        await api(base, { method: 'PUT', body: { enabled } }),
+      );
+      const queryKey = ['game-section', serverId, 'openworld', 'dashboard'];
+      await cache.cancelQueries({ queryKey, exact: true });
+      setWaitingForRestart(confirmed.enabled && runtimeState === 'running');
+      cache.setQueryData<UiSectionData>(queryKey, (current) =>
+        current ? { ...current, metadata: confirmed } : current,
+      );
     } catch (e) {
       setError(e);
     } finally {
@@ -111,7 +123,10 @@ export function OpenworldDashboard({
               <button
                 type="button"
                 disabled={live.isFetching || pending}
-                onClick={() => void live.refetch()}
+                onClick={() => {
+                  setWaitingForRestart(false);
+                  void live.refetch();
+                }}
               >
                 {t('games.openworld.dashboard.refresh')}
               </button>
@@ -120,6 +135,8 @@ export function OpenworldDashboard({
         >
           {runtimeState !== 'running' ? (
             <Notice>{t('games.openworld.dashboard.offline')}</Notice>
+          ) : waitingForRestart ? (
+            <Notice>{t('games.openworld.dashboard.restart')}</Notice>
           ) : live.isPending ? (
             <Loading />
           ) : live.error ? (

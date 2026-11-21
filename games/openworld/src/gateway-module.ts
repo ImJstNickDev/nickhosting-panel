@@ -1,7 +1,11 @@
 import { randomBytes } from 'node:crypto';
 import { createSocket } from 'node:dgram';
 import { isIP } from 'node:net';
-import type { GatewayProtocolAdapter, GatewayProtocolContext } from '@nickhosting/game-sdk';
+import type {
+  GatewayProtocolAdapter,
+  GatewayProtocolContext,
+  GatewayProtocolObservation,
+} from '@nickhosting/game-sdk';
 
 import { openworldSupportsGateway } from './version-policy.js';
 
@@ -64,10 +68,9 @@ export function readOpenworldStatus(packet: Buffer, nonce: Buffer) {
   }
 }
 
-export function observeOpenworld(context: GatewayProtocolContext): Promise<{
-  ready: boolean;
-  playerCount?: number;
-}> {
+export function observeOpenworld(
+  context: GatewayProtocolContext,
+): Promise<GatewayProtocolObservation> {
   const { route, signal } = context;
   if (signal.aborted || !openworldGatewayAdapter.supports(route))
     return Promise.resolve({ ready: false });
@@ -81,7 +84,12 @@ export function observeOpenworld(context: GatewayProtocolContext): Promise<{
       clearTimeout(timeout);
       signal.removeEventListener('abort', cancel);
       socket.close();
-      resolve(playerCount === undefined ? { ready: false } : { ready: true, playerCount });
+      // The data plane separately vetoes sleep for recent gameplay or a pending join.
+      resolve(
+        playerCount === undefined
+          ? { ready: false }
+          : { ready: true, idle: playerCount === 0, playerCount },
+      );
     };
     const cancel = () => finish();
     const timeout = setTimeout(cancel, 1500);

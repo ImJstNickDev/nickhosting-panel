@@ -1,5 +1,4 @@
-import { QueryClientProvider } from '@tanstack/react-query';
-import { useState } from 'react';
+import { QueryClientProvider, useQuery } from '@tanstack/react-query';
 import { createRoot } from 'react-dom/client';
 import { api, queryClient } from '../../src/api/client.js';
 import { LocaleProvider } from '../../src/app/i18n.js';
@@ -9,15 +8,23 @@ import '../../src/app/style.css';
 const id = '10000000-0000-4000-8000-000000000001';
 const owner = !location.search.includes('subuser');
 function Fixture() {
-  const [state, setState] = useState({
-    enabled: !owner,
-    canConfigure: owner,
-    privateAddress: null as string | null,
+  const query = useQuery({
+    queryKey: ['game-section', id, 'openworld', 'dashboard'],
+    queryFn: async ({ signal }) => ({
+      values: {},
+      rows: [],
+      metadata: await api<{
+        enabled: boolean;
+        canConfigure: boolean;
+        privateAddress: string | null;
+      }>(`/v1/servers/${id}/openworld/dashboard`, { signal }),
+    }),
   });
+  if (!query.data) return null;
   return (
     <main>
       <OpenworldDashboard
-        data={{ values: {}, rows: [], metadata: state }}
+        data={query.data}
         serverId={id}
         serverName="Openworld"
         runtimeState="running"
@@ -25,9 +32,7 @@ function Fixture() {
         permissionKeys={owner ? ['settings.read', 'settings.write'] : ['settings.read']}
         pending={false}
         onAccepted={() => {}}
-        reload={async () => {
-          setState(await api(`/v1/servers/${id}/openworld/dashboard`));
-        }}
+        reload={() => query.refetch()}
       />
     </main>
   );

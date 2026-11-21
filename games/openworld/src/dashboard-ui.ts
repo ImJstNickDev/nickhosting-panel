@@ -38,6 +38,10 @@ const messages = {
     'Changes take effect the next time the server starts.',
     'Le modifiche si applicano al prossimo avvio del server.',
   ],
+  restart: [
+    'Restart the game server to start the web dashboard.',
+    'Riavvia il server di gioco per avviare la dashboard web.',
+  ],
   native: ['Open native dashboard', 'Apri la dashboard nativa'],
   private: [
     'The native dashboard uses the server’s private network. Connect through your private network or VPN to open it.',

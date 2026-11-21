@@ -75,9 +75,13 @@ wizard shows the runtime requirement beside its disabled option.
 For supported releases, the Openworld Gateway module verifies readiness using a correlated UDP
 server-information response from the assigned backend, checks the release and reads player
 counts. Once ready, the existing UDP data plane forwards traffic. Other releases use
-direct delivery when configured. Wake is manual. The module does not infer idleness from
-an absent sample, treat a server-list refresh as a join, or invent an offline status reply.
-Dashboard operation and UDP readiness are independent.
+direct delivery when configured. Wake is manual.
+
+With an idle timeout enabled, a Gateway-routed server can sleep after fresh status samples
+report zero players throughout that interval. Active UDP sessions and recent join or
+gameplay traffic interrupt the timer. Opening the game’s server list leaves the timer running.
+Missing or invalid samples clear the interval. The Gateway checks again before requesting
+a stop. This works with the web dashboard switched off.
 
 The a1.2.0–a1.2.9 and pre-a1.2.0-1 servers exited cleanly on the egg's `stop` command
 in isolated tests. Some a1.0.x and a1.1.x servers began saving on shutdown but

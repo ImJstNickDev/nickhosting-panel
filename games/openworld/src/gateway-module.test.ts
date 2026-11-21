@@ -9,13 +9,13 @@ import {
   readOpenworldStatus,
 } from './gateway-module.js';
 
-function reply(nonce: Buffer, version = 'a1.2.9') {
+function reply(nonce: Buffer, version = 'a1.2.9', players = 2) {
   const prefix = Buffer.alloc(40);
   prefix[16] = 8;
   prefix.write('OWMU', 17);
   nonce.copy(prefix, 21);
   prefix[25] = 1;
-  prefix.writeUInt16LE(2, 26);
+  prefix.writeUInt16LE(players, 26);
   prefix.writeUInt16LE(12, 28);
   return Buffer.concat([
     prefix,
@@ -84,16 +84,26 @@ describe('Openworld UDP server information', () => {
       backend.bind(0, '127.0.0.1');
       await once(backend, 'listening');
       try {
+        let players = 2;
         backend.on('message', (query, remote) => {
           const nonce = query.subarray(22, 26);
-          backend.send(reply(Buffer.alloc(4)), remote.port, remote.address);
-          backend.send(reply(nonce, 'other'), remote.port, remote.address);
-          backend.send(reply(nonce, version), remote.port, remote.address);
+          backend.send(reply(Buffer.alloc(4), version, 0), remote.port, remote.address);
+          backend.send(reply(nonce, 'other', 0), remote.port, remote.address);
+          backend.send(reply(nonce, version, players), remote.port, remote.address);
         });
         expect(await observeOpenworld(context(backend.address().port, undefined, version))).toEqual(
           {
             ready: true,
+            idle: false,
             playerCount: 2,
+          },
+        );
+        players = 0;
+        expect(await observeOpenworld(context(backend.address().port, undefined, version))).toEqual(
+          {
+            ready: true,
+            idle: true,
+            playerCount: 0,
           },
         );
         const next = context(backend.address().port);

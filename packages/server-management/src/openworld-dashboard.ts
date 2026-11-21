@@ -2,7 +2,7 @@ import { randomBytes } from 'node:crypto';
 import { isIP } from 'node:net';
 import { type AuthContext, DomainError } from '@nickhosting/core';
 import { type Database, recordAudit } from '@nickhosting/database';
-import type { PterodactylAdapter } from '@nickhosting/pterodactyl-adapter';
+import type { ApplicationServer, PterodactylAdapter } from '@nickhosting/pterodactyl-adapter';
 import type { Kysely } from 'kysely';
 import { openworldDashboardStatus } from '../../../games/openworld/src/dashboard-api.js';
 import { openworldStartup } from '../../../games/openworld/src/dashboard-launch.js';
@@ -19,6 +19,7 @@ async function dashboardTarget(
   who: AuthContext,
   id: string,
   manage = false,
+  updatedRemote?: ApplicationServer,
 ) {
   const server = await authorizeServer(db, who, id, manage ? 'settings.write' : 'settings.read');
   const owner =
@@ -44,7 +45,7 @@ async function dashboardTarget(
       .where('server_id', '=', id)
       .where('role', '=', 'dashboard')
       .executeTakeFirst(),
-    adapter.getApplicationServer(server.pterodactyl_id),
+    updatedRemote ?? adapter.getApplicationServer(server.pterodactyl_id),
   ]);
   await verifyManagedIdentity(db, server, remote);
   const environment = remote.container.environment;
@@ -81,18 +82,21 @@ async function dashboardTarget(
   };
 }
 
+function publicState({ owner, password, address }: Awaited<ReturnType<typeof dashboardTarget>>) {
+  return {
+    enabled: Boolean(password),
+    canConfigure: owner,
+    privateAddress: owner && password ? address : null,
+  };
+}
+
 export async function readOpenworldDashboard(
   db: DB,
   adapter: Adapter,
   who: AuthContext,
   id: string,
 ) {
-  const { owner, password, address } = await dashboardTarget(db, adapter, who, id);
-  return {
-    enabled: Boolean(password),
-    canConfigure: owner,
-    privateAddress: owner && password ? address : null,
-  };
+  return publicState(await dashboardTarget(db, adapter, who, id));
 }
 
 export async function updateOpenworldDashboard(
@@ -106,7 +110,9 @@ export async function updateOpenworldDashboard(
   await authorizeServer(db, who, id, 'settings.write');
   const result = await withServerLock(db, id, async (connection) => {
     const target = await dashboardTarget(connection, adapter, who, id, true);
-    if (enabled === Boolean(target.password)) return;
+    if (enabled === Boolean(target.password)) return publicState(target);
+    const skipScripts = target.remote.container.skip_scripts;
+    if (skipScripts === undefined) throw new DomainError('configuration_invalid');
     const egg = await adapter.getEgg(target.mapping.nest_id, target.mapping.egg_id);
     const variables = egg.relationships?.variables?.data.map((row) => row.attributes) ?? [];
     const secret = variables.find((item) => item.env_variable === 'OW_WEB_PASSWORD');
@@ -128,16 +134,24 @@ export async function updateOpenworldDashboard(
     const password = enabled ? randomBytes(32).toString('base64url') : '';
     environment.OW_WEB_PASSWORD = password;
     await recordAudit(connection, who, 'openworld.dashboard.requested', { serverId: id, enabled });
-    await adapter.updateStartup(target.remote.id, {
-      startup: openworldStartup,
-      egg: target.remote.egg,
-      image: target.remote.container.image,
-      environment,
-    });
-    const observed = await dashboardTarget(connection, adapter, who, id, true);
-    if (observed.password !== password) throw new DomainError('operation_uncertain');
+    const updated = await adapter.updateStartup(
+      target.remote.id,
+      {
+        startup: openworldStartup,
+        egg: target.remote.egg,
+        image: target.remote.container.image,
+        environment,
+        skip_scripts: skipScripts,
+      },
+      true,
+    );
+    const observed = await dashboardTarget(connection, adapter, who, id, true, updated);
+    if (observed.password !== password || observed.remote.container.skip_scripts !== skipScripts)
+      throw new DomainError('operation_uncertain');
+    return publicState(observed);
   });
   if (result === 'deferred') throw new DomainError('operation_busy');
+  return result;
 }
 
 export async function revealOpenworldDashboardPassword(

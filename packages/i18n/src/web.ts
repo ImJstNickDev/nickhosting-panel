@@ -82,6 +82,10 @@ export const webMessages: Record<string, readonly [string, string]> = {
   'web.loading': ['Loading…', 'Caricamento…'],
   'web.pending': ['Saving…', 'Salvataggio…'],
   'web.empty': ['No results', 'Nessun risultato'],
+  'web.rateLimitedRetry': [
+    'Too many requests. Try again in {seconds} s.',
+    'Troppe richieste. Riprova tra {seconds} s.',
+  ],
   'web.retry': ['Try again', 'Riprova'],
   'web.sftp': ['SFTP', 'SFTP'],
   'web.details': ['View details', 'Visualizza dettagli'],

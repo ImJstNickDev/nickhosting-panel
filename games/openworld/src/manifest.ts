@@ -12,7 +12,7 @@ export const openworldManifest = gameManifestSchema.parse({
     players: false,
     mods: false,
     worlds: false,
-    idleDetection: false,
+    idleDetection: true,
     gracefulStop: true,
     readiness: true,
     wake: 'manual',

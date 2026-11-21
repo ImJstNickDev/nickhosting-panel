@@ -1,5 +1,6 @@
 import { DomainError } from '@nickhosting/core';
-import type { Hono } from 'hono';
+import { type PterodactylAdapter, PterodactylError } from '@nickhosting/pterodactyl-adapter';
+import type { Context, Hono } from 'hono';
 import { z } from 'zod';
 import {
   readOpenworldDashboard,
@@ -19,9 +20,18 @@ export function registerOpenworldDashboardRoutes(
   }: Pick<ServerRouteOptions, 'db' | 'principal'> & Partial<Pick<ServerRouteOptions, 'management'>>,
 ) {
   const base = '/v1/servers/:id/openworld/dashboard';
-  async function adapter() {
+  async function withProvider<T>(
+    c: Context<{ Variables: Variables }>,
+    work: (adapter: PterodactylAdapter) => Promise<T>,
+  ) {
     if (!management) throw new DomainError('integration_unavailable');
-    return (await management()).adapter;
+    try {
+      return await work((await management()).adapter);
+    } catch (error) {
+      if (!(error instanceof PterodactylError) || error.reason !== 'rate_limited') throw error;
+      c.header('Retry-After', String(Math.ceil((error.retryAfterMs ?? 60_000) / 1000)));
+      throw new DomainError('rate_limited');
+    }
   }
   app.use(`${base}*`, async (c, next) => {
     c.header('cache-control', 'no-store');
@@ -29,7 +39,11 @@ export function registerOpenworldDashboardRoutes(
   });
   app.get(base, async (c) => {
     const who = await principal(c);
-    return c.json(await readOpenworldDashboard(db, await adapter(), who, c.req.param('id')));
+    return c.json(
+      await withProvider(c, (adapter) =>
+        readOpenworldDashboard(db, adapter, who, c.req.param('id')),
+      ),
+    );
   });
   app.put(base, async (c) => {
     const who = await principal(c, true);
@@ -37,30 +51,25 @@ export function registerOpenworldDashboardRoutes(
       .strictObject({ enabled: z.boolean() })
       .safeParse(await c.req.json().catch(() => null));
     if (!values.success) throw new DomainError('validation_failed');
-    await updateOpenworldDashboard(
-      db,
-      await adapter(),
-      who,
-      c.req.param('id'),
-      values.data.enabled,
+    return c.json(
+      await withProvider(c, (adapter) =>
+        updateOpenworldDashboard(db, adapter, who, c.req.param('id'), values.data.enabled),
+      ),
     );
-    return c.body(null, 204);
   });
   app.post(`${base}/password`, async (c) => {
     const who = await principal(c, true);
     return c.json(
-      await revealOpenworldDashboardPassword(db, await adapter(), who, c.req.param('id')),
+      await withProvider(c, (adapter) =>
+        revealOpenworldDashboardPassword(db, adapter, who, c.req.param('id')),
+      ),
     );
   });
   app.get(`${base}/status`, async (c) => {
     const who = await principal(c);
     return c.json(
-      await readOpenworldDashboardStatus(
-        db,
-        await adapter(),
-        who,
-        c.req.param('id'),
-        c.req.raw.signal,
+      await withProvider(c, (adapter) =>
+        readOpenworldDashboardStatus(db, adapter, who, c.req.param('id'), c.req.raw.signal),
       ),
     );
   });
