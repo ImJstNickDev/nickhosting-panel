@@ -1,0 +1,36 @@
+.openworld-versions {
+  display: grid;
+  gap: 1rem;
+  min-width: 0;
+}
+.openworld-versions-toolbar,
+.openworld-versions-source {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem 1rem;
+}
+.openworld-versions-toolbar .workspace-search {
+  flex: 0 1 22rem;
+  max-width: 100%;
+}
+.openworld-versions table {
+  width: 100%;
+  border-collapse: collapse;
+  table-layout: fixed;
+}
+.openworld-versions th,
+.openworld-versions td {
+  padding: 0.55rem 0.25rem;
+  border-bottom: 1px solid var(--line);
+  text-align: start;
+}
+.openworld-versions th[scope="row"] {
+  font-weight: 500;
+  overflow-wrap: anywhere;
+}
+.openworld-versions th:last-child,
+.openworld-versions td {
+  text-align: end;
+}

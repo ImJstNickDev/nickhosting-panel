@@ -191,16 +191,16 @@ function publicReleases(artifacts: Artifact[]): OpenworldRelease[] {
 export async function readOpenworldCatalog(
   token?: string,
   http: typeof fetch = fetch,
-): Promise<OpenworldRelease[]> {
+): Promise<{ source: 'metiva' | 'official'; releases: OpenworldRelease[] }> {
   if (token) {
     try {
-      return publicReleases(await mirrorCatalog(http, token));
+      return { source: 'metiva', releases: publicReleases(await mirrorCatalog(http, token)) };
     } catch {
       /* Try the publisher's catalogue. */
     }
   }
   try {
-    return publicReleases(await officialCatalog(http));
+    return { source: 'official', releases: publicReleases(await officialCatalog(http)) };
   } catch {
     throw unavailable();
   }

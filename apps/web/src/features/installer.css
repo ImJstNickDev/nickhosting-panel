@@ -120,12 +120,12 @@
 .installer-choice-card {
   position: relative;
   isolation: isolate;
-  display: flex;
-  align-items: flex-end;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr) auto;
   flex: 0 0 min(100%, 8.5rem);
   width: min(100%, 8.5rem);
   aspect-ratio: 3 / 4;
-  justify-content: center;
   padding: 0.85rem 0.45rem;
   text-align: center;
   overflow: hidden;
@@ -157,11 +157,11 @@
   color: #fff;
 }
 .installer-choice-icon {
-  position: absolute;
-  top: 12%;
-  left: 19%;
-  width: 62%;
-  height: 55%;
+  grid-row: 1;
+  place-self: center;
+  width: 72%;
+  height: 88%;
+  min-height: 0;
   object-fit: contain;
   pointer-events: none;
 }
@@ -178,6 +178,7 @@
   white-space: nowrap;
 }
 .installer-choice-title {
+  grid-row: 2;
   font-size: 1rem;
   font-weight: 650;
   line-height: 1.3;
@@ -399,8 +400,15 @@
 }
 
 .installer-recommended {
-  margin-inline-start: auto;
   font-size: 0.8rem;
+}
+.installer-choice-card .installer-recommended {
+  grid-row: 3;
+  margin-top: 0.15rem;
+  color: inherit;
+}
+.installer-version .installer-recommended {
+  margin-inline-start: auto;
 }
 .installer-version:has(input:checked):has(.installer-recommended) .installer-choice-check {
   margin-left: 0;

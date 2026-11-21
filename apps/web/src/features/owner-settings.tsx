@@ -1,4 +1,4 @@
-import { useQuery } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useEffect, useState } from 'react';
 import { useLocation } from 'react-router';
 import { ApiError, api } from '../api/client.js';
@@ -18,6 +18,7 @@ import {
   Textarea,
 } from '../components/ui.js';
 import { GlobalWakeSettings } from './auto-wake-policy.js';
+import { resetMetivaCatalogs } from './integration-metiva-token.js';
 import { domainSettingKeys, OwnerDomains } from './owner-domains.js';
 import { OwnerSecretForm } from './owner-secret-form.js';
 import { OwnerStoragePolicy } from './owner-storage-policy.js';
@@ -71,6 +72,7 @@ const groups = [
   'content',
 ];
 export function OwnerSettingsPage() {
+  const queryClient = useQueryClient();
   const t = useT(),
     session = useSession();
   const format = useFormat();
@@ -242,6 +244,7 @@ export function OwnerSettingsPage() {
                   path={`/v1/owner/secrets/${secret.name}`}
                   allowClear={secret.name === 'metivaAccessToken' && secret.configured}
                   onSaved={async () => {
+                    if (secret.name === 'metivaAccessToken') await resetMetivaCatalogs(queryClient);
                     await settings.refetch();
                   }}
                 />

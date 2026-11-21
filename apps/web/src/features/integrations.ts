@@ -146,7 +146,9 @@ const SatisfactoryInstallationPolicy = lazy(() =>
     default: module.SatisfactoryInstallationPolicy,
   })),
 );
+const OpenworldVersions = lazy(() => import('../integrations/openworld/versions.js'));
 const ownerComponents = new Map([
+  ['openworld-versions', { Component: OpenworldVersions, Background: undefined }],
   [
     'satisfactory-installation',
     { Component: SatisfactoryInstallationPolicy, Background: undefined },

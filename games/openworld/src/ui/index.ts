@@ -12,7 +12,7 @@ import {
   openworldDashboardHandlers,
   openworldDashboardSection,
 } from '../dashboard-ui.js';
-import { openworldVersionDelivery } from '../version-policy.js';
+import { openworldSupportsRuntime, openworldVersionDelivery } from '../version-policy.js';
 import { openworldGameArtwork, openworldRuntimeArtwork } from './artwork.js';
 
 const catalogSchema = z.object({
@@ -37,15 +37,24 @@ function options(raw: unknown, handler: string, values: UiValues): UiOption[] {
   if (handler === 'versions') {
     const mapping = mappings.find((m) => m.mappingId === values.mappingId);
     if (!mapping) return [];
-    return versions
-      .filter((version) => openworldVersionDelivery(version, mapping.delivery))
-      .map((version, index) => ({
+    const recommended = versions.find((version) =>
+      openworldVersionDelivery(version, mapping.delivery),
+    );
+    return versions.map((version) => {
+      const available = Boolean(openworldVersionDelivery(version, mapping.delivery));
+      return {
         value: version,
         label: version,
-        latest: version === versions[0],
-        recommended: index === 0,
-        disabled: false,
-      }));
+        latest: available && version === versions[0],
+        recommended: version === recommended,
+        disabled: !available,
+        ...(!available && {
+          reasonKey: openworldSupportsRuntime(version)
+            ? 'games.openworld.requiresDirect'
+            : 'games.openworld.incompatibleRuntime',
+        }),
+      };
+    });
   }
   return mappings.map(({ mappingId, node, delivery }) => ({
     value: mappingId,
@@ -104,6 +113,9 @@ export const openworldUiModule = defineTrustedGameUiModule({
       createHandler: 'create',
       defaults: {},
     },
+    administration: [
+      { id: 'versions', titleKey: 'games.openworld.versions', component: 'openworld-versions' },
+    ],
     sections: [openworldDashboardSection],
     ports: [
       { role: 'game', labelKey: 'games.openworld.gamePort', transports: ['udp'], required: true },
@@ -130,16 +142,27 @@ export const openworldUiModule = defineTrustedGameUiModule({
   catalogs: {
     en: {
       'games.openworld.gamePort': 'Game',
+      'games.openworld.versions': 'Versions',
+      'games.openworld.catalogTitle': 'Dedicated server · Linux x64',
+      'games.openworld.officialManifest': 'Official manifest',
       'games.openworld.name': 'Openworld',
       'games.openworld.runtime': 'Dedicated server',
       'games.openworld.version': 'Game version',
+      'games.openworld.requiresDirect': 'Requires a direct connection on this node.',
+      'games.openworld.incompatibleRuntime':
+        'Requires glibc 2.38. The server uses Debian Bookworm.',
       ...openworldDashboardCatalogs.en,
     },
     it: {
       'games.openworld.gamePort': 'Gioco',
+      'games.openworld.versions': 'Versioni',
+      'games.openworld.catalogTitle': 'Server dedicato · Linux x64',
+      'games.openworld.officialManifest': 'Manifest ufficiale',
       'games.openworld.name': 'Openworld',
       'games.openworld.runtime': 'Server dedicato',
       'games.openworld.version': 'Versione del gioco',
+      'games.openworld.requiresDirect': 'Richiede una connessione diretta su questo nodo.',
+      'games.openworld.incompatibleRuntime': 'Richiede glibc 2.38. Il server usa Debian Bookworm.',
       ...openworldDashboardCatalogs.it,
     },
   },

@@ -26,7 +26,11 @@ function reply(nonce: Buffer, version = 'a1.2.9') {
   ]);
 }
 
-function context(port: number, signal = new AbortController().signal): GatewayProtocolContext {
+function context(
+  port: number,
+  signal = new AbortController().signal,
+  version = 'a1.2.9',
+): GatewayProtocolContext {
   return {
     route: {
       id: 'route',
@@ -37,7 +41,7 @@ function context(port: number, signal = new AbortController().signal): GatewayPr
       generation: 'generation',
       public: { transport: 'udp', address: '127.0.0.2', port },
       backend: { address: '127.0.0.1', allocationAddress: '127.0.0.1', port },
-      protocol: { handlerId: 'openworld', role: 'game', gameVersion: 'a1.2.9' },
+      protocol: { handlerId: 'openworld', role: 'game', gameVersion: version },
       mode: 'online',
       locale: 'en',
     },
@@ -45,7 +49,7 @@ function context(port: number, signal = new AbortController().signal): GatewayPr
   };
 }
 
-describe('Openworld a1.2.9 server info', () => {
+describe('Openworld UDP server information', () => {
   it('identifies metadata and icon queries independently of a join', () => {
     const request = openworldStatusRequest(Buffer.from('abcd'));
     expect(request.length).toBe(1040);
@@ -73,37 +77,42 @@ describe('Openworld a1.2.9 server info', () => {
     bytes.writeUInt16LE(13, 26);
     expect(readOpenworldStatus(bytes, id)).toBeUndefined();
   });
-  it('samples the assigned UDP backend, with no administrative listener or sleep decision', async () => {
-    const backend = createSocket('udp4');
-    backend.bind(0, '127.0.0.1');
-    await once(backend, 'listening');
-    try {
-      backend.on('message', (query, remote) => {
-        const nonce = query.subarray(22, 26);
-        backend.send(reply(Buffer.alloc(4)), remote.port, remote.address);
-        backend.send(reply(nonce, 'a1.2.8'), remote.port, remote.address);
-        backend.send(reply(nonce), remote.port, remote.address);
-      });
-      expect(await observeOpenworld(context(backend.address().port))).toEqual({
-        ready: true,
-        playerCount: 2,
-      });
-      const next = context(backend.address().port);
-      expect(
-        await observeOpenworld({
-          ...next,
-          route: {
-            ...next.route,
-            protocol: { handlerId: 'openworld', gameVersion: 'a1.2.10', role: 'game' },
+  it.each(['a1.0.11', 'a1.1.3', 'a1.2.8', 'pre-a1.2.0-1', 'a1.2.9'])(
+    'samples the assigned %s backend and checks the pinned version',
+    async (version) => {
+      const backend = createSocket('udp4');
+      backend.bind(0, '127.0.0.1');
+      await once(backend, 'listening');
+      try {
+        backend.on('message', (query, remote) => {
+          const nonce = query.subarray(22, 26);
+          backend.send(reply(Buffer.alloc(4)), remote.port, remote.address);
+          backend.send(reply(nonce, 'other'), remote.port, remote.address);
+          backend.send(reply(nonce, version), remote.port, remote.address);
+        });
+        expect(await observeOpenworld(context(backend.address().port, undefined, version))).toEqual(
+          {
+            ready: true,
+            playerCount: 2,
           },
-        }),
-      ).toEqual({ ready: false });
-      const controller = new AbortController();
-      const pending = observeOpenworld(context(backend.address().port, controller.signal));
-      controller.abort();
-      expect(await pending).toEqual({ ready: false });
-    } finally {
-      backend.close();
-    }
-  });
+        );
+        const next = context(backend.address().port);
+        expect(
+          await observeOpenworld({
+            ...next,
+            route: {
+              ...next.route,
+              protocol: { handlerId: 'openworld', gameVersion: 'a1.2.10', role: 'game' },
+            },
+          }),
+        ).toEqual({ ready: false });
+        const controller = new AbortController();
+        const pending = observeOpenworld(context(backend.address().port, controller.signal));
+        controller.abort();
+        expect(await pending).toEqual({ ready: false });
+      } finally {
+        backend.close();
+      }
+    },
+  );
 });

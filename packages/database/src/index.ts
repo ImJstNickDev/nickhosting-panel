@@ -1,6 +1,6 @@
 import type { EncryptedSecret, PlatformConfig } from '@nickhosting/core';
 import type { GameRolloutState } from '@nickhosting/game-sdk';
-import { type Generated, Kysely, PostgresDialect } from 'kysely';
+import { type ColumnType, type Generated, Kysely, PostgresDialect } from 'kysely';
 import { Pool, type PoolConfig } from 'pg';
 import type { GatewayRouteTables } from './gateway-route-types.js';
 import type { GatewayTables } from './gateway-types.js';
@@ -60,6 +60,14 @@ export interface Database
     key: string;
     value: Partial<PlatformConfig>;
     updated_at: Generated<Date>;
+  };
+  openworld_release_catalog: {
+    runtime: 'dedicated-linux-x64';
+    credential_hash: string;
+    source: 'metiva' | 'official';
+    releases: ColumnType<{ version: string; size: number; sha256: string }[], string, string>;
+    sync_order: string;
+    synced_at: Date;
   };
   openworld_server_profiles: {
     server_id: string;

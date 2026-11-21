@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { DomainError, type SecretCodec } from '@nickhosting/core';
 import { getGameMetivaToken } from '@nickhosting/database';
+import { sql } from 'kysely';
 import { z } from 'zod';
 import {
   type OpenworldRelease,
@@ -13,9 +14,16 @@ import type { DB, Environment } from './admission.js';
 const tickets = 'openworld:linux-x64:install:v1';
 const ticketLifetime = 30 * 60_000;
 const claim = z.object({ expires: z.int().positive(), release: openworldReleaseSchema });
-const catalogs = new WeakMap<
+interface ReleaseCatalog {
+  source: 'metiva' | 'official';
+  syncedAt: Date;
+  releases: OpenworldRelease[];
+}
+const runtime = 'dedicated-linux-x64';
+const refreshIntervalMs = 60_000;
+const refreshes = new WeakMap<
   DB,
-  { key: string; expires: number; pending: Promise<OpenworldRelease[]> }
+  { key: string; nextAttempt: number; pending?: Promise<ReleaseCatalog> }
 >();
 
 export function issueOpenworldArtifactUrl(
@@ -47,23 +55,96 @@ export function readOpenworldInstallTicket(codec: SecretCodec, ticket: string | 
     throw new DomainError('forbidden');
   }
 }
-export async function listOpenworldReleases(db: DB, codec: SecretCodec, env: Environment = {}) {
+function savedCatalog(db: DB, key: string) {
+  return db
+    .selectFrom('openworld_release_catalog')
+    .select(['source', 'synced_at as syncedAt', 'releases'])
+    .where('runtime', '=', runtime)
+    .where('credential_hash', '=', key)
+    .executeTakeFirst();
+}
+
+async function replaceCatalog(
+  db: DB,
+  token: string | undefined,
+  key: string,
+): Promise<ReleaseCatalog> {
+  // Allocate the generation before network I/O. A slow old fetch cannot replace a
+  // newer result from another API process or from a different credential.
+  const { generation } = await db
+    .selectNoFrom(sql<string>`nextval('openworld_catalog_sync_order')`.as('generation'))
+    .executeTakeFirstOrThrow();
+  const result = await readOpenworldCatalog(token);
+  const values = {
+    credential_hash: key,
+    source: result.source,
+    releases: JSON.stringify(result.releases),
+    sync_order: generation,
+    synced_at: sql<Date>`clock_timestamp()`,
+  };
+  const saved = await db
+    .insertInto('openworld_release_catalog')
+    .values({ runtime, ...values })
+    .onConflict((c) =>
+      c
+        .column('runtime')
+        .doUpdateSet(values)
+        .where('openworld_release_catalog.sync_order', '<', generation),
+    )
+    .returning(['source', 'synced_at as syncedAt', 'releases'])
+    .executeTakeFirst();
+  if (saved) return saved;
+  const newer = await savedCatalog(db, key);
+  if (!newer) throw new DomainError('conflict');
+  return newer;
+}
+
+export async function openworldReleaseCatalog(
+  db: DB,
+  codec: SecretCodec,
+  env: Environment,
+  mode: 'owner' | 'wizard' | 'sync',
+): Promise<ReleaseCatalog> {
   const token = await getGameMetivaToken(db, codec, 'openworld', env);
   const key = createHash('sha256')
     .update(token ?? '')
     .digest('hex');
-  const current = catalogs.get(db);
-  if (current && current.key === key && current.expires > Date.now()) return current.pending;
-  const pending = readOpenworldCatalog(token);
-  const entry = { key, expires: Date.now() + 60_000, pending };
-  catalogs.set(db, entry);
-  try {
-    return await pending;
-  } catch (error) {
-    if (catalogs.get(db) === entry) catalogs.delete(db);
-    throw error;
+  const saved = mode === 'sync' ? undefined : await savedCatalog(db, key);
+  const last = refreshes.get(db);
+  const now = Date.now();
+  if (
+    saved &&
+    (mode === 'owner' ||
+      saved.syncedAt.getTime() + refreshIntervalMs > now ||
+      (last?.key === key && last.nextAttempt > now))
+  )
+    return saved;
+
+  let pending = last?.key === key ? last.pending : undefined;
+  if (!pending) {
+    const attempt: { key: string; nextAttempt: number; pending?: Promise<ReleaseCatalog> } = {
+      key,
+      nextAttempt: now + refreshIntervalMs,
+    };
+    pending = replaceCatalog(db, token, key).finally(() => {
+      attempt.pending = undefined;
+      attempt.nextAttempt = Date.now() + refreshIntervalMs;
+    });
+    attempt.pending = pending;
+    refreshes.set(db, attempt);
   }
+  if (saved) {
+    // A wizard with a usable snapshot never waits on the network. The next
+    // explicit Owner sync bypasses the backoff and reports any provider error.
+    void pending.catch(() => {});
+    return saved;
+  }
+  return pending;
 }
+export async function listOpenworldReleases(db: DB, codec: SecretCodec, env: Environment = {}) {
+  return (await openworldReleaseCatalog(db, codec, env, 'wizard')).releases;
+}
+
 export async function downloadOpenworldRelease(
   db: DB,
   codec: SecretCodec,

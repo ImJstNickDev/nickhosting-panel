@@ -1,12 +1,21 @@
-import { useQuery } from '@tanstack/react-query';
+import { type QueryClient, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useState } from 'react';
 import { api } from '../api/client.js';
 import { useT } from '../app/i18n.js';
 import { ErrorNotice, Loading, Notice, Section } from '../components/ui.js';
 import { OwnerSecretForm } from './owner-secret-form.js';
 
+export async function resetMetivaCatalogs(cache: QueryClient, gameId?: string) {
+  const scope = gameId ? [gameId] : [];
+  await Promise.all([
+    cache.resetQueries({ queryKey: ['integration-versions', ...scope] }),
+    cache.resetQueries({ queryKey: ['creation', 'catalog', ...scope] }),
+  ]);
+}
+
 export function IntegrationMetivaToken({ gameId }: { gameId: string }) {
   const t = useT();
+  const cache = useQueryClient();
   const [open, setOpen] = useState(false);
   const path = `/v1/owner/integrations/${encodeURIComponent(gameId)}/metiva-token`;
   const status = useQuery({
@@ -42,7 +51,7 @@ export function IntegrationMetivaToken({ gameId }: { gameId: string }) {
                   path={path}
                   allowClear={status.data.configured}
                   onSaved={async () => {
-                    await status.refetch();
+                    await Promise.all([status.refetch(), resetMetivaCatalogs(cache, gameId)]);
                   }}
                 />
               )}

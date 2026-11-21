@@ -33,8 +33,8 @@ afterAll(async () => {
 });
 
 it.each([
-  ['a1.2.9', 'gateway', 'gateway-only'],
-  ['a1.2.8', 'direct', 'mixed'],
+  ['a1.2.8', 'gateway', 'gateway-only'],
+  ['a1.2.10', 'direct', 'mixed'],
   ['a1.2.9', 'direct', 'direct-only'],
   ['a1.2.9', 'gateway', 'local-conflict'],
   ['a1.2.9', 'gateway', 'sibling-conflict'],
@@ -214,11 +214,24 @@ it.each([
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({
           ...request,
-          game: { id: 'openworld', configuration: { version: 'a1.2.8' } },
+          game: { id: 'openworld', configuration: { version: 'a1.2.10' } },
         }),
       });
       expect(rejected.status).toBe(409);
       expect(await rejected.json()).toEqual({ code: 'direct_connection_unavailable' });
+      expect(f.adapter.listAllocations).toHaveBeenCalledTimes(requestsBeforeChoices);
+    }
+    if (poolMode === 'direct-only') {
+      const incompatible = await app.request('/v1/servers', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          ...request,
+          game: { id: 'openworld', configuration: { version: 'a1.0.10' } },
+        }),
+      });
+      expect(incompatible.status).toBe(409);
+      expect(await incompatible.json()).toEqual({ code: 'game_request_unsupported' });
       expect(f.adapter.listAllocations).toHaveBeenCalledTimes(requestsBeforeChoices);
     }
     const accepted = await submit();

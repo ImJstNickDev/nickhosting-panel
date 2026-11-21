@@ -58,7 +58,7 @@ function fixture() {
 describe('Openworld Linux releases', () => {
   it('uses the private mirror for both catalog and bytes and only returns an immutable pin', async () => {
     const { http } = fixture();
-    expect(await readOpenworldCatalog(token, http)).toEqual([pin]);
+    expect(await readOpenworldCatalog(token, http)).toEqual({ source: 'metiva', releases: [pin] });
     expect(String(await readOpenworldArchive(pin, token, http))).toEqual(content);
     expect(http.mock.calls.every(([url]) => String(url).startsWith(mirror))).toBe(true);
   });
@@ -67,7 +67,10 @@ describe('Openworld Linux releases', () => {
     assets.set(`${mirror}/files/${version}/${filename}`, 'x'.repeat(pin.size));
     expect(String(await readOpenworldArchive(pin, token, http))).toEqual(content);
     assets.delete(`${mirror}/manifest.json`);
-    expect(await readOpenworldCatalog(token, http)).toEqual([pin]);
+    expect(await readOpenworldCatalog(token, http)).toEqual({
+      source: 'official',
+      releases: [pin],
+    });
     expect(String(await readOpenworldArchive(pin, token, http))).toEqual(content);
     await expect(
       readOpenworldArchive({ ...pin, version: 'a1.2.10' }, token, http),

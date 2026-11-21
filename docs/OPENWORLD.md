@@ -22,9 +22,10 @@ The node needs a private backend pool even when gameplay uses direct delivery. D
 also needs an explicitly configured advertised endpoint. Openworld uses an address and
 port. No SRV or hostname-based multiplexing is declared.
 
-The wizard filters versions when the user selects a node. A node configured exclusively
-for Gateway delivery offers a1.2.9. A node configured for direct delivery can also offer
-other releases published in the catalog. NickHosting checks available allocations when
+The version step lists releases from the synchronized Linux x64 catalog. The selected
+node determines which releases the user can install. A Gateway-only node can install
+releases with verified UDP support. A node with direct delivery can also install
+other releases supported by the egg. NickHosting checks available allocations when
 the user submits the request.
 
 For standalone installations, the egg can retrieve the requested release from the publisher.
@@ -35,6 +36,10 @@ After changing the installer or launch helper, regenerate the JSON using
 `scripts/dev.sh pnpm exec tsx games/openworld/egg/export.ts`.
 
 ## Catalog and credentials
+
+Open **Owner → Integrations → Openworld → Versions** to see the catalog used by
+the creation wizard. Use **Sync versions** to fetch the current releases. A successful sync
+replaces the saved catalog. An upstream failure leaves the last successful sync intact.
 
 Under **Owner → Settings → Credentials**, set the global Metiva access token.
 Under **Owner → Integrations → Openworld → General**, an integration token overrides it.
@@ -62,9 +67,19 @@ request. The native dashboard URL is private and requires a network path to the 
 Its built-in seed inspector has its own access rules; the private listener is not published
 by the Game Gateway.
 
-For **a1.2.9** the Openworld Gateway module verifies readiness using a correlated UDP
+The verified Linux builds are a1.0.11–a1.0.13, a1.1.0–a1.1.3, a1.2.0–a1.2.9 and
+pre-a1.2.0-1. The a1.0.10 package requires glibc 2.38 and cannot run on the Debian
+Bookworm image used by this egg. When that release is present in the catalog, the
+wizard shows the runtime requirement beside its disabled option.
+
+For supported releases, the Openworld Gateway module verifies readiness using a correlated UDP
 server-information response from the assigned backend, checks the release and reads player
 counts. Once ready, the existing UDP data plane forwards traffic. Other releases use
 direct delivery when configured. Wake is manual. The module does not infer idleness from
 an absent sample, treat a server-list refresh as a join, or invent an offline status reply.
 Dashboard operation and UDP readiness are independent.
+
+The a1.2.0–a1.2.9 and pre-a1.2.0-1 servers exited cleanly on the egg's `stop` command
+in isolated tests. Some a1.0.x and a1.1.x servers began saving on shutdown but
+remained running past the test deadline. The a1.1.3 process was still alive after
+55 seconds with its saved world files on disk.

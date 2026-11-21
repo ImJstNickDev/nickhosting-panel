@@ -13,7 +13,8 @@ import {
 } from '../../../games/openworld/src/dashboard-launch.js';
 import { openworldManifest } from '../../../games/openworld/src/manifest.js';
 import {
-  openworldGatewayVersion,
+  openworldSupportsGateway,
+  openworldSupportsRuntime,
   openworldVersionDelivery,
 } from '../../../games/openworld/src/version-policy.js';
 import type { DB, Environment } from './admission.js';
@@ -186,6 +187,8 @@ export const openworldModule: TrustedGameModule = {
     if (!input.success) throw new DomainError('validation_failed');
     const [selected] = await openworldCreationChoices(db, context, env, mappingId);
     if (!selected) throw new DomainError('not_found');
+    if (!openworldSupportsRuntime(input.data.version))
+      throw new DomainError('game_request_unsupported');
     const delivery = openworldVersionDelivery(input.data.version, selected.delivery);
     if (!delivery) throw new DomainError('direct_connection_unavailable');
     if (!codec) throw new DomainError('integration_unavailable');
@@ -221,7 +224,7 @@ export const openworldModule: TrustedGameModule = {
       .select('version')
       .where('server_id', '=', server.id)
       .executeTakeFirst();
-    return profile?.version === openworldGatewayVersion
+    return profile && openworldSupportsGateway(profile.version)
       ? { protocolId: id, gameVersion: profile.version }
       : null;
   },

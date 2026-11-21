@@ -77,7 +77,7 @@ beforeEach(async () => {
           { mappingId: id, node: 1, delivery: { gateway: true, direct: false } },
           { mappingId: directMappingId, node: 2, delivery: { gateway: false, direct: true } },
         ],
-        versions: ['a1.2.10', 'a1.2.9', 'a1.2.8'],
+        versions: ['a1.2.10', 'a1.2.9', 'a1.2.8', 'a1.0.10'],
       });
     if (path === '/v1/games')
       return response([
@@ -258,19 +258,27 @@ it.each(['en', 'it'])(
     await next(locale);
     await select('Openworld · #2');
     await next(locale);
+    await check(page.getByRole('radio', { name: /a1\.0\.10/ })).toBeDisabled();
     await page
       .locator('.installer-version')
-      .filter({ has: page.getByRole('radio', { name: /a1\.2\.8/ }) })
+      .filter({ has: page.getByRole('radio', { name: /a1\.2\.10/ }) })
       .click();
     await page
       .getByRole('button', { name: locale === 'en' ? 'Back' : 'Indietro', exact: true })
       .click();
     await select('Openworld · #1');
     await next(locale);
-    await check(page.getByRole('radio', { name: /a1\.2\.(8|10)/ })).toHaveCount(0);
+    await check(page.getByRole('radio', { name: /a1\.2\.10/ })).toBeDisabled();
+    await check(
+      page.getByText(
+        locale === 'en' ? /Requires a direct connection/ : /Richiede una connessione diretta/,
+      ),
+    ).toBeVisible();
+    await check(page.getByText(/glibc 2\.38/)).toBeVisible();
+    await check(page.getByRole('radio', { name: /a1\.2\.9/ })).toBeChecked();
     await page
       .locator('.installer-version')
-      .filter({ has: page.getByRole('radio', { name: /a1\.2\.9/ }) })
+      .filter({ has: page.getByRole('radio', { name: /a1\.2\.8/ }) })
       .click();
     await page.screenshot({ path: `test-results/openworld-wizard-${locale}.png`, fullPage: true });
     await next(locale);
@@ -282,7 +290,52 @@ it.each(['en', 'it'])(
     expect(writes).toHaveLength(1);
     expect(writes[0]).toMatchObject({
       mappingId: id,
-      game: { id: 'openworld', configuration: { version: 'a1.2.9' } },
+      game: { id: 'openworld', configuration: { version: 'a1.2.8' } },
     });
   },
 );
+
+it.each([
+  { locale: 'en', width: 1280, height: 900, title: 'Dedicated server' },
+  { locale: 'it', width: 390, height: 844, title: 'Server dedicato' },
+])('keeps the single recommended Openworld runtime legible in $locale', async (view) => {
+  await page.addInitScript((lang) => localStorage.setItem('nh.locale', lang), view.locale);
+  await page.setViewportSize({ width: view.width, height: view.height });
+  await page.route('**/v1/games/openworld/choices', (route) =>
+    route.fulfill({
+      json: {
+        mappings: [{ mappingId: id, node: 1, delivery: { gateway: true, direct: false } }],
+        versions: ['a1.2.9'],
+      },
+    }),
+  );
+  await page.goto(`${origin}domains-fixture?view=wizard`);
+  await page.getByRole('button', { name: 'Openworld', exact: true }).click();
+  await next(view.locale);
+  await page
+    .getByLabel(view.locale === 'en' ? 'Server name' : 'Nome del server', { exact: true })
+    .fill('Openworld');
+  await next(view.locale);
+
+  const card = page.locator('.installer-choice-card');
+  await check(card.getByRole('radio', { name: new RegExp(view.title) })).toBeChecked();
+  await check(card.locator('.installer-recommended')).toBeVisible();
+  const geometry = await card.evaluate((element) => {
+    const title = element.querySelector('.installer-choice-title');
+    const badge = element.querySelector('.installer-recommended');
+    if (!title || !badge) throw new Error('Missing runtime caption');
+    const range = document.createRange();
+    range.selectNodeContents(title);
+    const image = element.querySelector('img');
+    return {
+      titleLines: range.getClientRects().length,
+      aboveLabel:
+        !image || image.getBoundingClientRect().bottom <= title.getBoundingClientRect().top + 1,
+      badgeBelow: badge.getBoundingClientRect().top >= title.getBoundingClientRect().bottom - 1,
+    };
+  });
+  await card.screenshot({ path: `test-results/openworld-runtime-card-${view.locale}.png` });
+  expect(geometry.titleLines).toBeLessThanOrEqual(2);
+  expect(geometry.aboveLabel).toBe(true);
+  expect(geometry.badgeBelow).toBe(true);
+});
