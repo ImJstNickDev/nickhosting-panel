@@ -157,6 +157,8 @@ function ActionEditor({
       );
       if (receipt.outcome !== 'accepted' || receipt.requestId !== requestId)
         throw new ApiError('operation_uncertain', 'errors.operation_uncertain');
+      setPrepared(null);
+      setMessage('');
       onAccepted({ kind, playerName: player.name });
     } catch (e) {
       setError(

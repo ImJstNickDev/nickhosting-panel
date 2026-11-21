@@ -3,17 +3,24 @@ import { DomainError } from '@nickhosting/core';
 import { createTestDatabase } from '@nickhosting/database/testing';
 import { PterodactylError } from '@nickhosting/pterodactyl-adapter';
 import { Hono } from 'hono';
+import { PNG } from 'pngjs';
 import { afterAll, beforeAll, expect, it, vi } from 'vitest';
 import { openworldManifest } from '../../../games/openworld/src/manifest.js';
+import {
+  claimOpenworldCaptureScans,
+  createOpenworldCaptureCollector,
+} from '../../../packages/server-management/src/openworld-capture-index.js';
 import { createOpenworldPlayerActions } from '../../../packages/server-management/src/openworld-player-actions.js';
 import { createOpenworldPlayerChannel } from '../../../packages/server-management/src/openworld-player-channel.js';
 import { createOpenworldTelemetry } from '../../../packages/server-management/src/openworld-telemetry.js';
 import { managementFixture } from '../../../packages/server-management/src/test-fixtures.js';
 import type { Variables } from './app.js';
 import { registerOpenworldPlayerActionRoutes } from './openworld-player-actions.js';
+import { registerOpenworldThumbnailRoute } from './openworld-screenshot-thumbnails.js';
 import { registerOpenworldScreenshotRoutes } from './openworld-screenshots.js';
 import { registerOpenworldTelemetryRoutes } from './openworld-telemetry.js';
 
+const capturePng = Uint8Array.from(PNG.sync.write(new PNG({ width: 7, height: 5 })));
 let database: Awaited<ReturnType<typeof createTestDatabase>>;
 beforeAll(async () => {
   database = await createTestDatabase();
@@ -22,7 +29,7 @@ afterAll(async () => {
   await database?.destroy();
 });
 
-async function fixture() {
+async function fixture(capture?: (url: URL) => Response | undefined) {
   const db = database.db;
   const owner = await managementFixture(db);
   const sub = await managementFixture(db);
@@ -105,6 +112,8 @@ async function fixture() {
       throw new Error('unexpected upstream');
     calls.push(resource);
     await state.beforeReply?.(resource);
+    const supplied = capture?.(url);
+    if (supplied) return supplied;
     if (resource === 'auth')
       return Response.json({ required: true, loopback: false, canAct: false });
     if (resource === 'login')
@@ -137,8 +146,12 @@ async function fixture() {
     if (resource === 'player')
       return state.empty ? new Response(null, { status: 404 }) : Response.json(player);
     if (resource === 'screenshots')
-      return Response.json({ files: [{ name: 'conn7-fixture.png', mtimeMs: 100, bytes: 67 }] });
-    if (resource === 'skin' || resource === 'screenshot') {
+      return Response.json({
+        files: [{ name: 'conn7-fixture.png', mtimeMs: 100, bytes: capturePng.byteLength }],
+      });
+    if (resource === 'screenshot')
+      return new Response(capturePng, { headers: { 'content-type': 'image/png' } });
+    if (resource === 'skin') {
       const png = Buffer.from(
         'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAOgeONsAAAAASUVORK5CYII=',
         'base64',
@@ -201,6 +214,12 @@ async function fixture() {
     createOpenworldPlayerChannel({ db, now: () => state.now, target, fetcher }),
     fetcher,
   );
+  registerOpenworldThumbnailRoute(
+    gallery,
+    { db, principal: async () => sub.context },
+    createOpenworldPlayerChannel({ db, now: () => state.now, target, fetcher }),
+    fetcher,
+  );
   const galleryRead = (suffix = '') =>
     gallery.request(`/v1/servers/${id}/openworld/screenshots${suffix}`);
   return {
@@ -215,6 +234,7 @@ async function fixture() {
     router,
     actionRouter,
     galleryRead,
+    fetcher,
   };
 }
 
@@ -231,15 +251,26 @@ it('uses current granular permissions even on cached data and never sends native
     request('players'),
     request('players', 'sub'),
   ]);
-  for (const res of replies) {
+  for (const [index, res] of replies.entries()) {
     expect(res.status).toBe(200);
     expect(res.headers.get('cache-control')).toContain('no-store');
     expect(await res.json()).toEqual({
       source: 'live',
       processRef: expect.stringMatching(/^[a-f0-9]{64}$/),
       reason: null,
+      gameVersion: 'a1.2.9',
       observedAt: new Date(state.now).toISOString(),
-      data: { players: [{ id: 7, name: 'Ada', connectedS: 90, skinHash: '12ab34cd' }] },
+      data: {
+        players: [
+          {
+            id: 7,
+            name: 'Ada',
+            connectedS: 90,
+            skinHash: '12ab34cd',
+            ...(index === 1 ? { account: 'private-account', accountVerified: true } : {}),
+          },
+        ],
+      },
     });
   }
   expect(calls).toEqual(['auth', 'login', 'players']);
@@ -249,6 +280,11 @@ it('uses current granular permissions even on cached data and never sends native
   expect(saved.data.players).toEqual([
     { id: 7, name: 'Ada', connectedS: 90, skinHash: '12ab34cd' },
   ]);
+  await grant('game.openworld.players.read', 'game.openworld.players.inspect');
+  expect((await (await router()('players', 'sub')).json()).data.players[0].account).toBe(
+    'private-account',
+  );
+  await grant('game.openworld.players.read');
   await power('running');
 
   const selection = `name=Ada&joinedAt=${state.now - 90000}`;
@@ -339,6 +375,7 @@ it('shares authentication across endpoints, renews once and recovers projected s
   const freshRouter = router();
   const offline = await (await freshRouter('players')).json();
   expect(offline).toEqual({
+    gameVersion: 'a1.2.9',
     data: empty.data,
     observedAt: empty.observedAt,
     source: 'snapshot',
@@ -371,6 +408,7 @@ it('shares authentication across endpoints, renews once and recovers projected s
     .where('id', '=', id)
     .execute();
   expect(await (await freshRouter('players')).json()).toEqual({
+    gameVersion: 'a1.2.9',
     source: 'unavailable',
     reason: 'offline',
     data: null,
@@ -469,6 +507,7 @@ it('discards observations spanning a stop and persists last-player departure wit
   await power('offline');
   gate.resolve();
   const snapshot = {
+    gameVersion: 'a1.2.9',
     data: left.data,
     observedAt: left.observedAt,
     source: 'snapshot',
@@ -647,6 +686,7 @@ it('isolates screenshot metadata and image bytes from inspection and moderation 
   const read = 'game.openworld.players.read',
     shots = 'game.openworld.players.screenshots';
   const image = '/image?name=conn7-fixture.png';
+  const preview = `/thumbnail?name=conn7-fixture.png&mtimeMs=100&bytes=${capturePng.byteLength}`;
   for (const keys of [
     [read, 'game.openworld.players.inspect'],
     [read, 'game.openworld.players.moderate'],
@@ -655,14 +695,25 @@ it('isolates screenshot metadata and image bytes from inspection and moderation 
     await grant(...keys);
     expect((await galleryRead()).status).toBe(403);
     expect((await galleryRead(image)).status).toBe(403);
+    expect((await galleryRead(preview)).status).toBe(403);
   }
   expect(calls).toEqual([]);
   await grant(read, shots);
   const files = await galleryRead();
   expect(files.status).toBe(200);
   expect(await files.json()).toEqual({
-    files: [{ name: 'conn7-fixture.png', mtimeMs: 100, bytes: 67 }],
+    files: [{ name: 'conn7-fixture.png', mtimeMs: 100, bytes: capturePng.byteLength }],
   });
+  expect((await galleryRead(preview.replace('mtimeMs=100', 'mtimeMs=99'))).status).toBe(404);
+  const rendered = await galleryRead(preview);
+  expect(rendered.status).toBe(200);
+  expect(PNG.sync.read(Buffer.from(await rendered.arrayBuffer()))).toMatchObject({
+    width: 7,
+    height: 5,
+  });
+  const downloads = calls.filter((c) => c === 'screenshot').length;
+  expect((await galleryRead(preview)).status).toBe(200);
+  expect(calls.filter((c) => c === 'screenshot')).toHaveLength(downloads);
   const opened = await galleryRead(image);
   expect(opened.status).toBe(200);
   expect(opened.headers.get('content-type')).toBe('image/png');
@@ -672,7 +723,141 @@ it('isolates screenshot metadata and image bytes from inspection and moderation 
   );
   await grant(read);
   const count = calls.length;
+  expect((await galleryRead(preview)).status).toBe(403);
   expect((await galleryRead()).status).toBe(403);
   expect((await galleryRead(image)).status).toBe(403);
   expect(calls).toHaveLength(count);
+});
+
+it('collects native captures independently, fences the verified roster, and protects account attribution', async () => {
+  const account = randomUUID();
+  const filename = 'world-screenshot-mono100-conn2-req1.png';
+  const stamp = '2026-11-21 23:20:24.710';
+  const log = (channel: string, message: string, source: string) =>
+    `${stamp} [INFO ] [${channel}] [t0] ${message}  (${source}.cpp:100)`;
+  const logs = ['booted'];
+  let visible = false;
+  const file = { name: filename, mtimeMs: Date.parse('2026-11-21T23:20:24.703Z'), bytes: 1900 };
+  const { db, id, grant, power, galleryRead, target, fetcher, state } = await fixture((url) => {
+    switch (url.pathname) {
+      case '/api/live/console':
+        return Response.json({
+          last: logs.length,
+          lines: logs
+            .map((text, i) => ({ seq: i + 1, text }))
+            .filter((l) => l.seq > Number(url.searchParams.get('after'))),
+        });
+      case '/api/live/players':
+        return Response.json({
+          players: [{ id: 2, account, admitted: true, accountVerified: true }],
+        });
+      case '/api/live/screenshots':
+        return Response.json({ files: visible ? [file] : [] });
+    }
+  });
+  await power('running');
+  const scan = createOpenworldCaptureCollector({ db, target, fetcher });
+  async function claim() {
+    // The test schema may also contain servers created by earlier cases.
+    const [a, b] = await Promise.all([
+      claimOpenworldCaptureScans(db, 128),
+      claimOpenworldCaptureScans(db, 128),
+    ]);
+    const leases = [...a, ...b].filter((r) => r.server_id === id);
+    expect(leases).toHaveLength(1);
+    const lease = leases[0];
+    if (!lease) throw new Error('missing lease');
+    return lease;
+  }
+  await scan(await claim());
+  logs.push(
+    log(
+      'server-console',
+      'EVT event=console.exec req=U-08 verb=screenshot target=2 request_id=1',
+      'ConsoleVerbs',
+    ),
+  );
+  logs.push(
+    log(
+      'server-net',
+      `conn=2 : screenshot written: owserver_data/screenshots/${filename} (request_id=1, 2560x1600, 1900 byte(s))`,
+      'ScreenshotDataHandler',
+    ),
+  );
+  await db
+    .updateTable('openworld_capture_cursors')
+    .set({ next_scan_at: new Date(0) })
+    .where('server_id', '=', id)
+    .execute();
+  await scan(await claim());
+  expect(
+    await db
+      .selectFrom('openworld_capture_owners')
+      .select('server_id')
+      .where('server_id', '=', id)
+      .execute(),
+  ).toHaveLength(0);
+  visible = true;
+  await db
+    .updateTable('openworld_capture_cursors')
+    .set({ next_scan_at: new Date(0) })
+    .where('server_id', '=', id)
+    .execute();
+  await createOpenworldCaptureCollector({ db, target, fetcher })(await claim());
+  const row = await db
+    .selectFrom('openworld_capture_owners')
+    .selectAll()
+    .where('server_id', '=', id)
+    .executeTakeFirstOrThrow();
+  expect(row).toMatchObject({
+    account_id: account,
+    file_name: filename,
+    request_id: '1',
+    requested_seq: '2',
+    written_seq: '3',
+  });
+  const permissions = ['game.openworld.players.read', 'game.openworld.players.screenshots'];
+  await grant(...permissions);
+  expect((await galleryRead(`?account=${account}`)).status).toBe(403);
+  expect(await (await galleryRead()).json()).toEqual({ files: [file] });
+  await grant(...permissions, 'game.openworld.players.inspect');
+  expect(await (await galleryRead(`?account=${account}`)).json()).toEqual({
+    files: [{ ...file, accountId: account }],
+  });
+  expect(await (await galleryRead(`?account=${randomUUID()}`)).json()).toEqual({ files: [] });
+  file.mtimeMs++;
+  expect(await (await galleryRead()).json()).toEqual({ files: [{ ...file, accountId: null }] });
+  state.beforeReply = async (resource) => {
+    if (resource === 'screenshots') await grant(...permissions);
+  };
+  expect((await galleryRead()).status).toBe(403);
+});
+
+it('checks the original image revision after transfer when a same-size file is replaced', async () => {
+  let mtimeMs = 100;
+  const { power, grant, galleryRead, state, calls } = await fixture((url) =>
+    url.pathname === '/api/live/screenshots'
+      ? Response.json({
+          files: [{ name: 'conn7-fixture.png', bytes: capturePng.byteLength, mtimeMs }],
+        })
+      : undefined,
+  );
+  await power('running');
+  await grant('game.openworld.players.read', 'game.openworld.players.screenshots');
+  const image = '/image?name=conn7-fixture.png';
+  expect((await galleryRead(`${image}&bytes=${capturePng.byteLength}`)).status).toBe(400);
+  expect((await galleryRead(`${image}&mtimeMs=100`)).status).toBe(400);
+  expect((await galleryRead(`${image}&bytes=${capturePng.byteLength}&mtimeMs=100`)).status).toBe(
+    200,
+  );
+  state.beforeReply = async (resource) => {
+    if (resource === 'screenshot') mtimeMs++;
+  };
+  expect((await galleryRead(`${image}&bytes=${capturePng.byteLength}&mtimeMs=100`)).status).toBe(
+    404,
+  );
+  expect(calls.slice(-2)).toEqual(['screenshot', 'screenshots']);
+  const preview = `/thumbnail?name=conn7-fixture.png&bytes=${capturePng.byteLength}&mtimeMs=${mtimeMs}`;
+  expect((await galleryRead(preview)).status).toBe(404);
+  expect(calls.slice(-3)).toEqual(['screenshots', 'screenshot', 'screenshots']);
 });

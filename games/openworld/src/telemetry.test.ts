@@ -55,9 +55,11 @@ it('keeps unsupported native timestamps out of browser date formatting', () => {
   }
 });
 
-it('projects a connection roster without exposing player inspection data or native references', () => {
+it('projects only a verified account for roster reconciliation and strips native references', () => {
   const roster = openworldTelemetrySchemas.players.parse({ players: [nativePlayer] });
   expect(roster.players[0]).toEqual({
+    account: 'fixture-account',
+    accountVerified: true,
     id: 17,
     name: 'Ada',
     state: 'playing',
@@ -68,6 +70,16 @@ it('projects a connection roster without exposing player inspection data or nati
     skinHash: '12abcdef',
     pingMs: 33,
   });
+  for (const identity of [
+    { accountVerified: false },
+    { account: 'guest:someone' },
+    { account: 'unsafe/identifier' },
+  ]) {
+    expect(
+      openworldTelemetrySchemas.players.parse({ players: [{ ...nativePlayer, ...identity }] })
+        .players[0],
+    ).not.toHaveProperty('account');
+  }
   expect(openworldTelemetrySchemas.players.parse(roster)).toEqual(roster);
   expect(openworldTelemetrySchemas.players.parse({ players: [] })).toEqual({ players: [] });
 });

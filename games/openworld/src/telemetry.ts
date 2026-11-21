@@ -163,6 +163,13 @@ const storage = z.object({
 });
 
 const item = z.object({
+  code: z.number().int().min(0).max(0xffffffff).nullish().catch(undefined),
+  icon: z
+    .string()
+    .max(128)
+    .regex(/^\/pack\/ow_[a-z0-9_]+\.png$/)
+    .nullish()
+    .catch(undefined),
   name: label.nullish(),
   kind: label.nullish(),
   ...measurements('count', 'wearPct'),
@@ -204,7 +211,20 @@ function projectSkin<T extends z.output<typeof playerIdentity>>(player: T) {
   return { ...rest, ...(fingerprint ? { skinHash: fingerprint.toLowerCase() } : {}) };
 }
 
-const players = z.object({ players: z.array(playerIdentity.transform(projectSkin)).max(1024) });
+const rosterMember = playerIdentity
+  .extend({
+    account: z.unknown().optional(),
+    accountVerified: z.unknown().optional(),
+  })
+  .transform(({ account, accountVerified, ...member }) => ({
+    ...projectSkin(member),
+    ...(accountVerified === true &&
+    typeof account === 'string' &&
+    /^[A-Za-z0-9_-]{1,128}$/.test(account)
+      ? { account, accountVerified: true as const }
+      : {}),
+  }));
+const players = z.object({ players: z.array(rosterMember).max(1024) });
 const player = playerIdentity
   .extend({
     account: label.nullish(),
@@ -276,7 +296,9 @@ export type OpenworldTelemetryData = {
   [K in OpenworldTelemetryResource]: z.output<(typeof openworldTelemetrySchemas)[K]>;
 };
 export type OpenworldObservationReason = 'offline' | 'not_ready' | 'unreachable';
-export type OpenworldObservation<K extends OpenworldTelemetryResource> =
+export type OpenworldObservation<K extends OpenworldTelemetryResource> = {
+  gameVersion?: string;
+} & (
   | {
       source: 'live';
       observedAt: string;
@@ -290,4 +312,5 @@ export type OpenworldObservation<K extends OpenworldTelemetryResource> =
       reason: OpenworldObservationReason;
       data: OpenworldTelemetryData[K];
     }
-  | { source: 'unavailable'; observedAt: null; reason: OpenworldObservationReason; data: null };
+  | { source: 'unavailable'; observedAt: null; reason: OpenworldObservationReason; data: null }
+);

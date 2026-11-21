@@ -96,20 +96,28 @@ default day of 1,500 seconds. In an isolated run one real second advanced the ga
 by about 57.4 seconds at 19.96 ticks/s and 9.2 seconds at 3.20 ticks/s.
 **Performance** adds tick timings, the game's
 recent metric history, chunks and storage. Both use the Openworld performance read
-permission. **Players** lists the current roster. Opening a player's detailed statistics,
+permission. **Players** opens a searchable directory with connected players first. The
+Online filter shows current connections. Opening a player's detailed statistics,
 position and inventory also requires the separate inspection permission. These tabs use
 the instance's private HTTP service and work with web publication turned off.
 
 Opening a tab reads its data on demand. Concurrent viewers share native reads. When the
 server is offline or its private API is unavailable, each panel shows the time of its
 last saved observation when one exists. Opening a tab leaves a sleeping server asleep.
-Individual player details and skins are available only during a live session.
+A current player connection provides the live body preview, ping and session controls.
 
-In **Players → Saved**, users with the inspection permission can search the server's
-saved profiles even when the game is stopped. The directory reads the configured
-data directory and identifies a record by the account ID stored in the file. It
-shows the save time and distinguishes saved inventory from the current live inventory.
-A verified account in a live player card links to its saved profile by UUID.
+With inspection permission the same directory also searches saved profiles, including
+while the server is stopped. NickPanel joins live and saved records by verified account
+identity. Guests and unrelated players with the same display name remain separate.
+The directory indexes the last visit reported by the game. A save timestamp identifies
+the saved inventory. When a verified player disconnects, their open profile can show
+the most recent available save. The inventory uses the configured release's item
+catalog where available and retains the native code for unknown saved items.
+The catalog covers the 18 Linux releases with verified Gateway support. On a1.2.9
+it maps 927 codes. The atlas preserves 326 distinct texture tiles across releases. The
+base-color tiles come from the game's default texture pack, licensed CC0-1.0 in
+`assets/textures/packs/default/pack.txt`. Items without a matching pack texture use
+a category icon. Live names supplied by the game take precedence.
 
 The separate **Moderate players** permission enables private messages, kick, game
 mode changes, kill, respawn and teleport to coordinates, a connected player or a
@@ -117,7 +125,11 @@ checkpoint. Commands target a running session. NickPanel rechecks the connection
 and records the request before sending it. If the game stops responding after dispatch,
 the panel reports the uncertain outcome. **Request and view game screenshots** is a
 separate grant. It covers requests to the game client and the whole instance's gallery.
-A capture can arrive several seconds after the game accepts the request.
+A capture can arrive several seconds after the game accepts the request. The gallery
+opens private thumbnails on demand. With player inspection, captures also appear in
+a player's profile when the worker can match their verified account, connection,
+request and written file in the same run. This includes captures requested through
+the game's console. Files without sufficient evidence remain in the server gallery.
 
 **Map** opens the selected world's explored terrain. Select a planetary face to pan or
 zoom. The overview uses explored columns, and the detailed view loads just the

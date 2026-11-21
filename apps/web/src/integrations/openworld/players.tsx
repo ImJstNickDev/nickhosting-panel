@@ -1,618 +1,444 @@
-import { useState } from 'react';
-import { Link } from 'react-router';
-import type { OpenworldActionPlayer } from '../../../../../games/openworld/src/player-actions.js';
-import type { OpenworldTelemetryData } from '../../../../../games/openworld/src/telemetry.js';
-import { ApiError } from '../../api/client.js';
+import { useEffect, useState } from 'react';
 import { useT } from '../../app/i18n.js';
-import { Dialog, ErrorNotice, Loading } from '../../components/ui.js';
-import { SearchField } from '../../components/workspace-controls.js';
-import { mapHref, playerSelectionFromMap } from './map-players.js';
-import { type ActionReceipt, PlayerActions } from './player-actions.js';
+import { ErrorNotice, Loading } from '../../components/ui.js';
+import { Pagination, SearchField } from '../../components/workspace-controls.js';
+import { playerSelectionFromMap } from './map-players.js';
 import { PlayerGallery } from './player-gallery.js';
-import { SavedPlayerDialog, SavedPlayers, savedUuid } from './saved-players.js';
 import {
-  base,
+  connection,
+  type Player,
+  PlayerArt,
+  type Profile,
+  people,
+  samePlayer,
+  usePlayerFormat,
+  verifiedAccount,
+} from './player-identity.js';
+import { PlayerProfile } from './player-profile.js';
+import { useSavedDirectory } from './saved-players.js';
+import {
   key,
-  Metrics,
   numeric,
   ObservationStamp,
-  type ServerView,
-  TelemetryPanel,
   type TelemetryViewProps,
-  useMetricsFormat,
   useTelemetry,
   withTelemetrySession,
 } from './telemetry.js';
-
-type Player = OpenworldTelemetryData['players']['players'][number];
-type PlayerDetail = OpenworldTelemetryData['player'];
-type Selection = { id: number; name: string; joinedAt: number | null };
-
-function identity(p: Player, stamp: string | null): Selection {
-  const time = stamp ? Date.parse(stamp) : NaN;
-  return {
-    id: p.id,
-    name: p.name,
-    joinedAt:
-      numeric(p.connectedS) && Number.isFinite(time)
-        ? Math.round(time - p.connectedS * 1000)
-        : null,
-  };
-}
-function playerParams(p: Selection) {
-  const params = new URLSearchParams({ name: p.name });
-  if (p.joinedAt !== null) params.set('joinedAt', String(p.joinedAt));
-  return params;
-}
-function samePlayer(a: Selection, b: Selection) {
-  return (
-    a.id === b.id &&
-    a.name === b.name &&
-    (a.joinedAt === null || b.joinedAt === null || Math.abs(a.joinedAt - b.joinedAt) <= 5000)
-  );
-}
-function Avatar({
-  player,
-  serverId,
-  selection,
-  live,
-}: {
-  player: Player;
-  serverId: string;
-  selection: Selection;
-  live: boolean;
-}) {
-  const [session] = useState(selection);
-  const [failed, setFailed] = useState(false);
-  const query = playerParams(session);
-  query.set('view', 'head');
-  if (player.skinHash) query.set('h', player.skinHash);
-  return (
-    <span aria-hidden="true" className="ow-avatar">
-      {live && player.skinHash && !failed && samePlayer(selection, session) ? (
-        <img
-          width="36"
-          height="36"
-          loading="lazy"
-          alt=""
-          src={`${base(serverId)}/players/${player.id}/skin?${query}`}
-          onError={() => setFailed(true)}
-        />
-      ) : (
-        Array.from(player.name.trim())[0]?.toLocaleUpperCase() || '·'
-      )}
-    </span>
-  );
-}
-function useMode() {
-  const t = useT();
-  return (mode?: string | null) =>
-    mode && ['survival', 'creative', 'spectre', 'spectator'].includes(mode)
-      ? t(key(mode === 'spectator' ? 'spectre' : mode))
-      : mode || '—';
-}
+import './player-profile.css';
 
 export const OpenworldPlayers = withTelemetrySession(Players);
 
 function Players(props: TelemetryViewProps) {
   const t = useT(),
-    f = useMetricsFormat(),
-    mode = useMode();
-  const [view, setView] = useState<'live' | 'directory' | 'gallery'>('live');
-  const [saved, setSaved] = useState<string | null>(null);
-  const [receipt, setReceipt] = useState<ActionReceipt | null>(null);
-  const [watchUntil, setWatchUntil] = useState(0);
+    f = usePlayerFormat();
   const inspect = props.permissionKeys.includes('game.openworld.players.inspect');
   const moderate = props.permissionKeys.includes('game.openworld.players.moderate');
   const screenshots = props.permissionKeys.includes('game.openworld.players.screenshots');
-  const activeView =
-    (view === 'gallery' && !screenshots) || (view === 'directory' && !inspect) ? 'live' : view;
-  const roster = useTelemetry(props, 'players', 'players', activeView === 'live');
-  const [search, setSearch] = useState(''),
-    [selection, setSelection] = useState<(Selection & { processRef?: string }) | null>(() =>
-      inspect && props.permissionKeys.includes('game.openworld.map.read')
-        ? playerSelectionFromMap()
-        : null,
+  const mapAccess = props.permissionKeys.includes('game.openworld.map.read');
+  const [filter, setFilter] = useState<'all' | 'online'>('all');
+  const [gallery, setGallery] = useState(false);
+  const [watchUntil, setWatchUntil] = useState(0);
+  const [search, setSearch] = useState('');
+  const [q, setQuery] = useState('');
+  const [page, setPage] = useState(1);
+  const [selected, setSelected] = useState<Profile | null>(() => {
+    const session = inspect && mapAccess ? playerSelectionFromMap() : null;
+    return session ? { connection: session, name: session.name, account: null } : null;
+  });
+  const galleryOpen = gallery && screenshots;
+  const showHistory = inspect && filter === 'all';
+  const roster = useTelemetry(props, 'players', 'players', !galleryOpen);
+  const observation = !roster.error ? roster.data : undefined;
+  const current = observation?.source === 'live' && props.runtimeState === 'running';
+  const live = observation?.data?.players ?? [];
+  const term = q.toLocaleLowerCase();
+  const rows = live
+    .filter(
+      (p) =>
+        p.name.toLocaleLowerCase().includes(term) ||
+        (inspect && verifiedAccount(p)?.toLocaleLowerCase().includes(term)),
+    )
+    .sort((a, b) => a.name.localeCompare(b.name) || a.id - b.id);
+  const exclude = current ? [...new Set(rows.flatMap((p) => verifiedAccount(p) ?? []))].sort() : [];
+  const saved = useSavedDirectory(
+    props,
+    showHistory && !galleryOpen && (props.runtimeState !== 'running' || !roster.isPending),
+    q,
+    page,
+    exclude,
+  );
+  const history = showHistory && !saved.error ? saved.data : undefined;
+  const pages = Math.max(1, Math.ceil((history?.total ?? 0) / 40));
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      setQuery(search.trim());
+      setPage(1);
+    }, 200);
+    return () => clearTimeout(timer);
+  }, [search]);
+  useEffect(() => {
+    if (history && page > pages) setPage(pages);
+  }, [history, page, pages]);
+  const sessionFor = (p: (typeof live)[number]) =>
+    connection(
+      p,
+      observation?.observedAt ?? null,
+      observation?.source === 'live' ? observation.processRef : undefined,
     );
-  const current =
-    roster.data?.source === 'live' && !roster.error && props.runtimeState === 'running';
-  const liveProcess = roster.data?.source === 'live' ? roster.data.processRef : undefined;
-  const stillConnected =
-    !!selection &&
-    current &&
-    selection.processRef === liveProcess &&
-    roster.data?.data?.players.some((p) =>
-      samePlayer(selection, identity(p, roster.data?.observedAt ?? null)),
-    );
-  const targets: OpenworldActionPlayer[] = current
-    ? (roster.data?.data?.players ?? []).flatMap((p) => {
-        const candidate = identity(p, roster.data?.observedAt ?? null);
-        return candidate.joinedAt !== null && p.id !== selection?.id
-          ? [{ ...candidate, joinedAt: candidate.joinedAt }]
+  const sessionsByAccount = new Map<string, Player[]>();
+  if (inspect && current)
+    for (const p of live) {
+      const account = verifiedAccount(p);
+      if (!account) continue;
+      const list = sessionsByAccount.get(account);
+      if (list) list.push(p);
+      else sessionsByAccount.set(account, [p]);
+    }
+  const openLive = (p: Player) => {
+    const account = inspect ? verifiedAccount(p) : null;
+    const multiple = account && (sessionsByAccount.get(account)?.length ?? 0) > 1;
+    setSelected({ name: p.name, account, connection: multiple ? null : sessionFor(p) });
+  };
+  const pinned = selected?.connection;
+  const matching =
+    pinned && current
+      ? live.find(
+          (p) =>
+            samePlayer(sessionFor(p), pinned) &&
+            (!selected.account || !verifiedAccount(p) || verifiedAccount(p) === selected.account),
+        )
+      : undefined;
+  const targets = current
+    ? live.flatMap((p) => {
+        const session = sessionFor(p);
+        return session.joinedAt !== null && p.id !== selected?.connection?.id
+          ? [{ id: p.id, name: p.name, joinedAt: session.joinedAt }]
           : [];
       })
     : [];
-  const changeView = (next: typeof view) => {
-    setSelection(null);
-    setSaved(null);
-    setView(next);
+  const shownSaved = new Set(history?.players.map((p) => p.uuid));
+  const groups = new Map<string, Player>();
+  for (const p of rows) {
+    const account = inspect && verifiedAccount(p);
+    if (!current && account && shownSaved.has(account)) continue;
+    const identity = account ? `account/${account}` : `session/${p.id}`;
+    if (!groups.has(identity)) groups.set(identity, p);
+  }
+  const explicitOnline = inspect && filter === 'online';
+  const includeRoster = (!showHistory || page === 1) && (!explicitOnline || current);
+  const rosterRows = includeRoster ? [...groups.values()] : [];
+  const offlineRows = history?.players ?? [];
+  const completeIdentities = current && live.every((p) => !!verifiedAccount(p));
+  const canOpen = inspect || moderate || screenshots;
+  const counts = new Map<string, number>();
+  for (const row of [...rosterRows, ...offlineRows]) {
+    if (row.name) counts.set(row.name, (counts.get(row.name) ?? 0) + 1);
+  }
+  const names = new Map<string, string>();
+  if (inspect && galleryOpen) {
+    for (const row of offlineRows) if (row.name) names.set(row.uuid, row.name);
+    for (const p of live) {
+      const account = verifiedAccount(p);
+      if (account) names.set(account, p.name);
+    }
+  }
+  const canRefresh = !roster.isFetching && (!showHistory || !saved.isFetching);
+  const refresh = () => {
+    void roster.refetch();
+    if (showHistory) void saved.refetch();
   };
   return (
-    <div className="ow-workspace">
-      {(inspect || screenshots) && (
-        <fieldset className="ow-switcher">
-          <legend className="visually-hidden">{t(key('players'))}</legend>
-          {(
-            [
-              'live',
-              ...(inspect ? ['directory' as const] : []),
-              ...(screenshots ? ['gallery' as const] : []),
-            ] as const
-          ).map((v) => (
-            <button
-              key={v}
-              type="button"
-              aria-pressed={v === activeView}
-              onClick={() => changeView(v)}
-            >
-              {t(key(v === 'live' ? 'connected' : v))}
-            </button>
-          ))}
-        </fieldset>
-      )}
-      {receipt && (
-        <div className="ow-receipt" role="status">
-          <span className="ow-receipt-label">
-            {t(key(receipt.kind === 'screenshot' ? 'screenshotRequested' : 'actionAccepted'), {
-              name: receipt.playerName,
-              action: t(key(`action.${receipt.kind}`)),
-            })}
-          </span>
-          {receipt.kind === 'screenshot' && screenshots && activeView !== 'gallery' && (
-            <button className="secondary" type="button" onClick={() => changeView('gallery')}>
-              {t(key('openGallery'))}
-            </button>
-          )}
-          <button
-            className="ow-dismiss"
-            type="button"
-            aria-label={t('web.close')}
-            onClick={() => setReceipt(null)}
-          >
-            ×
-          </button>
-        </div>
-      )}
-      {activeView === 'gallery' && screenshots ? (
-        <PlayerGallery server={props} watchUntil={watchUntil} />
-      ) : activeView === 'directory' ? (
-        <SavedPlayers server={props} onOpen={setSaved} />
-      ) : (
-        <TelemetryPanel title={t(key('players'))} query={roster}>
-          {(data, obs) => {
-            const sorted = data.players
-              .filter((p) => p.name.toLocaleLowerCase().includes(search.trim().toLocaleLowerCase()))
-              .sort((a, b) => a.name.localeCompare(b.name) || a.id - b.id);
-            if (!data.players.length)
-              return (
-                <p className="ow-empty">
-                  {t(key(obs.source === 'snapshot' ? 'noPlayersSnapshot' : 'noPlayers'))}
-                </p>
-              );
-            return (
-              <>
-                <div className="ow-roster-tools">
-                  <span className="ow-count">
-                    {t(key('rosterCount'), { count: data.players.length })}
-                  </span>
-                  <SearchField
-                    label={t(key('searchPlayers'))}
-                    value={search}
-                    onChange={(e) => setSearch(e.target.value)}
-                  />
-                </div>
-                {!sorted.length ? (
-                  <p className="ow-empty">{t(key('noMatch'))}</p>
-                ) : (
-                  <ul className="ow-roster">
-                    {sorted.map((p) => {
-                      const sel = identity(p, obs.observedAt);
-                      const avatar = (
-                        <Avatar
-                          key={p.skinHash ?? 'default'}
-                          player={p}
-                          selection={sel}
-                          live={current}
-                          serverId={props.serverId}
-                        />
-                      );
-                      const admitted = p.admitted === true || p.state === 'playing';
-                      const meta = [
-                        p.world,
-                        mode(p.mode) !== '—' ? mode(p.mode) : null,
-                        admitted
-                          ? null
-                          : p.admitted === false || p.state
-                            ? t(key('connecting'))
-                            : null,
-                      ]
-                        .filter(Boolean)
-                        .join(' · ');
-                      const title = (
-                        <>
-                          {avatar}
-                          <span className="ow-person">
-                            <strong>{p.name}</strong>
-                            {meta && <small>{meta}</small>}
-                          </span>
-                        </>
-                      );
-                      return (
-                        <li key={JSON.stringify([p.id, p.name, p.skinHash])}>
-                          {(inspect || moderate || screenshots) && current ? (
-                            <button
-                              type="button"
-                              className="ow-player-link"
-                              onClick={() => setSelection({ ...sel, processRef: liveProcess })}
-                            >
-                              {title}
-                            </button>
-                          ) : (
-                            <div className="ow-player-label">{title}</div>
-                          )}
-                          <dl className="ow-roster-stats">
-                            <div>
-                              <dt>{t(key('session'))}</dt>
-                              <dd>{f.duration(p.connectedS)}</dd>
-                            </div>
-                            <div>
-                              <dt>{t(key('ping'))}</dt>
-                              <dd>{f.metric(p.pingMs, 'ms', 0)}</dd>
-                            </div>
-                          </dl>
-                        </li>
-                      );
-                    })}
-                  </ul>
-                )}
-              </>
-            );
-          }}
-        </TelemetryPanel>
-      )}
-      {saved && inspect && (
-        <SavedPlayerDialog server={props} uuid={saved} onClose={() => setSaved(null)} />
-      )}
-      {!saved && (inspect || moderate || screenshots) && selection && (
-        <PlayerDialog
-          server={props}
-          selection={selection}
-          mapAccess={props.permissionKeys.includes('game.openworld.map.read')}
-          inspect={inspect}
-          moderate={moderate}
-          screenshots={screenshots}
-          otherPlayers={targets}
-          onOpenSaved={setSaved}
-          onAccepted={(accepted) => {
-            setReceipt(accepted);
-            setSelection(null);
-            if (accepted.kind === 'screenshot') setWatchUntil(Date.now() + 30000);
-            void roster.refetch();
-          }}
-          connected={!!stillConnected}
-          rosterUnavailable={
-            roster.error ? 'unreachable' : !current ? (roster.data?.reason ?? 'unavailable') : null
-          }
-          onClose={() => setSelection(null)}
-        />
-      )}
-    </div>
-  );
-}
-
-function PlayerDialog({
-  server,
-  selection,
-  connected,
-  rosterUnavailable,
-  mapAccess,
-  onClose,
-  inspect,
-  moderate,
-  screenshots,
-  otherPlayers,
-  onAccepted,
-  onOpenSaved,
-}: {
-  server: ServerView;
-  selection: Selection & { processRef?: string };
-  connected: boolean;
-  rosterUnavailable: string | null;
-  mapAccess: boolean;
-  inspect: boolean;
-  moderate: boolean;
-  screenshots: boolean;
-  otherPlayers: OpenworldActionPlayer[];
-  onAccepted: (receipt: ActionReceipt) => void;
-  onOpenSaved: (uuid: string) => void;
-  onClose: () => void;
-}) {
-  const t = useT();
-  type Pane = 'character' | 'network' | 'inventory' | 'activity' | 'actions';
-  const [requestedTab, setTab] = useState<Pane>(inspect ? 'character' : 'actions');
-  const [busy, setBusy] = useState(false);
-  const canAct = moderate || screenshots;
-  const tab = !inspect
-    ? 'actions'
-    : requestedTab === 'actions' && !canAct
-      ? 'character'
-      : requestedTab;
-  const detail = useTelemetry(
-    server,
-    'player',
-    `players/${selection.id}?${playerParams(selection)}`,
-    connected && inspect && tab !== 'actions',
-  );
-  const missing = detail.error instanceof ApiError && detail.error.status === 404;
-  const data = detail.data?.data;
-  const valid = data && samePlayer(selection, identity(data, detail.data?.observedAt ?? null));
-  const panes: Pane[] = [
-    ...(inspect ? (['character', 'network', 'inventory', 'activity'] as const) : []),
-    ...(canAct ? (['actions'] as const) : []),
-  ];
-  const account =
-    valid && data.accountVerified === true && data.account ? savedUuid(data.account) : null;
-  return (
-    <Dialog
-      title={selection.name}
-      open
-      showClose
-      closeIcon
-      closeDisabled={busy}
-      className="ow-detail"
-      onClose={onClose}
-    >
-      {rosterUnavailable ? (
-        <p role="status" className="ow-empty">
-          {t(key(rosterUnavailable))}
-        </p>
-      ) : !connected ? (
-        <p role="status" className="ow-empty">
-          {t(key('playerGone'))}
-        </p>
-      ) : (
+    <div className="ow-workspace ow-people">
+      {galleryOpen ? (
         <>
-          {panes.length > 1 && (
-            <fieldset className="ow-filters" disabled={busy}>
-              <legend className="visually-hidden">{t(key('details'))}</legend>
-              {panes.map((value) => (
-                <button
-                  key={value}
-                  type="button"
-                  aria-pressed={tab === value}
-                  onClick={() => setTab(value)}
-                >
-                  {t(key(value))}
-                </button>
-              ))}
-            </fieldset>
-          )}
-          {tab === 'actions' ? (
-            selection.joinedAt === null || !selection.processRef ? (
-              <p>{t(key('unconfirmedSession'))}</p>
-            ) : (
-              <PlayerActions
-                server={server}
-                player={{ id: selection.id, name: selection.name, joinedAt: selection.joinedAt }}
-                processRef={selection.processRef}
-                otherPlayers={otherPlayers}
-                moderate={moderate}
-                screenshots={screenshots}
-                onBusy={setBusy}
-                onAccepted={onAccepted}
-              />
-            )
-          ) : missing ? (
-            <p role="status" className="ow-empty">
-              {t(key('playerGone'))}
-            </p>
-          ) : detail.error ? (
-            <ErrorNotice error={detail.error} retry={() => void detail.refetch()} />
-          ) : detail.isPending ? (
-            <Loading />
-          ) : !data || detail.data?.source !== 'live' ? (
-            <p className="ow-empty">{t(key(detail.data?.reason ?? 'unavailable'))}</p>
-          ) : !valid ? (
-            <p role="status" className="ow-empty">
-              {t(key('playerGone'))}
-            </p>
-          ) : (
-            <>
-              <div className="ow-detail-header">
-                <span>
-                  {[data.world, data.role?.name, data.accountVerified ? t(key('verified')) : null]
-                    .filter(Boolean)
-                    .join(' · ')}
-                </span>
-                <ObservationStamp value={detail.data} />
-              </div>
-              <div className="ow-detail-content">
-                {tab === 'inventory' ? (
-                  <Inventory p={data} />
-                ) : (
-                  <PlayerMetrics p={data} tab={tab} />
-                )}
-              </div>
-              {tab === 'character' &&
-                mapAccess &&
-                data.world &&
-                !data.inSpace &&
-                numeric(data.pos?.face) &&
-                Number.isInteger(data.pos.face) &&
-                data.pos.face >= 0 &&
-                data.pos.face <= 5 &&
-                numeric(data.pos.x) &&
-                numeric(data.pos.z) && (
-                  <Link
-                    to={mapHref(server.serverId, {
-                      world: data.world,
-                      face: data.pos.face,
-                      x: data.pos.x,
-                      z: data.pos.z,
-                      ...(numeric(data.pos.y) ? { y: data.pos.y } : {}),
-                    })}
-                  >
-                    {t('games.openworld.map.showOnMap')}
-                  </Link>
-                )}
-              {account && (
-                <button
-                  type="button"
-                  className="secondary ow-open-save"
-                  onClick={() => onOpenSaved(account)}
-                >
-                  {t(key('openSave'))}
+          <div>
+            <button type="button" className="secondary" onClick={() => setGallery(false)}>
+              {t('web.back')}
+            </button>
+          </div>
+          <PlayerGallery
+            server={props}
+            accountNames={names}
+            inspect={inspect}
+            watchUntil={watchUntil}
+          />
+        </>
+      ) : (
+        <section className="ow-panel">
+          <header className="ow-heading">
+            <h2>{t(key('players'))}</h2>
+            <div className="ow-people-commands">
+              {screenshots && (
+                <button type="button" className="secondary" onClick={() => setGallery(true)}>
+                  {t(people('serverGallery'))}
                 </button>
               )}
-            </>
+              <button type="button" className="secondary" disabled={!canRefresh} onClick={refresh}>
+                {t(key('refresh'))}
+              </button>
+            </div>
+          </header>
+          <div className="ow-directory-tools">
+            {inspect && (
+              <fieldset className="ow-switcher">
+                <legend className="visually-hidden">{t(people('sessions'))}</legend>
+                {(['all', 'online'] as const).map((v) => (
+                  <button
+                    key={v}
+                    type="button"
+                    aria-pressed={filter === v}
+                    onClick={() => {
+                      setFilter(v);
+                      setPage(1);
+                    }}
+                  >
+                    {t(v === 'all' ? people('all') : key('connected'))}
+                  </button>
+                ))}
+              </fieldset>
+            )}
+            <SearchField
+              label={t(inspect ? people('search') : key('searchPlayers'))}
+              maxLength={128}
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+            />
+          </div>
+          <div className="ow-directory-summary">
+            {observation?.data && (!explicitOnline || current) && (
+              <span className="ow-count">
+                {t(current ? key('rosterCount') : people('observedCount'), { count: live.length })}
+              </span>
+            )}
+            <ObservationStamp value={observation} />
+          </div>
+          {observation?.reason && (
+            <p className="ow-observation-reason">{t(key(observation.reason))}</p>
           )}
-        </>
-      )}
-    </Dialog>
-  );
-}
-function Inventory({ p }: { p: PlayerDetail }) {
-  const t = useT(),
-    f = useMetricsFormat(),
-    inv = p.inventory;
-  if (!inv || p.inventoryKnown === false)
-    return <p className="ow-empty">{t(key('inventoryUnknown'))}</p>;
-  return (
-    <>
-      {numeric(inv.reportedAgoS) && (
-        <p className="muted">{t(key('inventoryAge'), { age: f.duration(inv.reportedAgoS) })}</p>
-      )}
-      {(['hotbar', 'bag'] as const).map((group) => (
-        <section key={group}>
-          <h3>{t(key(group))}</h3>
-          <ol className="ow-slots" aria-label={t(key(group))}>
-            {inv[group].map((item, i) => {
-              const slotNumber = i + 1;
-              const selected = group === 'hotbar' && inv.selected === i;
+          {roster.error && <ErrorNotice error={roster.error} retry={() => void roster.refetch()} />}
+          {showHistory && saved.error && (
+            <ErrorNotice error={saved.error} retry={() => void saved.refetch()} />
+          )}
+          {history?.indexing && (
+            <p role="status" className="muted">
+              {t(key('indexing'))}
+            </p>
+          )}
+          {history?.stale && (
+            <p role="status" className="ow-observation-reason">
+              {t(key('directoryStale'), { time: f.stamp(history.indexedAt) })}
+            </p>
+          )}
+          <ul className="ow-roster ow-people-list">
+            {rosterRows.map((p) => {
+              const session = sessionFor(p);
+              const sessions = sessionsByAccount.get(verifiedAccount(p) ?? '') ?? [];
+              const multiple = sessions.length > 1;
+              const alternateNames = multiple
+                ? [...new Set(sessions.map((s) => s.name))].filter((n) => n !== p.name)
+                : [];
+              const admitted = p.admitted === true || p.state === 'playing';
+              const state = current
+                ? !admitted && (p.admitted === false || p.state)
+                  ? 'connecting'
+                  : 'connected'
+                : 'snapshot';
+              const ambiguous = (counts.get(p.name) ?? 0) > 1;
+              const identity = (
+                <>
+                  <PlayerArt
+                    name={p.name}
+                    serverId={props.serverId}
+                    session={current ? session : null}
+                    hash={p.skinHash}
+                  />
+                  <span className="ow-person">
+                    <strong>{p.name}</strong>
+                    <small>
+                      <span className={`ow-presence ${current ? 'is-live' : ''}`}>
+                        {t(state === 'snapshot' ? people('observed') : key(state))}
+                      </span>
+                      {[
+                        '',
+                        multiple ? t(key('rosterCount'), { count: sessions.length }) : p.world,
+                        multiple
+                          ? alternateNames.join(', ') || null
+                          : p.mode
+                            ? f.mode(p.mode)
+                            : null,
+                        ambiguous ? t(people('sessionId'), { id: p.id }) : null,
+                      ]
+                        .filter((v) => v != null)
+                        .join(' · ')}
+                    </small>
+                  </span>
+                </>
+              );
               return (
-                <li
-                  key={slotNumber}
-                  className={selected ? 'ow-selected' : ''}
-                  aria-label={`${slotNumber} · ${item?.name ?? t(key('emptySlot'))}${selected ? ` · ${t(key('selected'))}` : ''}`}
-                >
-                  <small>
-                    {slotNumber}
-                    {selected && ' ▸'}
-                  </small>
-                  <span>{item?.name ?? '—'}</span>
-                  {item?.count != null && item.count > 1 && <b>×{f.metric(item.count)}</b>}
-                  {numeric(item?.wearPct) && (
-                    <small>{t(key('wear'), { value: f.metric(item.wearPct, '%') })}</small>
+                <li key={`session/${p.id}/${p.name}`}>
+                  {canOpen && current ? (
+                    <button type="button" className="ow-player-link" onClick={() => openLive(p)}>
+                      {identity}
+                    </button>
+                  ) : (
+                    <div className="ow-player-label">{identity}</div>
+                  )}
+                  {!multiple && (
+                    <dl className="ow-roster-stats">
+                      <div>
+                        <dt>{t(key('session'))}</dt>
+                        <dd>{f.duration(p.connectedS)}</dd>
+                      </div>
+                      <div>
+                        <dt>{t(key('ping'))}</dt>
+                        <dd>{f.metric(p.pingMs, 'ms', 0)}</dd>
+                      </div>
+                    </dl>
                   )}
                 </li>
               );
             })}
-          </ol>
-        </section>
-      ))}
-    </>
-  );
-}
-
-function PlayerMetrics({ p, tab }: { p: PlayerDetail; tab: 'character' | 'network' | 'activity' }) {
-  const t = useT(),
-    f = useMetricsFormat(),
-    mode = useMode();
-  const pair = (a: unknown, b: unknown) =>
-    numeric(a) && numeric(b) ? `${f.metric(a)} / ${f.metric(b)}` : f.metric(a);
-  if (tab === 'network')
-    return (
-      <Metrics
-        items={[
-          [t(key('ping')), f.metric(p.pingMs, 'ms')],
-          [t(key('loss')), f.metric(p.lossPct, '%')],
-          [t(key('inbound')), f.bitrate(p.recvKbps)],
-          [t(key('outbound')), f.bitrate(p.sentKbps)],
-          [t(key('fps')), f.metric(p.client?.fps)],
-          [t(key('loaded')), f.metric(p.client?.columnsLoaded)],
-          [t(key('pending')), f.metric(p.client?.columnsPending)],
-          ['MTU', f.metric(p.mtu, 'B')],
-        ]}
-      />
-    );
-  if (tab === 'activity') {
-    const r = p.record;
-    if (!r) return <p className="ow-empty">{t(key('detailedMetricsUnavailable'))}</p>;
-    return (
-      <Metrics
-        items={[
-          [
-            t(key('firstSeen')),
-            numeric(r.firstSeenMs) &&
-            r.firstSeenMs > 0 &&
-            Number.isFinite(new Date(r.firstSeenMs).getTime())
-              ? f.date(new Date(r.firstSeenMs))
-              : '—',
-          ],
-          [t(key('logins')), f.metric(r.joins)],
-          [t(key('playtime')), f.duration(r.playSeconds)],
-          [t(key('distance')), f.metric(r.walkedMeters, 'm', 0)],
-          [t(key('placed')), f.metric(r.blocksPlaced)],
-          [t(key('broken')), f.metric(r.blocksBroken)],
-          [t(key('kills')), f.metric(r.creatureKills)],
-          [t(key('deaths')), f.metric(r.deaths)],
-        ]}
-      />
-    );
-  }
-  return (
-    <>
-      <Metrics
-        items={[
-          [t(key('mode')), mode(p.mode)],
-          [t(key('session')), f.duration(p.connectedS)],
-          [t(key('health')), pair(p.vitals?.health, p.vitals?.maxHealth)],
-          [t(key('hunger')), pair(p.vitals?.hunger, p.vitals?.maxHunger)],
-          [t(key('air')), pair(p.vitals?.air, p.vitals?.maxAir)],
-          [t(key('saturation')), f.metric(p.vitals?.saturation)],
-          [t(key('held')), p.heldItem?.name || '—'],
-          [t(key('latitude')), f.metric(p.geo?.lat, '°', 4)],
-          [t(key('longitude')), f.metric(p.geo?.lon, '°', 4)],
-          [t(key('altitude')), f.metric(p.geo?.alt, 'm', 0)],
-          ...(p.pos && [p.pos.x, p.pos.y, p.pos.z].some(numeric)
-            ? [
-                [
-                  t(key('localPosition')),
-                  [p.pos.x, p.pos.y, p.pos.z].map((v) => f.metric(v, '', 2)).join(', '),
-                ] as [string, string],
-              ]
-            : []),
-          ...(p.account ? [[t(key('account')), p.account] as [string, string]] : []),
-        ]}
-      />
-      {p.armor?.some(Boolean) && (
-        <section>
-          <h3>{t(key('equipment'))}</h3>
-          <ul className="ow-armor">
-            {p.armor.map(
-              (a, i) =>
-                a && (
-                  <li key={a.slot ?? i}>
-                    <strong>{a.name || '—'}</strong>
-                    {numeric(a.wearPct) && (
-                      <small>{t(key('wear'), { value: f.metric(a.wearPct, '%') })}</small>
-                    )}
-                  </li>
-                ),
-            )}
+            {offlineRows.map((row) => {
+              const alias = sessionsByAccount.get(row.uuid) ?? [];
+              // Historical names can match a search even when the current name does not.
+              const online = alias.length === 1 ? alias[0] : undefined;
+              const canSayOffline =
+                props.runtimeState === 'offline' ||
+                (current && !alias.length && !row.uuid.startsWith('guest:') && completeIdentities);
+              const date = numeric(row.lastSeenMs)
+                ? f.stamp(row.lastSeenMs)
+                : row.savedAt
+                  ? f.stamp(row.savedAt)
+                  : null;
+              return (
+                <li key={`account/${row.uuid}`}>
+                  <button
+                    className="ow-player-link"
+                    type="button"
+                    onClick={() =>
+                      online
+                        ? openLive(online)
+                        : setSelected({
+                            name: row.name || row.uuid,
+                            account: row.uuid,
+                            connection: null,
+                          })
+                    }
+                  >
+                    <PlayerArt
+                      name={row.name ?? row.uuid}
+                      serverId={props.serverId}
+                      session={online ? sessionFor(online) : null}
+                      hash={online?.skinHash}
+                    />
+                    <span className="ow-person">
+                      <strong>{row.name || row.uuid}</strong>
+                      <small>
+                        <span className={`ow-presence ${alias.length ? 'is-live' : ''}`}>
+                          {t(
+                            alias.length
+                              ? key('connected')
+                              : people(canSayOffline ? 'offlinePlayer' : 'saved'),
+                          )}
+                        </span>
+                        {row.uuid.startsWith('guest:') && <> · {t(people('guest'))}</>}
+                        {row.name && (counts.get(row.name) ?? 0) > 1 && (
+                          <>
+                            {' '}
+                            · <span className="ow-uuid">{row.uuid}</span>
+                          </>
+                        )}
+                        {online && row.name !== online.name && <> · {online.name}</>}
+                      </small>
+                    </span>
+                  </button>
+                  {date && (
+                    <span className="ow-directory-date">
+                      {t(people(numeric(row.lastSeenMs) ? 'lastVisitAt' : 'lastSaveAt'), {
+                        time: date,
+                      })}
+                    </span>
+                  )}
+                </li>
+              );
+            })}
           </ul>
+          {roster.isPending || (showHistory && saved.isPending) ? (
+            <Loading />
+          ) : (
+            (!explicitOnline || current || props.runtimeState === 'offline') &&
+            !rosterRows.length &&
+            !offlineRows.length &&
+            !roster.error &&
+            !(showHistory && saved.error) && (
+              <p className="ow-empty">
+                {t(
+                  q
+                    ? key('noMatch')
+                    : showHistory
+                      ? people('noPlayersYet')
+                      : key(
+                          observation?.source === 'snapshot' && !explicitOnline
+                            ? 'noPlayersSnapshot'
+                            : 'noPlayers',
+                        ),
+                )}
+              </p>
+            )
+          )}
+          {showHistory && pages > 1 && (
+            <Pagination
+              label={t(people('all'))}
+              previousLabel={t('web.previous')}
+              nextLabel={t('web.next')}
+              summary={t(key('pageNumber'), { page, total: pages })}
+              canPrevious={page > 1}
+              canNext={page < pages}
+              onPrevious={() => setPage((p) => p - 1)}
+              onNext={() => setPage((p) => p + 1)}
+            />
+          )}
         </section>
       )}
-    </>
+      {!galleryOpen && selected && canOpen && (inspect || selected.connection) && (
+        <PlayerProfile
+          server={props}
+          selected={selected}
+          connected={matching}
+          accountSessions={
+            (inspect && selected.account ? sessionsByAccount.get(selected.account) : undefined) ??
+            []
+          }
+          onChooseSession={(p) =>
+            setSelected({ ...selected, name: p.name, connection: sessionFor(p) })
+          }
+          onIdentify={(id) =>
+            setSelected((previous) =>
+              previous && !previous.account ? { ...previous, account: id } : previous,
+            )
+          }
+          version={observation?.gameVersion}
+          pendingRoster={roster.isPending}
+          rosterReason={
+            roster.error ? 'unreachable' : !current ? (observation?.reason ?? 'unavailable') : null
+          }
+          inspect={inspect}
+          moderate={moderate}
+          screenshots={screenshots}
+          mapAccess={mapAccess}
+          otherPlayers={targets}
+          watchUntil={watchUntil}
+          onRequestAccepted={(receipt) => {
+            if (receipt.kind === 'screenshot') setWatchUntil(Date.now() + 30000);
+            void roster.refetch();
+          }}
+          onServerGallery={() => {
+            setSelected(null);
+            setGallery(true);
+          }}
+          onClose={() => setSelected(null)}
+        />
+      )}
+    </div>
   );
 }

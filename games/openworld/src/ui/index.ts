@@ -17,6 +17,8 @@ import { openworldGameArtwork, openworldRuntimeArtwork } from './artwork.js';
 import { openworldFactoriesCatalogs } from './factories-catalog.js';
 import { openworldMapCatalogs } from './map-catalog.js';
 import { openworldMapLayerCatalogs } from './map-layers-catalog.js';
+import { openworldPlayerCatalogs } from './player-catalog.js';
+import { openworldInventoryCatalogs } from './player-inventory-catalog.js';
 import { openworldRulesCatalogs } from './rules-catalog.js';
 import { openworldSeedCatalogs } from './seed-catalog.js';
 import { openworldTelemetryCatalogs } from './telemetry-catalog.js';
@@ -223,6 +225,8 @@ export const openworldUiModule = defineTrustedGameUiModule({
         'Requires glibc 2.38. The server uses Debian Bookworm.',
       ...openworldDashboardCatalogs.en,
       ...openworldTelemetryCatalogs.en,
+      ...openworldPlayerCatalogs.en,
+      ...openworldInventoryCatalogs.en,
       ...openworldMapCatalogs.en,
       ...openworldFactoriesCatalogs.en,
       ...openworldRulesCatalogs.en,
@@ -264,6 +268,8 @@ export const openworldUiModule = defineTrustedGameUiModule({
       'games.openworld.incompatibleRuntime': 'Richiede glibc 2.38. Il server usa Debian Bookworm.',
       ...openworldDashboardCatalogs.it,
       ...openworldTelemetryCatalogs.it,
+      ...openworldPlayerCatalogs.it,
+      ...openworldInventoryCatalogs.it,
       ...openworldMapCatalogs.it,
       ...openworldFactoriesCatalogs.it,
       ...openworldRulesCatalogs.it,

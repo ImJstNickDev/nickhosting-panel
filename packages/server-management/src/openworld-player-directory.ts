@@ -64,21 +64,29 @@ export function createOpenworldPlayerDirectory(db: DB, withFiles: WithFiles, now
           ref.revision += `:${Math.floor(started.getTime() / 300000)}`;
       }
       const changed = Array.from(candidates.values()).filter(
-        (r) => known.get(r.stem) !== r.revision,
+        (r) => known.get(r.stem) !== `v2:${r.revision}`,
       );
       // A file whose contents change frequently must not starve newly discovered players.
       changed.sort(
         (a, b) =>
-          Number(known.has(a.stem)) - Number(known.has(b.stem)) || a.stem.localeCompare(b.stem),
+          Number(known.get(a.stem) === a.revision) - Number(known.get(b.stem) === b.revision) ||
+          Number(known.has(a.stem)) - Number(known.has(b.stem)) ||
+          a.stem.localeCompare(b.stem),
       );
       const batch = changed.slice(0, maxBatch);
       const details = await readSavedPlayerDocuments(files, batch);
-      const pending = new Set(changed.slice(maxBatch).map((r) => r.stem));
+      const pending = new Set(
+        changed
+          .slice(maxBatch)
+          .filter((r) => known.get(r.stem) !== r.revision)
+          .map((r) => r.stem),
+      );
       return {
         rows: batch.map((r, i) => ({
           server_id: id,
           file_stem: r.stem,
-          revision: r.revision,
+          revision: `v2:${r.revision}`,
+          last_seen_at: details[i]?.lastSeenMs ? new Date(details[i].lastSeenMs) : null,
           account_id: details[i]?.uuid ?? null,
           display_name: details[i]?.name ?? null,
           saved_at: details[i]?.savedAt ? new Date(details[i].savedAt) : null,
@@ -133,6 +141,7 @@ export function createOpenworldPlayerDirectory(db: DB, withFiles: WithFiles, now
               account_id: eb.ref('excluded.account_id'),
               display_name: eb.ref('excluded.display_name'),
               saved_at: eb.ref('excluded.saved_at'),
+              last_seen_at: eb.ref('excluded.last_seen_at'),
             })),
           )
           .execute();
@@ -144,8 +153,16 @@ export function createOpenworldPlayerDirectory(db: DB, withFiles: WithFiles, now
       id: string,
       search: string,
       page: number,
+      excludeAccounts: readonly string[] = [],
     ): Promise<OpenworldSavedPlayersPage> {
-      if (!Number.isSafeInteger(page) || page < 1 || page > 1000 || search.length > 150)
+      if (
+        !Number.isSafeInteger(page) ||
+        page < 1 ||
+        page > 1000 ||
+        search.length > 150 ||
+        excludeAccounts.length > 1024 ||
+        excludeAccounts.some((id) => !savedAccountId.test(id))
+      )
         throw new DomainError('validation_failed');
       const { binding } = await authorized(db, who, id);
       const last = await lastScan(db, id, binding);
@@ -205,6 +222,7 @@ export function createOpenworldPlayerDirectory(db: DB, withFiles: WithFiles, now
             .selectFrom(players)
             .where('server_id', '=', id)
             .where('account_id', 'is not', null);
+          if (excludeAccounts.length) query = query.where('account_id', 'not in', excludeAccounts);
           if (search)
             query = query.where(
               sql<boolean>`(strpos(lower(account_id),lower(${search})) > 0 OR strpos(lower(coalesce(display_name,'')),lower(${search})) > 0)`,
@@ -214,6 +232,9 @@ export function createOpenworldPlayerDirectory(db: DB, withFiles: WithFiles, now
             .executeTakeFirstOrThrow();
           const summaries = query
             .select(['account_id', 'display_name', 'saved_at'])
+            .select(
+              sql<Date | null>`max(last_seen_at) over (partition by account_id)`.as('last_seen_at'),
+            )
             .$narrowType<{ account_id: string }>()
             .distinctOn('account_id')
             .orderBy('account_id')
@@ -222,7 +243,7 @@ export function createOpenworldPlayerDirectory(db: DB, withFiles: WithFiles, now
           const found = await tx
             .selectFrom(summaries.as('matched'))
             .selectAll()
-            .orderBy(sql`saved_at desc nulls last`)
+            .orderBy(sql`coalesce(last_seen_at, saved_at) desc nulls last`)
             .orderBy('account_id')
             .limit(pageSize)
             .offset((page - 1) * pageSize)
@@ -231,6 +252,7 @@ export function createOpenworldPlayerDirectory(db: DB, withFiles: WithFiles, now
             players: found.map((p) => ({
               uuid: p.account_id,
               name: p.display_name,
+              lastSeenMs: p.last_seen_at?.getTime() ?? null,
               savedAt: p.saved_at?.toISOString() ?? null,
             })),
             page,
@@ -256,7 +278,12 @@ export function createOpenworldPlayerDirectory(db: DB, withFiles: WithFiles, now
         const player = records.find((p) => p?.savedAt) ?? records[0];
         if (!player) throw new DomainError('not_found');
         const stats = records.find((p) => p?.stats);
-        return { ...player, stats: stats?.stats ?? null, statsAt: stats?.statsAt ?? null };
+        return {
+          ...player,
+          lastSeenMs: stats?.stats?.lastSeenMs ?? null,
+          stats: stats?.stats ?? null,
+          statsAt: stats?.statsAt ?? null,
+        };
       });
       await checkBinding(db, who, id, binding);
       return detail;

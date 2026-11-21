@@ -44,6 +44,7 @@ type Inventory = z.output<typeof inventorySchema>;
 export type OpenworldSavedPlayerSummary = {
   uuid: string;
   name: string | null;
+  lastSeenMs?: number | null;
   savedAt: string | null;
 };
 export type OpenworldSavedPlayersPage = {
@@ -186,6 +187,7 @@ export function projectSavedPlayer(
     uuid: identity.id,
     name: maybeLabel(data?.pseudo) ?? maybeLabel(record?.pseudo),
     savedAt: save ? (iso(data?.savedAtMs) ?? ref.save?.time ?? null) : null,
+    lastSeenMs: statsResult.data?.lastSeenMs ?? null,
     statsAt: stats ? (ref.stats?.time ?? null) : null,
     mode: maybeLabel(data?.gameMode),
     world: maybeLabel(z.object({ world: z.unknown() }).safeParse(data?.position).data?.world),

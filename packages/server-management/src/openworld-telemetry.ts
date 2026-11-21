@@ -189,6 +189,9 @@ export async function readOpenworldScope(
             scope.member_role ?? undefined,
             scope.permission_keys,
           );
+    canInspectPlayers =
+      keys.includes('game.openworld.players.read') &&
+      keys.includes('game.openworld.players.inspect');
     if (reader.resource === 'seed') {
       if (!keys.includes('game.openworld.seed.inspect')) throw new DomainError('forbidden');
     } else if (reader.resource === 'rules') {
@@ -199,9 +202,6 @@ export async function readOpenworldScope(
         throw new DomainError('forbidden');
     } else if (reader.resource === 'map') {
       canManageCheckpoints = keys.includes('game.openworld.checkpoints.manage');
-      canInspectPlayers =
-        keys.includes('game.openworld.players.read') &&
-        keys.includes('game.openworld.players.inspect');
       if (
         !keys.includes('game.openworld.map.read') ||
         (reader.manageCheckpoints && !canManageCheckpoints) ||
@@ -254,6 +254,7 @@ export async function readOpenworldScope(
       version: scope.version,
       binding,
       liveKey,
+      canInspectPlayers,
       origin: '',
       reason: scope.runtime_state === 'offline' ? 'offline' : 'not_ready',
     };
@@ -286,6 +287,18 @@ export function assertCurrentOpenworldScope(before: OpenworldScope, after: Openw
   if (after.reason || before.liveKey !== after.liveKey) throw new DomainError('game_not_ready');
 }
 
+function visibleSample<K extends Resource>(scope: OpenworldScope, resource: K, sample: Sample) {
+  if (resource === 'players' && !scope.canInspectPlayers) {
+    const { players } = sample.data as OpenworldTelemetryData['players'];
+    return {
+      players: players.map(
+        ({ account: _account, accountVerified: _verified, ...player }) => player,
+      ),
+    } as OpenworldTelemetryData[K];
+  }
+  return sample.data as OpenworldTelemetryData[K];
+}
+
 function rosterChanged(previous: Sample, next: Sample) {
   const before = (previous.data as OpenworldTelemetryData['players']).players;
   const after = (next.data as OpenworldTelemetryData['players']).players;
@@ -296,6 +309,7 @@ function rosterChanged(previous: Sample, next: Sample) {
     return (
       !prior ||
       prior.name !== p.name ||
+      prior.account !== p.account ||
       (p.connectedS != null &&
         prior.connectedS != null &&
         Math.abs(next.observedAt - previous.observedAt - (p.connectedS - prior.connectedS) * 1000) >
@@ -435,6 +449,7 @@ export function createOpenworldTelemetry(options: OpenworldNativeOptions) {
     scope: OpenworldScope,
     resource: K,
     reason: OpenworldObservationReason,
+    who: AuthContext,
   ): Promise<OpenworldObservation<K>> {
     if (resource !== 'player') {
       let sample: Sample | undefined = recent.get(scope.binding + resource);
@@ -446,6 +461,9 @@ export function createOpenworldTelemetry(options: OpenworldNativeOptions) {
           .where('resource', '=', resource as SnapshotResource)
           .where('binding', '=', scope.binding)
           .executeTakeFirst();
+        const current = await readOpenworldScope(db, scope.serverId, { who, resource });
+        if (scope.binding !== current.binding) throw new DomainError('provenance_mismatch');
+        scope = current;
         if (row) {
           const parsed = openworldTelemetrySchemas[resource].safeParse(row.data);
           if (parsed.success) sample = { data: parsed.data, observedAt: row.observed_at.getTime() };
@@ -453,13 +471,20 @@ export function createOpenworldTelemetry(options: OpenworldNativeOptions) {
       }
       if (sample)
         return {
-          data: sample.data as OpenworldTelemetryData[K],
+          ...(resource === 'players' ? { gameVersion: scope.version } : {}),
+          data: visibleSample(scope, resource, sample),
           source: 'snapshot',
           observedAt: new Date(sample.observedAt).toISOString(),
           reason,
         };
     }
-    return { source: 'unavailable', data: null, observedAt: null, reason };
+    return {
+      source: 'unavailable',
+      data: null,
+      observedAt: null,
+      reason,
+      ...(resource === 'players' ? { gameVersion: scope.version } : {}),
+    };
   }
 
   async function live(scope: OpenworldScope, resource: Resource, id?: number) {
@@ -482,8 +507,8 @@ export function createOpenworldTelemetry(options: OpenworldNativeOptions) {
       selected?: OpenworldPlayerSelection,
     ): Promise<OpenworldObservation<K>> {
       const reader = { who, resource };
-      const scope = await readOpenworldScope(db, serverId, reader);
-      if (scope.reason) return fallback(scope, resource, scope.reason);
+      let scope = await readOpenworldScope(db, serverId, reader);
+      if (scope.reason) return fallback(scope, resource, scope.reason, who);
       if (resource === 'player' && !selected) throw new DomainError('validation_failed');
       // A caller awaiting another viewer's in-flight read needs its own current grants.
       // An already completed cache hit used the current grant/binding query above.
@@ -505,13 +530,15 @@ export function createOpenworldTelemetry(options: OpenworldNativeOptions) {
           current,
           resource,
           current.reason ?? (error.code === 'game_not_ready' ? 'not_ready' : 'unreachable'),
+          who,
         );
       }
       if (!cached) {
         const current = await readOpenworldScope(db, serverId, reader);
         if (scope.binding !== current.binding) throw new DomainError('provenance_mismatch');
         if (current.reason || current.liveKey !== scope.liveKey)
-          return fallback(current, resource, current.reason ?? 'not_ready');
+          return fallback(current, resource, current.reason ?? 'not_ready', who);
+        scope = current;
       }
       if (selected && resource === 'player')
         assertSelection(
@@ -521,8 +548,10 @@ export function createOpenworldTelemetry(options: OpenworldNativeOptions) {
         );
       return {
         source: 'live',
-        ...(resource === 'players' ? { processRef: openworldProcessRef(scope) } : {}),
-        data: sample.data as OpenworldTelemetryData[K],
+        ...(resource === 'players'
+          ? { processRef: openworldProcessRef(scope), gameVersion: scope.version }
+          : {}),
+        data: visibleSample(scope, resource, sample),
         observedAt: new Date(sample.observedAt).toISOString(),
         reason: null,
       };

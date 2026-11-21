@@ -1,5 +1,5 @@
 import { QueryClientProvider } from '@tanstack/react-query';
-import { Suspense } from 'react';
+import { Suspense, useEffect, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { BrowserRouter } from 'react-router';
 import { queryClient } from '../../src/api/client.js';
@@ -22,23 +22,38 @@ const section = gameUiRegistry
   ?.descriptor.sections.find((s) => s.id === params.get('section'));
 const View = getGameSectionView(section?.renderer);
 if (!View) throw Error('Missing Openworld section renderer');
+function FixtureView() {
+  const [effective, setEffective] = useState(permissionKeys);
+  useEffect(() => {
+    const revoke = (event: Event) => {
+      const permission = (event as CustomEvent<string>).detail;
+      setEffective((keys) => keys.filter((k) => k !== permission));
+    };
+    window.addEventListener('fixture-revoke', revoke);
+    return () => window.removeEventListener('fixture-revoke', revoke);
+  }, []);
+  if (!View) return null;
+  return (
+    <View
+      serverId={id}
+      serverName="North Coast"
+      data={{ values: {}, rows: [] }}
+      canManage={false}
+      permissionKeys={effective}
+      runtimeState={params.has('offline') ? 'offline' : 'running'}
+      pending={false}
+      reload={async () => {}}
+      onAccepted={() => {}}
+    />
+  );
+}
 createRoot(document.getElementById('root') as HTMLElement).render(
   <QueryClientProvider client={queryClient}>
     <BrowserRouter>
       <LocaleProvider>
         <main style={{ margin: '20px auto', maxWidth: 960, padding: '0 12px' }}>
           <Suspense>
-            <View
-              serverId={id}
-              serverName="North Coast"
-              data={{ values: {}, rows: [] }}
-              canManage={false}
-              permissionKeys={permissionKeys}
-              runtimeState={params.has('offline') ? 'offline' : 'running'}
-              pending={false}
-              reload={async () => {}}
-              onAccepted={() => {}}
-            />
+            <FixtureView />
           </Suspense>
         </main>
       </LocaleProvider>

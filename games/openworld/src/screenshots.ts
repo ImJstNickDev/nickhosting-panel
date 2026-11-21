@@ -13,6 +13,27 @@ const metadata = z.object({
   bytes: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
 });
 export type OpenworldScreenshot = z.output<typeof metadata>;
+export const screenshotRevision = z.object({
+  name: screenshotName,
+  bytes: z.coerce
+    .number()
+    .int()
+    .positive()
+    .max(16 * 1024 * 1024),
+  mtimeMs: z.coerce.number().int().nonnegative().max(8_640_000_000_000_000),
+});
+export function screenshotRevisionExists(
+  files: OpenworldScreenshot[],
+  revision: OpenworldScreenshot,
+) {
+  let matched = false;
+  for (const file of files) {
+    if (file.name !== revision.name) continue;
+    if (matched || file.mtimeMs !== revision.mtimeMs || file.bytes !== revision.bytes) return false;
+    matched = true;
+  }
+  return matched;
+}
 const index = z.object({ files: z.array(z.unknown()).max(16384) });
 
 async function nativeResponse(

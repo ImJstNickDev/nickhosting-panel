@@ -1,6 +1,7 @@
 import { DomainError } from '@nickhosting/core';
 import type { Hono } from 'hono';
 import { z } from 'zod';
+import { savedAccountId } from '../../../games/openworld/src/offline-players.js';
 import { createOpenworldPlayerDirectory } from '../../../packages/server-management/src/openworld-player-directory.js';
 import type { Variables } from './app.js';
 import type { ServerRouteOptions } from './servers.js';
@@ -33,6 +34,18 @@ export function registerOpenworldPlayerDirectoryRoutes(
     const parsed = pagination.safeParse(c.req.query());
     if (!parsed.success) throw new DomainError('validation_failed');
     return c.json(await directory.list(who, c.req.param('id'), parsed.data.q, parsed.data.page));
+  });
+  app.post(`${base}/search`, async (c) => {
+    c.header('cache-control', 'private, no-store');
+    const who = await options.principal(c);
+    if (c.req.header('content-type')?.split(';')[0]?.trim().toLowerCase() !== 'application/json')
+      throw new DomainError('validation_failed');
+    const parsed = pagination
+      .extend({ excludeAccounts: z.array(z.string().regex(savedAccountId)).max(1024).default([]) })
+      .safeParse(await c.req.json().catch(() => undefined));
+    if (!parsed.success) throw new DomainError('validation_failed');
+    const { q, page, excludeAccounts } = parsed.data;
+    return c.json(await directory.list(who, c.req.param('id'), q, page, excludeAccounts));
   });
   app.get(`${base}/:uuid`, async (c) => {
     c.header('cache-control', 'private, no-store');

@@ -76,6 +76,27 @@ export interface Database
     sha256: string;
     size: number;
   };
+  openworld_capture_cursors: {
+    server_id: string;
+    next_scan_at: Date;
+    lease: string;
+    binding: string | null;
+    process_ref: string | null;
+    evidence: ColumnType<unknown, string | null, string | null>;
+  };
+  openworld_capture_owners: {
+    server_id: string;
+    binding: string;
+    file_name: string;
+    file_bytes: string;
+    mtime_ms: string;
+    process_ref: string;
+    account_id: string | null;
+    connection_id: string;
+    request_id: string;
+    requested_seq: string;
+    written_seq: string;
+  };
   openworld_player_directories: {
     server_id: string;
     binding: string;
@@ -89,6 +110,7 @@ export interface Database
     account_id: string | null;
     display_name: string | null;
     saved_at: Date | null;
+    last_seen_at: Date | null;
   };
   openworld_telemetry_snapshots: {
     server_id: string;

@@ -1,0 +1,223 @@
+.ow-inventory,
+.ow-item-group {
+  min-width: 0;
+}
+.ow-inventory {
+  display: grid;
+  gap: 1.15rem;
+  container-type: inline-size;
+}
+.ow-inventory > .ow-item-group {
+  margin: 0;
+}
+.ow-item-heading {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 0.35rem 0.75rem;
+  margin-bottom: 0.5rem;
+}
+.ow-item-heading h3,
+.ow-equipment h3 {
+  margin: 0;
+  font-size: 0.93rem;
+}
+:where(.ow-equipment li) small,
+.ow-item-meta,
+.ow-item-heading small {
+  color: var(--muted);
+}
+.ow-item-grid {
+  display: grid;
+  grid-template-columns: repeat(12, minmax(0, 1fr));
+  gap: 3px;
+  padding: 0;
+  margin: 0;
+  list-style: none;
+}
+.ow-item-grid li {
+  min-width: 0;
+}
+.ow-item-slot {
+  position: relative;
+  display: grid;
+  place-items: center;
+  box-sizing: border-box;
+  width: 100%;
+  aspect-ratio: 1;
+  min-width: 0;
+  min-height: 0;
+  padding: 0;
+  border: 1px solid #39434a;
+  border-radius: 4px;
+  color: #d6e0df;
+  background: #273139;
+  box-shadow: inset 0 1px 2px #121d2452;
+}
+.ow-item-slot.ow-item-empty {
+  background: #222c33;
+  color: #a0acb4;
+  border-color: #344048;
+}
+.ow-item-slot[data-in-hand="true"] {
+  border-color: #bbd4b3;
+  box-shadow: inset 0 0 0 1px #bbd4b3;
+}
+.ow-item-slot[aria-pressed="true"]:not([data-in-hand="true"]) {
+  border-color: #96b0b7;
+}
+button.ow-item-slot:hover,
+button.ow-item-slot:focus-visible {
+  background: #35424b;
+  border-color: #a6bec2;
+}
+button.ow-item-slot:focus-visible {
+  outline: 2px solid var(--link, #697eba);
+  outline-offset: 2px;
+  z-index: 1;
+}
+.ow-item-slot small,
+.ow-item-slot b {
+  position: absolute;
+  z-index: 1;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+}
+.ow-item-slot small {
+  top: 4px;
+  left: 4px;
+  font-size: 9px;
+  color: #b5c1c6;
+}
+.ow-item-slot b {
+  right: 3px;
+  bottom: 4px;
+  font-size: clamp(10px, 2.5cqi, 13px);
+  color: #fff;
+  text-shadow:
+    0 1px 2px #091319,
+    1px 0 2px #091319,
+    -1px 0 2px #091319;
+}
+.ow-item-tile,
+.ow-item-glyph {
+  display: block;
+  width: clamp(18px, 8cqi, 34px);
+  aspect-ratio: 1;
+  image-rendering: pixelated;
+}
+.ow-item-tile {
+  background-image: url("../../../../../games/openworld/src/ui/assets/inventory-atlas.webp");
+  background-repeat: no-repeat;
+  background-size: 2000% 1700%;
+  background-position: var(--ow-tile-x) var(--ow-tile-y);
+  border-radius: 1px;
+}
+.ow-item-glyph {
+  color: #c2cdd4;
+  filter: drop-shadow(0 1px 0 #19242b88);
+}
+.ow-item-glyph-resource,
+.ow-item-glyph-key {
+  color: #e4c588;
+}
+.ow-item-glyph-food {
+  color: #df8d77;
+}
+.ow-item-glyph-propellant,
+.ow-item-glyph-blueprint {
+  color: #8bbfcf;
+}
+.ow-item-condition {
+  position: absolute;
+  bottom: 2px;
+  left: 4px;
+  right: 4px;
+  height: 2px;
+  background: #172028;
+}
+.ow-item-condition i {
+  display: block;
+  height: 100%;
+  background: #9fc5a3;
+}
+.ow-item-condition i[data-worn="true"] {
+  background: #e8bc83;
+}
+.ow-item-detail {
+  display: flex;
+  align-items: center;
+  gap: 0.8rem;
+  padding: 0.65rem 0 0;
+  border-top: 1px solid var(--line);
+}
+.ow-item-detail-art,
+.ow-equipment-art {
+  flex: 0 0 44px;
+  aspect-ratio: 1;
+  display: grid;
+  place-items: center;
+  border-radius: 4px;
+  background: #29363e;
+}
+.ow-item-detail strong,
+.ow-equipment li strong {
+  overflow-wrap: anywhere;
+}
+.ow-item-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.2rem 0.75rem;
+  font-size: 0.8rem;
+}
+.ow-item-meta small,
+.ow-equipment-id {
+  font-variant-numeric: tabular-nums;
+  font-size: 0.69rem;
+}
+.ow-equipment ul {
+  list-style: none;
+  padding: 0;
+  margin: 0.6rem 0 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 9.5rem), 1fr));
+  gap: 0.65rem;
+}
+.ow-equipment li {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+}
+.ow-equipment li strong,
+.ow-equipment li small {
+  display: block;
+}
+.ow-equipment li strong {
+  font-size: 0.875rem;
+}
+.ow-equipment-art {
+  flex-basis: 36px;
+}
+.ow-equipment li[data-empty="true"] .ow-item-glyph {
+  opacity: 0.45;
+}
+@container (max-width: 34rem) {
+  .ow-item-grid {
+    grid-template-columns: repeat(6, minmax(0, 1fr));
+  }
+}
+@media (forced-colors: active) {
+  .ow-item-slot[data-in-hand="true"] {
+    outline: 2px solid Highlight;
+  }
+}
+@media (max-width: 640px) {
+  .ow-item-detail {
+    position: sticky;
+    bottom: -1.5rem;
+    z-index: 1;
+    background: var(--surface);
+    padding-bottom: 0.65rem;
+  }
+}

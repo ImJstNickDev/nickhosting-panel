@@ -25,6 +25,7 @@ import { startHostObservationLoop } from './host-observations.js';
 import { startMinecraftMetadataLoop } from './minecraft-metadata.js';
 import { startMinecraftModpackLoop } from './minecraft-modpacks.js';
 import { startMinecraftWorldIndexLoop } from './minecraft-worlds.js';
+import { startOpenworldScreenshotLoop } from './openworld-screenshots.js';
 import { refreshProviderFeeds, startProviderFeedLoop } from './provider-feed.js';
 import { reconcileServers } from './reconcile.js';
 import { pollSchedules } from './schedules.js';
@@ -212,6 +213,12 @@ export async function main(env: NodeJS.ProcessEnv = process.env) {
       },
       () => logger.log('warn', 'provider.feed_unavailable'),
     );
+    const captures = startOpenworldScreenshotLoop(
+      db,
+      management,
+      Boolean(env.NH_SECRETS_MASTER_KEY),
+      (serverId) => logger.log('warn', 'openworld.capture_index_unavailable', { serverId }),
+    );
     const worldIndexes = startMinecraftWorldIndexLoop(db, management, env, (serverId) =>
       logger.log('warn', 'minecraft.world_index_unavailable', { serverId }),
     );
@@ -294,6 +301,7 @@ export async function main(env: NodeJS.ProcessEnv = process.env) {
           providerAccounts.close(),
           modpacks.close(),
           worldIndexes.close(),
+          captures.close(),
         ]);
         try {
           await installations?.close();

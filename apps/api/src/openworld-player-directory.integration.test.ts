@@ -3,6 +3,7 @@ import { DomainError } from '@nickhosting/core';
 import { createTestDatabase } from '@nickhosting/database/testing';
 import type { FilemanReadService } from '@nickhosting/game-sdk';
 import { Hono } from 'hono';
+import { sql } from 'kysely';
 import { afterAll, beforeAll, expect, it, vi } from 'vitest';
 import { openworldManifest } from '../../../games/openworld/src/manifest.js';
 import { createOpenworldPlayerDirectory } from '../../../packages/server-management/src/openworld-player-directory.js';
@@ -109,6 +110,7 @@ it('keeps same-name player searches in the authorized instance, requires inspect
     other = randomUUID();
   media.get(a.id)?.put(uuid, 'Ada');
   media.get(b.id)?.put(other, 'Ada');
+  media.get(a.id)?.stats.set(uuid, bytes({ uuid, pseudo: 'Ada', lastSeenMs: 1740000000000 }));
   const dir = createOpenworldPlayerDirectory(fixture.db, async (_who, id, task) => {
     const entry = media.get(id);
     if (!entry) throw new Error('Unexpected fixture');
@@ -135,11 +137,18 @@ it('keeps same-name player searches in the authorized instance, requires inspect
   expect(res.status).toBe(200);
   expect(await res.json()).toMatchObject({
     total: 1,
-    players: [{ uuid, name: 'Ada' }],
+    players: [{ uuid, name: 'Ada', lastSeenMs: 1740000000000 }],
     stale: false,
     indexing: false,
   });
   expect(JSON.stringify(await (await app.request(`${url}?q=%25`)).json())).not.toContain(uuid);
+  const search = (asSub = false) =>
+    app.request(`${url}/search`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', ...(asSub ? { 'x-sub': '1' } : {}) },
+      body: JSON.stringify({ q: 'Ada', page: 1, excludeAccounts: [uuid] }),
+    });
+  expect(await (await search()).json()).toMatchObject({ total: 0, players: [] });
   expect((await app.request(`${url}/${uuid}`)).status).toBe(200);
   expect((await app.request(`${url}/${other}`)).status).toBe(404);
   await fixture.db
@@ -152,6 +161,7 @@ it('keeps same-name player searches in the authorized instance, requires inspect
     })
     .execute();
   expect((await app.request(url, { headers: { 'x-sub': '1' } })).status).toBe(403);
+  expect((await search(true)).status).toBe(403);
   await fixture.db
     .updateTable('server_subusers')
     .set({
@@ -174,7 +184,7 @@ it('keeps same-name player searches in the authorized instance, requires inspect
 it('uses a warm index during file I/O, progresses across bounded batches and removes deleted players', async () => {
   const { id, owner } = await server(),
     f = fileFixture(),
-    ids = Array.from({ length: 45 }, () => randomUUID());
+    ids: string[] = Array.from({ length: 45 }, () => randomUUID());
   for (const uuid of ids) f.put(uuid, 'Ada');
   let clock = Date.now(),
     pause: Promise<void> | undefined;
@@ -199,6 +209,30 @@ it('uses a warm index during file I/O, progresses across bounded batches and rem
     timeout: 2000,
   });
   expect((await list(2)).players).toHaveLength(5);
+  // An existing directory migrates its timestamps in batches without withdrawing valid rows.
+  await fixture.db
+    .updateTable('openworld_saved_players')
+    .set({ revision: sql<string>`substring(revision from 4)`, last_seen_at: null })
+    .where('server_id', '=', id)
+    .execute();
+  clock += 60001;
+  expect(await list()).toMatchObject({ total: 45 });
+  await vi.waitFor(async () => {
+    const upgraded = await fixture.db
+      .selectFrom('openworld_saved_players')
+      .where('server_id', '=', id)
+      .where('revision', 'like', 'v2:%')
+      .select((eb) => eb.fn.countAll<string>().as('n'))
+      .executeTakeFirstOrThrow();
+    expect(Number(upgraded.n)).toBe(32);
+  });
+  const excluded = await dir.list(owner.context, id, '', 1, ids.slice(0, 8));
+  expect(excluded.total).toBe(37);
+  expect(excluded.players).toHaveLength(37);
+  expect(excluded.players.some((p) => ids.slice(0, 8).includes(p.uuid))).toBe(false);
+  clock += 3000;
+  await vi.waitFor(async () => expect(await list()).toMatchObject({ total: 45, indexing: false }));
+
   const reads = vi.mocked(f.files.readMany).mock.calls.length;
   f.docs.delete(ids[0] as string);
   clock += 60001;

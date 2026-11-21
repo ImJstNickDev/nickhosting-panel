@@ -4,18 +4,32 @@ import {
   createOpenworldNativeConnection,
   type OpenworldNativeOptions,
   type OpenworldPlayerGrant,
+  type OpenworldScope,
   openworldProcessRef,
   readOpenworldScope,
 } from './openworld-telemetry.js';
 
 export function createOpenworldPlayerChannel(options: OpenworldNativeOptions) {
   const native = createOpenworldNativeConnection(options);
-  async function access(who: AuthContext, serverId: string, grant: OpenworldPlayerGrant) {
-    const reader = { who, resource: 'players' as const, playerGrant: grant };
+  async function access(
+    who: AuthContext,
+    serverId: string,
+    grant: OpenworldPlayerGrant,
+    inspection?: 'required' | 'include',
+  ) {
+    const reader = {
+      who,
+      resource: inspection === 'required' ? ('player' as const) : ('players' as const),
+      playerGrant: grant,
+    };
     const scope = await readOpenworldScope(options.db, serverId, reader);
     if (scope.reason) throw new DomainError('game_not_ready');
-    const recheck = async () =>
-      assertCurrentOpenworldScope(scope, await readOpenworldScope(options.db, serverId, reader));
+    const recheck = async () => {
+      const current = await readOpenworldScope(options.db, serverId, reader);
+      assertCurrentOpenworldScope(scope, current);
+      if (inspection === 'include' && scope.canInspectPlayers && !current.canInspectPlayers)
+        throw new DomainError('forbidden');
+    };
     return { scope, recheck };
   }
   return {
@@ -23,10 +37,18 @@ export function createOpenworldPlayerChannel(options: OpenworldNativeOptions) {
       who: AuthContext,
       serverId: string,
       grant: OpenworldPlayerGrant,
-      work: (origin: string, token: string, signal: AbortSignal) => Promise<T>,
+      work: (
+        origin: string,
+        token: string,
+        signal: AbortSignal,
+        scope: OpenworldScope,
+      ) => Promise<T>,
+      inspection?: 'required' | 'include',
     ) {
-      const { scope, recheck } = await access(who, serverId, grant);
-      const result = await native(scope, work);
+      const { scope, recheck } = await access(who, serverId, grant, inspection);
+      const result = await native(scope, (origin, token, signal) =>
+        work(origin, token, signal, scope),
+      );
       await recheck();
       return result;
     },

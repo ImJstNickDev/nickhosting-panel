@@ -39,6 +39,7 @@ it('projects the native save and stats files, rejects mismatched identities and 
     uuid,
     name: 'Ada',
     savedAt: at,
+    lastSeenMs: null,
     statsAt: at,
     world: 'earth',
     mode: 'survival',
