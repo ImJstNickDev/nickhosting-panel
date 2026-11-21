@@ -53,6 +53,55 @@ export async function recordAudit(
     .execute();
 }
 
+async function assertResourceSettingsFit(
+  tx: Transaction<Database>,
+  previous: Readonly<PlatformConfig>,
+  next: Readonly<PlatformConfig>,
+) {
+  await assertStoragePolicyIdle(tx);
+  // Policy changes must validate already committed reservations under the same
+  // lock as admission; switching storage modes cannot hide existing use.
+  const reservations = await tx.selectFrom('resource_reservations').selectAll().execute();
+  const servers = await tx
+    .selectFrom('managed_servers as s')
+    .innerJoin('runtime_egg_mappings as m', 'm.id', 's.mapping_id')
+    .select(['s.owner_id', 's.limits', 'm.feature_limits'])
+    .where('s.deleted_at', 'is', null)
+    .execute();
+  const exceptions = await tx.selectFrom('resource_user_limits').selectAll().execute();
+  const storageBudgets = await tx.selectFrom('storage_user_budgets').selectAll().execute();
+  if (servers.length > 0 && next.storagePolicy !== previous.storagePolicy)
+    throw new DomainError('conflict', 409, { reason: 'storage_policy_transition_required' });
+  const owners = new Set([
+    ...reservations.map((r) => r.owner_id),
+    ...servers.map((s) => s.owner_id),
+  ]);
+  for (const owner of owners) {
+    const exception = exceptions.find(
+      (e) => e.user_id === owner && (!e.expires_at || e.expires_at > new Date()),
+    );
+    const memory = exception?.memory_mib ?? next.defaultUserMemoryMiB;
+    const cpu = exception?.cpu_percent ?? next.defaultUserCpuPercent;
+    const storageBudget = storageBudgets.find((budget) => budget.user_id === owner);
+    const storage = Number(
+      storageBudget
+        ? (storageBudget.storage_mib ?? next.defaultUserStorageMiB)
+        : (exception?.storage_mib ?? next.defaultUserStorageMiB),
+    );
+    const active = reservations.filter((r) => r.owner_id === owner);
+    if (
+      active.reduce((s, r) => s + r.memory_mib, 0) > memory ||
+      active.reduce((s, r) => s + r.cpu_percent, 0) > cpu ||
+      (next.storagePolicy === 'PER_USER_BUDGET' &&
+        storage > 0 &&
+        servers
+          .filter((r) => r.owner_id === owner)
+          .reduce((s, r) => s + r.limits.disk * (1 + r.feature_limits.backups), 0) > storage)
+    )
+      throw new DomainError('conflict');
+  }
+}
+
 export async function updateSettings(
   db: Kysely<Database>,
   context: AuthContext,
@@ -63,10 +112,14 @@ export async function updateSettings(
   const parsedPatch = platformConfigPatchSchema.safeParse(patch);
   if (!parsedPatch.success) throw new DomainError('configuration_invalid');
   patch = parsedPatch.data;
+  const fields = Object.keys(parsedPatch.data);
+  const onlyNpmSettings =
+    fields.length > 0 && fields.every((field) => field === 'npmApiUrl' || field === 'npmAcmeEmail');
   return db.transaction().execute(async (tx) => {
-    await sql`select pg_advisory_xact_lock(hashtextextended(current_schema() || ':resources', 0))`.execute(
-      tx,
-    );
+    if (!onlyNpmSettings)
+      await sql`select pg_advisory_xact_lock(hashtextextended(current_schema() || ':resources', 0))`.execute(
+        tx,
+      );
     await sql`select pg_advisory_xact_lock(hashtextextended(current_schema() || ':settings', 0))`.execute(
       tx,
     );
@@ -75,7 +128,8 @@ export async function updateSettings(
       .select('value')
       .where('key', '=', 'platform')
       .executeTakeFirst();
-    assertConfigWritable(patch, resolveConfig(previous?.value ?? {}, env));
+    const current = resolveConfig(previous?.value ?? {}, env);
+    assertConfigWritable(patch, current);
     const value = {
       ...(normalizeLegacyContentSettings(previous?.value ?? {}) as Partial<PlatformConfig>),
       ...patch,
@@ -86,7 +140,7 @@ export async function updateSettings(
       if (value[key] === undefined) delete value[key];
     const resolved = resolveConfig(value, env);
     if ('npmApiUrl' in patch) {
-      const oldUrl = resolveConfig(previous?.value ?? {}, env).values.npmApiUrl;
+      const oldUrl = current.values.npmApiUrl;
       const newUrl = resolved.values.npmApiUrl;
       if (
         oldUrl &&
@@ -100,52 +154,7 @@ export async function updateSettings(
       )
         throw new DomainError('conflict');
     }
-    await assertStoragePolicyIdle(tx);
-    // Policy changes must validate already committed reservations under the same
-    // lock as admission; switching storage modes cannot hide existing use.
-    const reservations = await tx.selectFrom('resource_reservations').selectAll().execute();
-    const servers = await tx
-      .selectFrom('managed_servers as s')
-      .innerJoin('runtime_egg_mappings as m', 'm.id', 's.mapping_id')
-      .select(['s.owner_id', 's.limits', 'm.feature_limits'])
-      .where('s.deleted_at', 'is', null)
-      .execute();
-    const exceptions = await tx.selectFrom('resource_user_limits').selectAll().execute();
-    const storageBudgets = await tx.selectFrom('storage_user_budgets').selectAll().execute();
-    if (
-      servers.length > 0 &&
-      resolved.values.storagePolicy !==
-        resolveConfig(previous?.value ?? {}, env).values.storagePolicy
-    )
-      throw new DomainError('conflict', 409, { reason: 'storage_policy_transition_required' });
-    const owners = new Set([
-      ...reservations.map((r) => r.owner_id),
-      ...servers.map((s) => s.owner_id),
-    ]);
-    for (const owner of owners) {
-      const exception = exceptions.find(
-        (e) => e.user_id === owner && (!e.expires_at || e.expires_at > new Date()),
-      );
-      const memory = exception?.memory_mib ?? resolved.values.defaultUserMemoryMiB;
-      const cpu = exception?.cpu_percent ?? resolved.values.defaultUserCpuPercent;
-      const storageBudget = storageBudgets.find((budget) => budget.user_id === owner);
-      const storage = Number(
-        storageBudget
-          ? (storageBudget.storage_mib ?? resolved.values.defaultUserStorageMiB)
-          : (exception?.storage_mib ?? resolved.values.defaultUserStorageMiB),
-      );
-      const active = reservations.filter((r) => r.owner_id === owner);
-      if (
-        active.reduce((s, r) => s + r.memory_mib, 0) > memory ||
-        active.reduce((s, r) => s + r.cpu_percent, 0) > cpu ||
-        (resolved.values.storagePolicy === 'PER_USER_BUDGET' &&
-          storage > 0 &&
-          servers
-            .filter((r) => r.owner_id === owner)
-            .reduce((s, r) => s + r.limits.disk * (1 + r.feature_limits.backups), 0) > storage)
-      )
-        throw new DomainError('conflict');
-    }
+    if (!onlyNpmSettings) await assertResourceSettingsFit(tx, current.values, resolved.values);
     await tx
       .insertInto('platform_settings')
       .values({ key: 'platform', value })
@@ -166,7 +175,7 @@ export async function updateSettings(
     )
       await notifyGatewayChange(tx);
     if ('npmApiUrl' in patch || 'npmAcmeEmail' in patch) await requeueOpenworldPublications(tx);
-    await recordAudit(tx, context, 'settings.updated', { fields: Object.keys(patch) });
+    await recordAudit(tx, context, 'settings.updated', { fields });
     return resolved;
   });
 }
