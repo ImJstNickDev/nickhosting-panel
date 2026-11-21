@@ -70,6 +70,7 @@ export interface Database
     synced_at: Date;
   };
   openworld_server_profiles: {
+    dashboard_credential_prepared: Generated<boolean>;
     server_id: string;
     version: string;
     sha256: string;

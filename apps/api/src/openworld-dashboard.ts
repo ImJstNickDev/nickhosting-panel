@@ -5,7 +5,6 @@ import { z } from 'zod';
 import {
   readOpenworldDashboard,
   readOpenworldDashboardStatus,
-  revealOpenworldDashboardPassword,
   updateOpenworldDashboard,
 } from '../../../packages/server-management/src/openworld-dashboard.js';
 import type { Variables } from './app.js';
@@ -39,11 +38,7 @@ export function registerOpenworldDashboardRoutes(
   });
   app.get(base, async (c) => {
     const who = await principal(c);
-    return c.json(
-      await withProvider(c, (adapter) =>
-        readOpenworldDashboard(db, adapter, who, c.req.param('id')),
-      ),
-    );
+    return c.json(await readOpenworldDashboard(db, who, c.req.param('id')));
   });
   app.put(base, async (c) => {
     const who = await principal(c, true);
@@ -51,19 +46,7 @@ export function registerOpenworldDashboardRoutes(
       .strictObject({ enabled: z.boolean() })
       .safeParse(await c.req.json().catch(() => null));
     if (!values.success) throw new DomainError('validation_failed');
-    return c.json(
-      await withProvider(c, (adapter) =>
-        updateOpenworldDashboard(db, adapter, who, c.req.param('id'), values.data.enabled),
-      ),
-    );
-  });
-  app.post(`${base}/password`, async (c) => {
-    const who = await principal(c, true);
-    return c.json(
-      await withProvider(c, (adapter) =>
-        revealOpenworldDashboardPassword(db, adapter, who, c.req.param('id')),
-      ),
-    );
+    return c.json(await updateOpenworldDashboard(db, who, c.req.param('id'), values.data.enabled));
   });
   app.get(`${base}/status`, async (c) => {
     const who = await principal(c);

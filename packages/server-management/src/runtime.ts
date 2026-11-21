@@ -897,6 +897,9 @@ export async function createManagementRuntime(options: ManagementOptions) {
     },
     cleanupGameSecrets: async (serverId: string, connection: Kysely<Database>) =>
       (await gameRuntime(connection, serverId))?.cleanupSecrets?.(serverId, connection),
+    prepareGameStart: async (context: import('./lifecycle.js').GameLifecycleContext) => {
+      await (await gameRuntime(context.db, context.server.id))?.prepareStart?.(context);
+    },
     finalizeGameStart: async (context: import('./lifecycle.js').GameLifecycleContext) =>
       (await gameRuntime(context.db, context.server.id))?.finalizeStart?.(context) ?? true,
     gameInstallerEnvironment: async (context: import('./lifecycle.js').GameLifecycleContext) =>

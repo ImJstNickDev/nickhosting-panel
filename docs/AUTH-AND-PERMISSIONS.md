@@ -2,6 +2,8 @@
 
 ## Login methods
 
+On HTTPS, NickPanel scopes session, OAuth, passkey, two-factor and assisted-session cookies to the panel host using the browser-enforced `__Host-` prefix. At cutover, browsers with a legacy HTTPS session sign in once. Opening a published Openworld dashboard then reuses the active panel session through an instance-bound, single-use code. The game host receives its own cookie.
+
 - Email + password (strong password hashing via Better Auth library, verified email).
 - Discord OAuth login; no forced linkage to a pre-existing account by matching email.
 - For either registration origin, later **explicitly link** the other method to the same NickHosting identity. Accounts created through Discord can add verified email + password.

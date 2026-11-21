@@ -126,7 +126,7 @@ export const openworldUiModule = defineTrustedGameUiModule({
         required: true,
       },
     ],
-    connectionModes: [{ mode: 'shared-host', showPort: true }],
+    connectionModes: [{ mode: 'custom-subdomain' }],
   }),
   assets: {
     ...(openworldGameArtwork.src

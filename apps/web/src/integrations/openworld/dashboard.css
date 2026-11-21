@@ -1,12 +1,10 @@
 .openworld-dashboard-access {
-  margin-top: 1rem;
-}
-.openworld-dashboard-password {
-  display: block;
-  margin-top: 0.75rem;
-  font-family: monospace;
+  display: flex;
+  gap: 0.75rem;
+  align-items: center;
+  flex-wrap: wrap;
   overflow-wrap: anywhere;
-  user-select: all;
+  margin-top: 0.75rem;
 }
 .openworld-dashboard-metrics {
   display: grid;

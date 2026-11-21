@@ -5,15 +5,9 @@ import { dashboardStatusSchema } from './dashboard-ui.js';
 const authSchema = z.object({ required: z.boolean(), loopback: z.boolean(), canAct: z.boolean() });
 const loginSchema = z.object({ token: z.string().regex(/^[\x21-\x7e]{1,4096}$/) });
 
-/** Only three fixed native requests. No browser-chosen hosts, paths, headers or commands. */
-export async function openworldDashboardStatus(
-  origin: string,
-  password: string,
-  signal: AbortSignal,
-  fetcher = fetch,
-) {
+function nativeClient(origin: string, signal: AbortSignal, fetcher: typeof fetch) {
   const timeout = AbortSignal.any([signal, AbortSignal.timeout(3500)]);
-  async function request(
+  return async function request(
     path: 'auth' | 'login' | 'status',
     method: 'GET' | 'POST',
     body?: string,
@@ -49,14 +43,36 @@ export async function openworldDashboardStatus(
     } finally {
       await reader.cancel();
     }
-  }
+  };
+}
+
+async function authenticate(request: ReturnType<typeof nativeClient>, password: string) {
+  const auth = authSchema.parse(await request('auth', 'GET'));
+  if (auth.loopback || !auth.required || auth.canAct)
+    throw new DomainError('integration_unavailable');
+  const { token } = loginSchema.parse(await request('login', 'POST', JSON.stringify({ password })));
+  return token;
+}
+
+/** The token is for the trusted proxy only. Never serialize it in browser responses. */
+export function openworldDashboardToken(
+  origin: string,
+  password: string,
+  signal: AbortSignal,
+  fetcher = fetch,
+) {
+  return authenticate(nativeClient(origin, signal, fetcher), password);
+}
+
+export async function openworldDashboardStatus(
+  origin: string,
+  password: string,
+  signal: AbortSignal,
+  fetcher = fetch,
+) {
   try {
-    const auth = authSchema.parse(await request('auth', 'GET'));
-    if (auth.loopback || !auth.required || auth.canAct)
-      throw new DomainError('integration_unavailable');
-    const { token } = loginSchema.parse(
-      await request('login', 'POST', JSON.stringify({ password })),
-    );
+    const request = nativeClient(origin, signal, fetcher);
+    const token = await authenticate(request, password);
     return dashboardStatusSchema.parse(await request('status', 'GET', undefined, token));
   } catch (error) {
     if (error instanceof DomainError) throw error;

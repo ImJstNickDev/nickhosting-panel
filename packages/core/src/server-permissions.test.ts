@@ -36,6 +36,20 @@ describe('server permission contracts', () => {
       );
     expect(legacyServerPermissionKeys('owner')).toHaveLength(serverPermissionDefinitions.length);
   });
+  it('requires a direct grant for standalone administrative access, even for inherited project owners', () => {
+    const key = 'game.fixture.dashboard.admin';
+    const definitions = [
+      {
+        key,
+        resource: 'game.fixture.dashboard',
+        kind: 'additional' as const,
+        legacy: 'explicit' as const,
+      },
+    ];
+    for (const role of ['owner', 'manager', 'operator', 'viewer'] as const)
+      expect(legacyServerPermissionKeys(role, definitions)).toEqual([]);
+    expect(() => assertServerPermissionKeys([key], definitions)).not.toThrow();
+  });
   it('accepts only declared integration permissions with their own read dependency', () => {
     const definitions = [
       ...serverPermissionDefinitions,

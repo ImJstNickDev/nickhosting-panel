@@ -59,13 +59,33 @@ script and pinned checksums. The game and wizard remain usable without the graph
 
 ## Dashboard and gameplay
 
-The native web dashboard is off at creation. The server owner or a platform Owner in a
-regular session can enable it in server settings. The setting takes effect the next time the
-server starts. NickHosting generates a separate password for the instance. The settings
-page can show TPS, memory and connected players through an authenticated server-side
-request. The native dashboard URL is private and requires a network path to the allocation.
-Its built-in seed inspector has its own access rules; the private listener is not published
-by the Game Gateway.
+Openworld uses one custom DNS name per server. Players enter the name and the assigned UDP
+port. Browsers use the same hostname over HTTPS. The advertised IP must deliver the game
+port to the game endpoint and TCP 80/443 to Nginx Proxy Manager (NPM). A server that
+previously used the shared name can select a personal subdomain from Network.
+
+The private HTTP service starts with the game. Each new instance receives a random native
+credential. Existing managed instances prepare a private credential at their next managed
+start. The panel can read server metrics while web publication is disabled. The public toggle
+operates independently of the game process. Opening the website leaves a sleeping server asleep.
+
+In **Owner → Settings → Credentials**, save the NPM API URL and the Let's Encrypt contact
+email, then enter the NPM bearer token. The NPM account needs access to manage its proxy hosts
+and certificates. Saving the token queues existing active personal Openworld names. New DNS
+assignments queue automatically. The worker prepares an individual certificate even while the
+dashboard is private. Unpublishing removes the web route and retains its certificate while
+the name is assigned. HTTP-01 validation requires public DNS and TCP 80 for each name.
+Each published name has its own Proxy Host, certificate, forced HTTPS, HTTP/2, HSTS, common
+exploit protection and WebSockets support in NPM. The forward destination is the deployment's
+web ingress on port 8081. Its dedicated internal API listener uses port 3002.
+
+**Publish web dashboard** defaults to off. The server owner can publish the assigned hostname
+and grant a subuser **Access the Openworld administrative dashboard**. This gives full native
+administration for that instance, including console commands. Project roles do not inherit it.
+The dashboard and Seed Inspector check the active NickPanel session and the instance grant.
+Signing out, revoking the grant, and unpublishing the hostname deny subsequent requests.
+The browser uses a separate, host-only dashboard cookie. Native credentials stay on the
+private side of the proxy.
 
 The verified Linux builds are a1.0.11–a1.0.13, a1.1.0–a1.1.3, a1.2.0–a1.2.9 and
 pre-a1.2.0-1. The a1.0.10 package requires glibc 2.38 and cannot run on the Debian
@@ -81,7 +101,7 @@ With an idle timeout enabled, a Gateway-routed server can sleep after fresh stat
 report zero players throughout that interval. Active UDP sessions and recent join or
 gameplay traffic interrupt the timer. Opening the game’s server list leaves the timer running.
 Missing or invalid samples clear the interval. The Gateway checks again before requesting
-a stop. This works with the web dashboard switched off.
+a stop. Idle detection uses the game protocol independently of web publication.
 
 The a1.2.0–a1.2.9 and pre-a1.2.0-1 servers exited cleanly on the egg's `stop` command
 in isolated tests. Some a1.0.x and a1.1.x servers began saving on shutdown but

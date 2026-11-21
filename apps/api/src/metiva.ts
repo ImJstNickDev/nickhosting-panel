@@ -1,6 +1,6 @@
 import { type AuthContext, DomainError, type SecretCodec } from '@nickhosting/core';
 import {
-  clearMetivaSecret,
+  clearProviderSecret,
   type Database,
   gameMetivaSecret,
   getGameMetivaStatus,
@@ -55,11 +55,11 @@ export function registerOwnerMetivaRoutes(
   });
   app.delete(path, async (c) => {
     const actor = await principal(c, true);
-    await clearMetivaSecret(db, actor, scope(c.req.param('gameId')), env);
+    await clearProviderSecret(db, actor, scope(c.req.param('gameId')), env);
     return c.body(null, 204);
   });
   app.delete('/v1/owner/secrets/metivaAccessToken', async (c) => {
-    await clearMetivaSecret(db, await principal(c, true), 'metivaAccessToken', env);
+    await clearProviderSecret(db, await principal(c, true), 'metivaAccessToken', env);
     return c.body(null, 204);
   });
 }

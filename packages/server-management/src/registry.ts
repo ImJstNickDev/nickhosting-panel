@@ -8,6 +8,7 @@ import {
   DomainError,
   hasPermission,
   legacyServerPermissionKeys,
+  ownerServerPermissionKeys,
   type Permission,
   resolveDnsOptions,
   type ServerPermissionDefinition,
@@ -270,7 +271,10 @@ export async function getServerPermissionKeys(
   assertAuthContext(context);
   const definitions = await getServerPermissionDefinitions(db, server);
   if (context.role === 'owner' || server.owner_id === context.subjectUserId)
-    return definitions.map(({ key }) => key);
+    return ownerServerPermissionKeys(
+      definitions,
+      context.sessionType === 'regular' && server.owner_id === context.subjectUserId,
+    );
   const member = server.project_id
     ? await db
         .selectFrom('project_members')

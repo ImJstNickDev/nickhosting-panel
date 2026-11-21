@@ -5,9 +5,11 @@ import { afterAll, beforeAll, expect, it, vi } from 'vitest';
 import { openworldStartup } from '../../../games/openworld/src/dashboard-launch.js';
 import { openworldManifest } from '../../../games/openworld/src/manifest.js';
 import { assignRoleAllocations } from './allocation-pool.js';
+import type { GameLifecycleContext } from './lifecycle.js';
 import {
+  prepareOpenworldDashboardOnStart,
   readOpenworldDashboard,
-  revealOpenworldDashboardPassword,
+  resolveOpenworldDashboardTarget,
   updateOpenworldDashboard,
 } from './openworld-dashboard.js';
 import { managementFixture } from './test-fixtures.js';
@@ -68,7 +70,7 @@ it('keeps a private role on a non-public pin even when the game uses direct deli
 });
 
 it.each([false, true])(
-  'preserves provider skip_scripts=%s and restricts the native dashboard credential to its owner',
+  'rotates the legacy credential at a managed start with skip_scripts=%s and publishes independently of native administration',
   async (skipScripts) => {
     const f = await managementFixture(database.db);
     const id = await f.server();
@@ -82,6 +84,10 @@ it.each([false, true])(
       .updateTable('runtime_egg_mappings')
       .set({ game_id: 'openworld', runtime_id: 'dedicated' })
       .where('id', '=', f.mappingId)
+      .execute();
+    await f.db
+      .insertInto('openworld_server_profiles')
+      .values({ server_id: id, version: 'a1.2.9', sha256: 'a'.repeat(64), size: 1024 })
       .execute();
     const server = await f.db
       .selectFrom('managed_servers')
@@ -116,7 +122,7 @@ it.each([false, true])(
       .execute();
     const environment: Record<string, string | number | boolean> = {
       OW_WEB_PORT: String(admin.port),
-      OW_WEB_PASSWORD: '',
+      OW_WEB_PASSWORD: skipScripts ? 'p'.repeat(43) : '',
       OW_VERSION: 'a1.2.9',
     };
     const remote = {
@@ -175,58 +181,123 @@ it.each([false, true])(
         },
       ),
     } as unknown as PterodactylAdapter;
-    expect(await readOpenworldDashboard(f.db, adapter, f.context, id)).toEqual({
-      enabled: false,
-      privateAddress: null,
+    const baseState = { enabled: false, phase: 'disabled', hostname: null, nativePrepared: false };
+    expect(await readOpenworldDashboard(f.db, f.context, id)).toEqual({
+      ...baseState,
+      canOpen: true,
       canConfigure: true,
     });
-    const confirmed = await updateOpenworldDashboard(f.db, adapter, f.context, id, true);
-    expect(confirmed).toEqual({
+    expect(await readOpenworldDashboard(f.db, sub.context, id)).toEqual({
+      ...baseState,
+      canOpen: false,
+      canConfigure: false,
+    });
+    await expect(updateOpenworldDashboard(f.db, sub.context, id, true)).rejects.toThrow(
+      'forbidden',
+    );
+    await expect(updateOpenworldDashboard(f.db, f.context, id, true)).rejects.toThrow(
+      'configuration_invalid',
+    );
+    await expect(resolveOpenworldDashboardTarget(f.db, adapter, id)).rejects.toThrow(
+      'game_not_ready',
+    );
+    const hostname = `aurora-${id.slice(0, 8)}.example.test`;
+    const assignment = randomUUID();
+    await f.db
+      .insertInto('dns_assignments')
+      .values({
+        id: assignment,
+        server_id: id,
+        hostname,
+        ownership_token: randomUUID(),
+        ledger: '[]',
+        state: 'active',
+        plan: JSON.stringify({ connection: { hostname } }),
+      })
+      .execute();
+    await f.db
+      .insertInto('server_dns_preferences')
+      .values({ server_id: id, enabled: true, assignment_id: assignment })
+      .onConflict((c) =>
+        c.column('server_id').doUpdateSet({ assignment_id: assignment, enabled: true }),
+      )
+      .execute();
+    await f.db
+      .insertInto('dns_hostname_reservations')
+      .values({ hostname, owner_id: assignment, release_after: null })
+      .execute();
+    expect(await updateOpenworldDashboard(f.db, f.context, id, true)).toMatchObject({
       enabled: true,
-      canConfigure: true,
-      privateAddress: `http://${admin.backend_address}:${admin.port}`,
+      nativePrepared: false,
+      phase: 'pending',
+      hostname,
     });
+    expect(adapter.updateStartup).not.toHaveBeenCalled();
+    const context = {
+      db: f.db,
+      server,
+      adapter,
+      authorize: vi.fn(),
+    } as unknown as GameLifecycleContext;
+    const secretVariable = egg.relationships.variables.data.find(
+      (v) => v.attributes.env_variable === 'OW_WEB_PASSWORD',
+    );
+    if (!secretVariable) throw new Error('Missing fixture variable');
+    secretVariable.attributes.user_viewable = true;
+    await expect(prepareOpenworldDashboardOnStart(context)).rejects.toThrow('provenance_mismatch');
+    expect(adapter.updateStartup).not.toHaveBeenCalled();
+    secretVariable.attributes.user_viewable = false;
+    await prepareOpenworldDashboardOnStart(context);
+    await prepareOpenworldDashboardOnStart(context);
+    expect(adapter.updateStartup).toHaveBeenCalledTimes(1);
     expect(adapter.updateStartup).toHaveBeenCalledWith(
       server.pterodactyl_id,
       expect.objectContaining({ skip_scripts: skipScripts }),
       true,
     );
-    expect(adapter.getApplicationServer).toHaveBeenCalledTimes(2); // initial settings read and pre-mutation identity check
-    const { password } = await revealOpenworldDashboardPassword(f.db, adapter, f.context, id);
-    expect(password).toHaveLength(43);
-    expect(await readOpenworldDashboard(f.db, adapter, sub.context, id)).toEqual({
-      enabled: true,
-      privateAddress: null,
-      canConfigure: false,
+    expect(context.authorize).toHaveBeenCalledOnce();
+    const password = environment.OW_WEB_PASSWORD;
+    expect(password).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    expect(password).not.toBe('p'.repeat(43));
+    await f.db
+      .updateTable('managed_servers')
+      .set({ runtime_state: 'running' })
+      .where('id', '=', id)
+      .execute();
+    expect(await resolveOpenworldDashboardTarget(f.db, adapter, id)).toEqual({
+      address: `http://${admin.backend_address}:${admin.port}`,
+      password,
     });
-    await expect(revealOpenworldDashboardPassword(f.db, adapter, sub.context, id)).rejects.toThrow(
+    await f.db
+      .updateTable('server_subusers')
+      .set({ permission_keys: JSON.stringify(['game.openworld.dashboard.admin']) })
+      .where('server_id', '=', id)
+      .where('user_id', '=', sub.context.subjectUserId)
+      .execute();
+    const settings = await readOpenworldDashboard(f.db, sub.context, id);
+    expect(settings).toMatchObject({
+      enabled: true,
+      canOpen: true,
+      canConfigure: false,
+      hostname,
+      nativePrepared: true,
+    });
+    expect(Object.values(settings)).not.toContain(password);
+    await expect(updateOpenworldDashboard(f.db, sub.context, id, false)).rejects.toThrow(
       'forbidden',
     );
-    await expect(updateOpenworldDashboard(f.db, adapter, sub.context, id, false)).rejects.toThrow(
-      'forbidden',
-    );
-    await updateOpenworldDashboard(f.db, adapter, f.context, id, true);
+    expect(await updateOpenworldDashboard(f.db, f.context, id, false)).toMatchObject({
+      enabled: false,
+      phase: 'disabled',
+    });
+    expect((await resolveOpenworldDashboardTarget(f.db, adapter, id)).password).toBe(password);
     expect(adapter.updateStartup).toHaveBeenCalledTimes(1);
+    expect(environment.OW_VERSION).toBe('a1.2.9');
     const audit = await f.db
       .selectFrom('audit_events')
       .selectAll()
       .where('actor_user_id', '=', f.context.actorUserId)
       .execute();
     expect(JSON.stringify(audit)).not.toContain(password);
-    await updateOpenworldDashboard(f.db, adapter, f.context, id, false);
-    expect(environment.OW_WEB_PASSWORD).toBe('');
-    expect(environment.OW_VERSION).toBe('a1.2.9');
-    await expect(revealOpenworldDashboardPassword(f.db, adapter, f.context, id)).rejects.toThrow(
-      'game_not_ready',
-    );
-    const secretVariable = egg.relationships.variables.data.find(
-      (v) => v.attributes.env_variable === 'OW_WEB_PASSWORD',
-    );
-    if (!secretVariable) throw new Error('Expected fixture variable');
-    secretVariable.attributes.user_viewable = true;
-    await expect(updateOpenworldDashboard(f.db, adapter, f.context, id, true)).rejects.toThrow(
-      'provenance_mismatch',
-    );
-    expect(adapter.updateStartup).toHaveBeenCalledTimes(2);
   },
 );

@@ -16,7 +16,10 @@ function Fixture() {
       metadata: await api<{
         enabled: boolean;
         canConfigure: boolean;
-        privateAddress: string | null;
+        canOpen: boolean;
+        nativePrepared: boolean;
+        phase: string;
+        hostname: string | null;
       }>(`/v1/servers/${id}/openworld/dashboard`, { signal }),
     }),
   });
@@ -29,7 +32,9 @@ function Fixture() {
         serverName="Openworld"
         runtimeState="running"
         canManage={owner}
-        permissionKeys={owner ? ['settings.read', 'settings.write'] : ['settings.read']}
+        permissionKeys={
+          owner ? ['settings.read', 'settings.write'] : ['game.openworld.dashboard.admin']
+        }
         pending={false}
         onAccepted={() => {}}
         reload={() => query.refetch()}

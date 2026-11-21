@@ -1,3 +1,4 @@
+import { randomBytes } from 'node:crypto';
 import {
   type AuthContext,
   DomainError,
@@ -29,6 +30,8 @@ import {
 import type { GameRuntimeHooks, TrustedGameModule } from './game-modules.js';
 import type { GameLifecycleContext } from './lifecycle.js';
 import { issueOpenworldArtifactUrl, listOpenworldReleases } from './openworld-catalog.js';
+
+import { prepareOpenworldDashboardOnStart } from './openworld-dashboard.js';
 
 const id = 'openworld';
 
@@ -203,13 +206,13 @@ export const openworldModule: TrustedGameModule = {
         OW_SHA256: release.sha256,
         OW_ARCHIVE_SIZE: String(release.size),
         OW_SERVER_NAME: name,
-        OW_WEB_PASSWORD: '',
       },
       async persist(connection, serverId) {
         await connection
           .insertInto('openworld_server_profiles')
           .values({
             server_id: serverId,
+            dashboard_credential_prepared: true,
             version: release.version,
             sha256: release.sha256,
             size: release.size,
@@ -297,9 +300,11 @@ export function createOpenworldModuleRuntime(
         OW_ARCHIVE_SIZE: String(release.size),
         OW_SHA256: release.sha256,
         OW_WEB_PORT: String(dashboard.port),
+        OW_WEB_PASSWORD: randomBytes(32).toString('base64url'),
         OW_DOWNLOAD_URL: issueOpenworldArtifactUrl(codec, values.publicUrl, release),
       };
     },
+    prepareStart: prepareOpenworldDashboardOnStart,
     configureProvision: verifyFiles,
     verifyRestore: verifyFiles,
     async processContent() {

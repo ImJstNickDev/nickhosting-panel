@@ -317,6 +317,8 @@ export const gameUiDescriptorSchema = z
               )
               .min(1)
               .max(4),
+            /** Where provided, one of these grants is also necessary to see the section. */
+            anyPermissions: z.array(z.string().min(1).max(127)).min(1).max(4).optional(),
             /** Explicit write authority for bundled section renderers. Read
              * access alone never grants mutation controls. */
             managePermissions: z
@@ -744,6 +746,8 @@ export function availableGameUiSections(
     (section) =>
       (!section.runtimeIds || section.runtimeIds.includes(context.runtimeId)) &&
       section.requiredPermissions.every((permission) => context.permissions.includes(permission)) &&
+      (!section.anyPermissions ||
+        section.anyPermissions.some((permission) => context.permissions.includes(permission))) &&
       section.requiredCapabilities.every(
         (capability) => context.capabilities?.[capability] === true,
       ),

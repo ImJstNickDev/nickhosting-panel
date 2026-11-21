@@ -18,7 +18,18 @@ export const openworldManifest = gameManifestSchema.parse({
     wake: 'manual',
   },
   backupPolicy: { offline: 'required' },
-  connection: { mode: 'shared-host', defaultLabel: 'openworld', allowCustomSubdomain: false },
+  connection: { mode: 'custom-subdomain', zoneSettingKey: 'dnsBaseDomain' },
+  serverPermissions: [
+    {
+      key: 'game.openworld.dashboard.admin',
+      resource: 'game.openworld.dashboard',
+      kind: 'additional',
+      legacy: 'explicit',
+      labelKey: 'games.openworld.dashboard.permission',
+      resourceLabelKey: 'games.openworld.dashboard.title',
+      descriptionKey: 'games.openworld.dashboard.permissionHelp',
+    },
+  ],
   ports: [
     { role: 'game', required: true, transport: 'udp', defaultPort: 24710 },
     { role: 'dashboard', required: true, transport: 'tcp', visibility: 'private' },

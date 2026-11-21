@@ -14,7 +14,7 @@ import { evaluateGameAccess, gameManifestSchema, gameRolloutSchema } from '@nick
 import { type Kysely, sql, type Transaction } from 'kysely';
 import type { PoolClient } from 'pg';
 import type { Database } from './index.js';
-import { notifyGatewayChange } from './job-notifications.js';
+import { notifyGatewayChange, requeueOpenworldPublications } from './job-notifications.js';
 import { assertStoragePolicyIdle } from './storage-policy.js';
 
 type DB = Kysely<Database> | Transaction<Database>;
@@ -85,6 +85,21 @@ export async function updateSettings(
     for (const key of Object.keys(value) as Array<keyof PlatformConfig>)
       if (value[key] === undefined) delete value[key];
     const resolved = resolveConfig(value, env);
+    if ('npmApiUrl' in patch) {
+      const oldUrl = resolveConfig(previous?.value ?? {}, env).values.npmApiUrl;
+      const newUrl = resolved.values.npmApiUrl;
+      if (
+        oldUrl &&
+        new URL(oldUrl).origin !== (newUrl && new URL(newUrl).origin) &&
+        (env[envName('npmAccessToken', env)] ||
+          (await tx
+            .selectFrom('encrypted_secrets')
+            .select('name')
+            .where('name', '=', 'npmAccessToken')
+            .executeTakeFirst()))
+      )
+        throw new DomainError('conflict');
+    }
     await assertStoragePolicyIdle(tx);
     // Policy changes must validate already committed reservations under the same
     // lock as admission; switching storage modes cannot hide existing use.
@@ -150,6 +165,7 @@ export async function updateSettings(
       'autoWakeUserAccess' in patch
     )
       await notifyGatewayChange(tx);
+    if ('npmApiUrl' in patch || 'npmAcmeEmail' in patch) await requeueOpenworldPublications(tx);
     await recordAudit(tx, context, 'settings.updated', { fields: Object.keys(patch) });
     return resolved;
   });
@@ -167,6 +183,7 @@ export const secretNames = [
   'gatewayControlToken',
   'curseforgeApiKey',
   'metivaAccessToken',
+  'npmAccessToken',
 ] as const;
 export type SecretName = (typeof secretNames)[number];
 const secretEnv: Record<SecretName, string> = {
@@ -181,6 +198,7 @@ const secretEnv: Record<SecretName, string> = {
   gatewayControlToken: 'NH_GATEWAY_CONTROL_TOKEN',
   curseforgeApiKey: 'NH_CURSEFORGE_API_KEY',
   metivaAccessToken: 'NH_METIVA_ACCESS_TOKEN',
+  npmAccessToken: 'NH_NPM_ACCESS_TOKEN',
 };
 
 export function gameMetivaSecret(gameId: string): `metiva:${string}` {
@@ -191,6 +209,11 @@ export function gameMetivaSecret(gameId: string): `metiva:${string}` {
 type StoredSecret = SecretName | ReturnType<typeof gameMetivaSecret>;
 
 function envName(name: StoredSecret, env: Environment): string {
+  if (name === 'npmAccessToken') {
+    if (env.NH_DEPLOYMENT_ENV === 'development') return 'NH_DEV_NPM_ACCESS_TOKEN';
+    if (env.NH_DEPLOYMENT_ENV === 'production') return 'NH_PROD_NPM_ACCESS_TOKEN';
+    return secretEnv.npmAccessToken;
+  }
   if (name !== 'metivaAccessToken' && !name.startsWith('metiva:'))
     return secretEnv[name as SecretName];
   const suffix =
@@ -217,7 +240,11 @@ export async function getSecret(
 ) {
   const override = env[envName(name, env)];
   if (override !== undefined) {
-    if (!override.trim()) throw new DomainError('configuration_invalid');
+    if (
+      !override.trim() ||
+      (name === 'npmAccessToken' && !env[envName(name, env).replace('ACCESS_TOKEN', 'API_URL')])
+    )
+      throw new DomainError('configuration_invalid');
     return override;
   }
   const row = await db
@@ -225,7 +252,13 @@ export async function getSecret(
     .select('envelope')
     .where('name', '=', name)
     .executeTakeFirst();
-  return row ? codec.decrypt(row.envelope, name) : undefined;
+  if (!row) return;
+  if (name === 'npmAccessToken') {
+    const { npmApiUrl } = (await getSettings(db, env)).values;
+    if (!npmApiUrl) throw new DomainError('configuration_invalid');
+    return codec.decrypt(row.envelope, `${name}:${new URL(npmApiUrl).origin}`);
+  }
+  return codec.decrypt(row.envelope, name);
 }
 
 /** Only presence/source can be returned to HTTP clients. */
@@ -248,6 +281,7 @@ export async function storeSecret(
   name: StoredSecret,
   value: string,
   env: Environment = {},
+  expectedOrigin?: string,
 ) {
   regularOwner(context);
   if (env[envName(name, env)] !== undefined) throw new DomainError('conflict');
@@ -256,8 +290,21 @@ export async function storeSecret(
     !/^mtv_[A-Za-z0-9_-]{1,1024}$/.test(value)
   )
     throw new DomainError('validation_failed');
-  const envelope = codec.encrypt(value, name);
+  if (name === 'npmAccessToken' && !/^[A-Za-z0-9._~-]{10,4096}$/.test(value))
+    throw new DomainError('validation_failed');
   await db.transaction().execute(async (tx) => {
+    let binding: string = name;
+    if (name === 'npmAccessToken') {
+      await sql`select pg_advisory_xact_lock(hashtextextended(current_schema() || ':settings', 0))`.execute(
+        tx,
+      );
+      const { npmApiUrl } = (await getSettings(tx, env)).values;
+      if (!npmApiUrl || !expectedOrigin || new URL(npmApiUrl).origin !== expectedOrigin)
+        throw new DomainError('conflict');
+      binding = `${name}:${expectedOrigin}`;
+      await requeueOpenworldPublications(tx);
+    }
+    const envelope = codec.encrypt(value, binding);
     await tx
       .insertInto('encrypted_secrets')
       .values({ name, envelope })
@@ -267,15 +314,21 @@ export async function storeSecret(
   });
 }
 
-export async function clearMetivaSecret(
+export async function clearProviderSecret(
   db: Kysely<Database>,
   context: AuthContext,
-  name: 'metivaAccessToken' | ReturnType<typeof gameMetivaSecret>,
+  name: 'metivaAccessToken' | 'npmAccessToken' | ReturnType<typeof gameMetivaSecret>,
   env: Environment = {},
 ) {
   regularOwner(context);
   if (env[envName(name, env)] !== undefined) throw new DomainError('conflict');
   await db.transaction().execute(async (tx) => {
+    if (name === 'npmAccessToken') {
+      await sql`select pg_advisory_xact_lock(hashtextextended(current_schema() || ':settings', 0))`.execute(
+        tx,
+      );
+      await requeueOpenworldPublications(tx);
+    }
     await tx.deleteFrom('encrypted_secrets').where('name', '=', name).execute();
     await recordAudit(tx, context, 'secret.removed', { name });
   });

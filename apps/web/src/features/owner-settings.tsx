@@ -20,6 +20,7 @@ import {
 import { GlobalWakeSettings } from './auto-wake-policy.js';
 import { resetMetivaCatalogs } from './integration-metiva-token.js';
 import { domainSettingKeys, OwnerDomains } from './owner-domains.js';
+import { OwnerProxyManager } from './owner-proxy-manager.js';
 import { OwnerSecretForm } from './owner-secret-form.js';
 import { OwnerStoragePolicy } from './owner-storage-policy.js';
 import { GlobalSleepSettings } from './sleep-timeout.js';
@@ -171,6 +172,8 @@ export function OwnerSettingsPage() {
                   ![
                     ...domainSettingKeys,
                     'cloudflareZoneId',
+                    'npmApiUrl',
+                    'npmAcmeEmail',
                     'dnsBaseDomain',
                     'defaultIdleTimeoutSeconds',
                     'idleTimeoutUserAccess',
@@ -227,30 +230,42 @@ export function OwnerSettingsPage() {
         </Section>
       ))}
       <Section title={t('owner.credentials')}>
+        <span id="credentials" />
         <p className="muted">{t('owner.writeOnly')}</p>
         <div className="settings-list">
-          {value.secrets.map((secret) => (
-            <details key={secret.name}>
-              <summary>
-                {t(`owner.secret.${secret.name}`)}{' '}
-                <small>{t(secret.configured ? 'owner.configured' : 'web.unconfigured')}</small>
-              </summary>
-              {!editable || secret.locked ? (
-                <Notice>
-                  {t(editable ? 'owner.environmentLocked' : 'owner.readOnlySettings')}
-                </Notice>
-              ) : (
-                <OwnerSecretForm
-                  path={`/v1/owner/secrets/${secret.name}`}
-                  allowClear={secret.name === 'metivaAccessToken' && secret.configured}
-                  onSaved={async () => {
-                    if (secret.name === 'metivaAccessToken') await resetMetivaCatalogs(queryClient);
-                    await settings.refetch();
-                  }}
-                />
-              )}
-            </details>
-          ))}
+          {value.secrets.map((secret) =>
+            secret.name === 'npmAccessToken' ? (
+              <OwnerProxyManager
+                key={secret.name}
+                config={value.config}
+                secret={secret}
+                editable={editable}
+                onSaved={() => settings.refetch()}
+              />
+            ) : (
+              <details key={secret.name}>
+                <summary>
+                  {t(`owner.secret.${secret.name}`)}{' '}
+                  <small>{t(secret.configured ? 'owner.configured' : 'web.unconfigured')}</small>
+                </summary>
+                {!editable || secret.locked ? (
+                  <Notice>
+                    {t(editable ? 'owner.environmentLocked' : 'owner.readOnlySettings')}
+                  </Notice>
+                ) : (
+                  <OwnerSecretForm
+                    path={`/v1/owner/secrets/${secret.name}`}
+                    allowClear={secret.name === 'metivaAccessToken' && secret.configured}
+                    onSaved={async () => {
+                      if (secret.name === 'metivaAccessToken')
+                        await resetMetivaCatalogs(queryClient);
+                      await settings.refetch();
+                    }}
+                  />
+                )}
+              </details>
+            ),
+          )}
         </div>
       </Section>
       <Dialog

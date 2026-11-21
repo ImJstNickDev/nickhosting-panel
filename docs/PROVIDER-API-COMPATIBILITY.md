@@ -173,8 +173,9 @@ and test recovery without weakening the upstream limits. Sources:
   [Egg model](https://github.com/pterodactyl/panel/blob/v1.15.1/app/Models/Egg.php).
 
 Both native startup request validators require `skip_scripts`. NickHosting requires
-the flag on startup updates. When toggling the Openworld dashboard it copies the
-current value from the provider's `container.skip_scripts` field.
+the flag on startup updates. The one-time Openworld dashboard credential upgrade
+copies the provider's current `container.skip_scripts` value. Publishing the web
+dashboard changes the HTTP route independently of the provider startup settings.
 
 ## Evidence and remaining work
 

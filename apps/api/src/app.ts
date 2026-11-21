@@ -14,6 +14,7 @@ import {
   safeError,
 } from '@nickhosting/core';
 import {
+  clearProviderSecret,
   type createDatabase,
   getSettings,
   recordAudit,
@@ -44,6 +45,7 @@ import { registerMinecraftWorldCatalogRoutes } from './minecraft-world-catalog.j
 import { registerOpenworldRoutes } from './openworld.js';
 import { registerOpenworldArtifactRoute } from './openworld-artifacts.js';
 import { registerOpenworldDashboardRoutes } from './openworld-dashboard.js';
+import { registerOpenworldDashboardSso } from './openworld-dashboard-sso.js';
 import { registerPlatformRoutes } from './platform.js';
 import { registerProfilePhotoRoutes } from './profile-photo.js';
 import { PROVIDER_EVENTS_PATH, receiveProviderEvent } from './provider-events.js';
@@ -332,9 +334,29 @@ export function createApp(options: Options) {
       throw new DomainError('integration_unavailable');
     }
   });
-  app.use('/api/*', async (c, next) => {
+  async function setIdentity(c: Context<{ Variables: Variables }>) {
     const identity = await options.identity(c.req.raw);
+    if (identity.hostCookies) {
+      const headers = c.get('authHeaders');
+      const names = new Set<string>();
+      const cookies: string[] = [];
+      // Host-prefixed cookies with Path=/ have one value per origin in browsers.
+      // Exclude legacy/domain cookies and reject ambiguous non-browser inputs.
+      for (const part of (headers.get('cookie') ?? '').split(';')) {
+        const item = part.trim();
+        const name = item.slice(0, item.indexOf('='));
+        if (!name.startsWith('__Host-nh-auth.') && name !== '__Host-nh-support') continue;
+        if (names.has(name)) throw new DomainError('unauthenticated');
+        names.add(name);
+        cookies.push(item);
+      }
+      headers.set('cookie', cookies.join('; '));
+    }
     c.set('identity', identity);
+    return identity;
+  }
+  app.use('/api/*', async (c, next) => {
+    const identity = await setIdentity(c);
     const session = await identity.auth.api.getSession({ headers: c.get('authHeaders') });
     if (session) c.set('locale', session.user.locale === 'it' ? 'it' : 'en');
     await next();
@@ -342,8 +364,7 @@ export function createApp(options: Options) {
   app.use('/v1/*', async (c, next) => {
     if (c.req.method === 'POST' && [PROVIDER_EVENTS_PATH, SFTP_EVENTS_PATH].includes(c.req.path))
       return next();
-    const identity = await options.identity(c.req.raw);
-    c.set('identity', identity);
+    await setIdentity(c);
     await next();
   });
 
@@ -525,14 +546,31 @@ export function createApp(options: Options) {
     const key = validate(platformConfigSchema.keyof(), Object.keys(normalized as object)[0]);
     return c.json(await updateSettings(db, await principal(c, true), { [key]: undefined }, env));
   });
+  app.delete('/v1/owner/secrets/npmAccessToken', async (c) => {
+    await clearProviderSecret(db, await principal(c, true), 'npmAccessToken', env);
+    return c.body(null, 204);
+  });
   registerOwnerMetivaRoutes(app, { db, codec: options.codec, env, principal });
   app.put('/v1/owner/secrets/:name', async (c) => {
     const name = validate(z.enum(secretNames), c.req.param('name'));
     const input = validate(
-      z.object({ value: z.string().min(1).max(4096) }).strict(),
+      z
+        .object({
+          value: z.string().min(1).max(4096),
+          expectedOrigin: z.string().max(512).optional(),
+        })
+        .strict(),
       await body(c),
     );
-    await storeSecret(db, await principal(c, true), options.codec, name, input.value, env);
+    await storeSecret(
+      db,
+      await principal(c, true),
+      options.codec,
+      name,
+      input.value,
+      env,
+      input.expectedOrigin,
+    );
     return c.body(null, 204);
   });
   app.put('/v1/owner/games', async (c) => {
@@ -673,6 +711,7 @@ export function createApp(options: Options) {
     acquireUploadSlot,
     http: options.minecraftContentHttp,
   });
+  registerOpenworldDashboardSso(app, db, principal);
   registerOpenworldDashboardRoutes(app, { db, principal, management: options.management });
   registerOpenworldRoutes(app, { db, env, codec: options.codec, principal });
   registerSatisfactoryRoutes(app, { db, principal });

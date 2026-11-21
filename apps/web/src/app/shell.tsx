@@ -15,6 +15,7 @@ import { NavigationGuardProvider } from '../components/navigation-guard.js';
 import { Sidebar, type SidebarIconName, useSidebarCollapsed } from '../components/sidebar.js';
 import { Tooltip } from '../components/tooltip.js';
 import { ErrorNotice, Loading, Time } from '../components/ui.js';
+import { dashboardSignIn } from '../features/dashboard-sign-in.js';
 import { fileSaveScope } from '../features/file-background-save.js';
 import { FileSaveNotices } from '../features/file-save-notices.js';
 import { platformPath, type ServerInfo } from '../features/service-contracts.js';
@@ -284,7 +285,9 @@ function ShellContent() {
 export function AuthCallback() {
   const navigate = useNavigate();
   const [params] = useSearchParams();
-  const target = params.get('reauth') === 'security' ? '/settings/security' : '/';
+  const target =
+    dashboardSignIn(params)?.path ??
+    (params.get('reauth') === 'security' ? '/settings/security' : '/');
   useEffect(() => {
     void identityChanged().then(() => navigate(target, { replace: true }));
   }, [navigate, target]);

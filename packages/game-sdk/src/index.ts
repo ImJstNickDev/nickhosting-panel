@@ -146,7 +146,8 @@ export const gameManifestSchema = z
           key: z.string().regex(/^game\.[a-z][a-z0-9-]*\.[a-z][a-z0-9-]*\.[a-z][a-z0-9-]*$/),
           resource: z.string().regex(/^game\.[a-z][a-z0-9-]*\.[a-z][a-z0-9-]*$/),
           kind: z.enum(['read', 'write', 'additional']),
-          legacy: z.enum(['read', 'operate', 'manage']),
+          legacy: z.enum(['read', 'operate', 'manage', 'explicit']),
+          descriptionKey: translationKey.optional(),
           labelKey: translationKey.optional(),
           resourceLabelKey: translationKey.optional(),
         }),
@@ -212,7 +213,11 @@ export const gameManifestSchema = z
       if (
         !definition.resource.startsWith(`game.${manifest.id}.`) ||
         !definition.key.startsWith(`${definition.resource}.`) ||
-        !permissionKeys.has(`${definition.resource}.read`) ||
+        (definition.legacy === 'explicit'
+          ? definition.kind !== 'additional'
+          : !permissionKeys.has(`${definition.resource}.read`)) ||
+        (definition.descriptionKey &&
+          !definition.descriptionKey.startsWith(`games.${manifest.id}.`)) ||
         (definition.kind === 'read' && definition.key !== `${definition.resource}.read`) ||
         (definition.kind === 'write' && definition.key !== `${definition.resource}.write`) ||
         (definition.resourceLabelKey &&

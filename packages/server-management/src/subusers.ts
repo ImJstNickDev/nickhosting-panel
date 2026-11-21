@@ -3,6 +3,7 @@ import {
   assertServerPermissionKeys,
   DomainError,
   legacyServerPermissionKeys,
+  ownerServerPermissionKeys,
 } from '@nickhosting/core';
 import { type Database, recordAudit } from '@nickhosting/database';
 import { type Kysely, sql } from 'kysely';
@@ -26,7 +27,12 @@ export async function listServerSubusers(db: DB, context: AuthContext, serverId:
   const server = await authorizeServer(db, context, serverId, 'subusers.read');
   if (!(await serverSubusersAvailable(db))) throw new DomainError('configuration_invalid');
   const definitions = await getServerPermissionDefinitions(db, server);
-  const grantablePermissionKeys = await getServerPermissionKeys(db, context, server);
+  const personalOwner =
+    context.sessionType === 'regular' && server.owner_id === context.subjectUserId;
+  const ownKeys = await getServerPermissionKeys(db, context, server);
+  const grantablePermissionKeys = definitions
+    .filter(({ key, legacy }) => ownKeys.includes(key) && (personalOwner || legacy !== 'explicit'))
+    .map(({ key }) => key);
   const direct = await db
     .selectFrom('server_subusers')
     .selectAll()
@@ -70,10 +76,14 @@ export async function listServerSubusers(db: DB, context: AuthContext, serverId:
           definitions,
         );
         const effectivePermissionKeys = owner
-          ? definitions.map(({ key }) => key)
+          ? ownerServerPermissionKeys(definitions, user.id === server.owner_id)
           : [...new Set([...directPermissionKeys, ...inheritedPermissionKeys])];
         const protectedMember =
           owner ||
+          (!personalOwner &&
+            definitions.some(
+              ({ key, legacy }) => legacy === 'explicit' && directPermissionKeys.includes(key),
+            )) ||
           (!fullControl &&
             (user.id === context.subjectUserId ||
               effectivePermissionKeys.some((key) => !grantablePermissionKeys.includes(key))));
@@ -172,6 +182,17 @@ async function changeServerSubuser(
       .where('server_id', '=', serverId)
       .where('user_id', '=', user.id)
       .executeTakeFirst();
+    if (current.sessionType !== 'regular' || server.owner_id !== current.subjectUserId) {
+      const previousKeys = previous?.permission_keys ?? [];
+      if (
+        definitions.some(
+          ({ key, legacy }) =>
+            legacy === 'explicit' &&
+            previousKeys.includes(key) !== (permissionKeys?.includes(key) ?? false),
+        )
+      )
+        throw new DomainError('forbidden');
+    }
     if (permissionKeys) {
       await tx
         .insertInto('server_subusers')

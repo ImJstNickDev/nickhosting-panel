@@ -166,6 +166,7 @@ export interface LifecycleOptions {
     context: GameLifecycleContext,
   ) => Promise<Record<string, string> | undefined>;
   configureGameProvision?: (context: GameLifecycleContext) => Promise<boolean>;
+  prepareGameStart?: (context: GameLifecycleContext) => Promise<void>;
   finalizeGameStart?: (context: GameLifecycleContext) => Promise<boolean>;
   cleanupGameSecrets?: (serverId: string, db: Kysely<Database>) => Promise<void>;
   prepareGameStop?: (context: GameLifecycleContext) => Promise<void>;
@@ -1398,6 +1399,7 @@ export async function processServerOperation(
         try {
           if (operation.plan.gatewayAutomation !== undefined)
             assertGatewaySleepFence(operation.plan, nowOf(options));
+          if (finalPowerIdentity) await options.prepareGameStart?.(gameContext());
           if (worldFileContent) {
             // Revalidate current local identity and policy after durable intent.
             // A changed mapping/ownership cannot borrow an earlier remote proof.

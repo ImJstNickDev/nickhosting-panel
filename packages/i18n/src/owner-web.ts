@@ -318,6 +318,11 @@ export const ownerWebMessages: Record<string, readonly [string, string]> = {
     'Remove the saved value for “{name}”? The default will apply, or the optional setting will become unconfigured.',
     'Rimuovere il valore salvato per “{name}”? Verrà applicato il valore predefinito, oppure l’impostazione facoltativa non sarà più configurata.',
   ],
+  'owner.npmChangeUrl': [
+    'Remove the API token to change its destination.',
+    'Rimuovi il token API per cambiarne la destinazione.',
+  ],
+  'owner.npmRemoveToken': ['Remove API token', 'Rimuovi token API'],
   'owner.credentials': ['Provider credentials', 'Credenziali provider'],
   'owner.writeOnly': [
     'Stored values are never displayed. Saving a replacement changes subsequent provider requests.',
@@ -351,6 +356,8 @@ export const ownerWebMessages: Record<string, readonly [string, string]> = {
 };
 
 const settingNames: Record<string, readonly [string, string]> = {
+  npmApiUrl: ['NPM API URL', 'URL API di NPM'],
+  npmAcmeEmail: ['Let’s Encrypt email', 'Email Let’s Encrypt'],
   instanceName: ['Instance name', 'Nome istanza'],
   defaultLocale: ['Default language', 'Lingua predefinita'],
   publicUrl: ['WebPanel URL', 'URL WebPanel'],
@@ -462,6 +469,7 @@ const settingNames: Record<string, readonly [string, string]> = {
 for (const [key, pair] of Object.entries(settingNames))
   ownerWebMessages[`owner.config.${key}`] = pair;
 const secretLabels: Record<string, readonly [string, string]> = {
+  npmAccessToken: ['NPM API token', 'Token API NPM'],
   pterodactylApplicationKey: ['Pterodactyl Application key', 'Chiave Application Pterodactyl'],
   pterodactylClientKey: ['Pterodactyl Client key', 'Chiave Client Pterodactyl'],
   discordClientSecret: ['Discord client secret', 'Segreto client Discord'],

@@ -266,7 +266,7 @@ it.each([
         .selectAll()
         .where('server_id', '=', row.id)
         .executeTakeFirstOrThrow(),
-    ).toEqual({ server_id: row.id, ...current });
+    ).toEqual({ server_id: row.id, dashboard_credential_prepared: true, ...current });
     const gateway = await f.db
       .selectFrom('gateway_routes')
       .selectAll()
@@ -286,8 +286,9 @@ it.each([
     expect(operation.plan.provision).toMatchObject({
       eggId: 24,
       dockerImage: openworldRuntimeImage,
-      environment: { OW_VERSION: version, OW_SHA256: current.sha256, OW_WEB_PASSWORD: '' },
+      environment: { OW_VERSION: version, OW_SHA256: current.sha256 },
     });
+    expect(JSON.stringify(operation.plan)).not.toContain('OW_WEB_PASSWORD');
     expect(JSON.stringify(operation.plan)).not.toContain('ticket=');
     let handedOff: ProvisionPlan | undefined;
     const adapter = {
@@ -309,7 +310,7 @@ it.each([
     expect(handedOff).toMatchObject({
       environment: {
         OW_WEB_PORT: String(dashboard?.port),
-        OW_WEB_PASSWORD: '',
+        OW_WEB_PASSWORD: expect.stringMatching(/^[A-Za-z0-9_-]{43}$/),
         OW_VERSION: version,
       },
     });

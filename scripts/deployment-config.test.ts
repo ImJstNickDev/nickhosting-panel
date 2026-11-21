@@ -7,7 +7,7 @@ import { containerEnvironment } from '../deploy/container-env.mjs';
 import { assertConfigWritable, resolveConfig } from '../packages/core/src/config.js';
 import { type AuthContext, SecretCodec } from '../packages/core/src/index.js';
 import {
-  clearMetivaSecret,
+  clearProviderSecret,
   gameMetivaSecret,
   getGameMetivaToken,
   getSecret,
@@ -70,7 +70,7 @@ describe('scoped container environment', () => {
         storeSecret(db, owner, codec, 'metivaAccessToken', 'mtv_other', env),
       ).rejects.toMatchObject({ code: 'conflict' });
       await expect(
-        clearMetivaSecret(db, owner, gameMetivaSecret('openworld'), env),
+        clearProviderSecret(db, owner, gameMetivaSecret('openworld'), env),
       ).rejects.toMatchObject({ code: 'conflict' });
     },
   );
@@ -1205,7 +1205,7 @@ describe('deployment Compose isolation (read-only configuration parsing)', () =>
         if (!volume.target.startsWith('/app/') || volume.target.startsWith('/app/mountdata'))
           continue;
         expect(volume.target).toMatch(
-          /^\/app\/(?:apps\/web\/(?:index\.html|vite(?:-network|\.config)\.ts)|scripts\/compile-web-i18n\.ts|tsconfig\.json|(?:apps|packages|games)\/[^/]+\/src)$/,
+          /^\/app\/(?:apps\/web\/(?:index\.html|vite(?:-network|\.config)\.ts)|scripts\/compile-web-i18n\.ts|tsconfig\.json|games\/openworld|(?:apps|packages|games)\/[^/]+\/src)$/,
         );
         expect(volume.target).not.toContain('node_modules');
         expect(volume.read_only ?? false).toBe(volume.target !== '/app/apps/web/src');

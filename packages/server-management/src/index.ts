@@ -32,6 +32,7 @@ export * from './minecraft-sources.js';
 export * from './minecraft-world-index.js';
 export * from './neoforge-catalog.js';
 export * from './openworld-catalog.js';
+export * from './openworld-publication.js';
 export * from './paper-catalog.js';
 export * from './platform-queries.js';
 export { ensureProviderAccounts, resolveProviderCredential } from './provider-accounts.js';

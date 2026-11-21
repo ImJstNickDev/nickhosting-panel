@@ -124,6 +124,8 @@ export interface GameRuntimeHooks extends GameBackupHooks<GameLifecycleContext> 
     context: GameLifecycleContext,
     logs: readonly { at: string; text: string }[],
   ): Promise<number>;
+  /** Upgrade private launch configuration before an authorized managed start or restart. */
+  prepareStart?(context: GameLifecycleContext): Promise<void>;
   /** Complete explicit first-run configuration after confirmed process start. */
   finalizeStart?(context: GameLifecycleContext): Promise<boolean>;
   /** Local protected-store cleanup after proven provider deletion, in its transaction. */

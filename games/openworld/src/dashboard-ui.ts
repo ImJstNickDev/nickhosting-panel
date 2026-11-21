@@ -9,7 +9,13 @@ export const dashboardStatusSchema = z.object({
 export const dashboardStateSchema = z.object({
   enabled: z.boolean(),
   canConfigure: z.boolean(),
-  privateAddress: z.string().nullable(),
+  canOpen: z.boolean(),
+  nativePrepared: z.boolean(),
+  phase: z.enum(['disabled', 'pending', 'active', 'error']),
+  hostname: z
+    .string()
+    .regex(/^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/)
+    .nullable(),
 });
 export const openworldDashboardSection = {
   id: 'dashboard',
@@ -17,7 +23,8 @@ export const openworldDashboardSection = {
   loader: 'dashboard',
   renderer: 'openworld-dashboard',
   navigation: { group: 'config', order: 20, icon: 'settings', placement: 'settings' },
-  requiredPermissions: ['settings.read'],
+  requiredPermissions: ['server:read'],
+  anyPermissions: ['settings.read', 'game.openworld.dashboard.admin'],
   managePermissions: ['settings.write'],
   requiredCapabilities: [],
   forms: [],
@@ -33,22 +40,27 @@ export const openworldDashboardHandlers: Record<string, GameUiHandler> = {
 };
 const messages = {
   title: ['Web dashboard', 'Dashboard web'],
-  enabled: ['Enable web dashboard', 'Attiva la dashboard web'],
-  apply: [
-    'Changes take effect the next time the server starts.',
-    'Le modifiche si applicano al prossimo avvio del server.',
+  enabled: ['Publish web dashboard', 'Pubblica dashboard web'],
+  permission: ['Access the administrative dashboard', 'Accedi alla dashboard amministrativa'],
+  permissionHelp: [
+    'Grants full control of Openworld, including console commands, regardless of other panel permissions.',
+    'Consente di amministrare Openworld ed eseguire comandi di console anche se gli altri permessi del pannello li limitano.',
   ],
+  native: ['Open dashboard', 'Apri dashboard'],
+  missing: [
+    'Assign a personal subdomain in Network to publish the dashboard.',
+    'Assegna un sottodominio personale in Rete per pubblicare la dashboard.',
+  ],
+  pending: ['Publishing the dashboard…', 'Pubblicazione della dashboard in corso…'],
+  failed: [
+    'Publication failed. NickPanel will retry.',
+    'Pubblicazione non riuscita. NickPanel riproverà.',
+  ],
+  unpublished: ['The dashboard is private.', 'La dashboard è privata.'],
   restart: [
-    'Restart the game server to start the web dashboard.',
-    'Riavvia il server di gioco per avviare la dashboard web.',
+    'The private dashboard will be available after the next server start.',
+    'La dashboard privata sarà disponibile al prossimo avvio del server.',
   ],
-  native: ['Open native dashboard', 'Apri la dashboard nativa'],
-  private: [
-    'The native dashboard uses the server’s private network. Connect through your private network or VPN to open it.',
-    'La dashboard nativa usa la rete privata del server. Per aprirla connettiti dalla rete privata o tramite VPN.',
-  ],
-  show: ['Show dashboard password', 'Mostra password della dashboard'],
-  hide: ['Hide password', 'Nascondi password'],
   status: ['Live status', 'Stato in tempo reale'],
   unavailable: ['The dashboard has not responded yet.', 'La dashboard non ha ancora risposto.'],
   offline: [

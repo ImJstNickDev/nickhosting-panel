@@ -295,6 +295,18 @@ export interface ServerTables {
     state: 'pending' | 'active' | 'revoking' | 'revoked' | 'uncertain';
     created_at: Generated<Date>;
   };
+  openworld_dashboard_dns: { server_id: string; hostname: string };
+  openworld_dashboard_publications: {
+    id: Generated<string>;
+    server_id: string | null;
+    enabled: Generated<boolean>;
+    revision: Generated<number>;
+    tracked_hostname: Generated<string | null>;
+    proxy_host_id: Generated<number | null>;
+    provider_origin: Generated<string | null>;
+    state: Generated<'pending' | 'active' | 'error'>;
+    due_at: Generated<Date | null>;
+  };
   server_dns_preferences: {
     server_id: string;
     domain_id: string | null;

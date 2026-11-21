@@ -42,7 +42,7 @@ afterAll(async () => {
   await vite?.close();
 });
 
-it('opens an authenticated private dashboard on desktop and presents read-only status on mobile', async () => {
+it('publishes over HTTPS on desktop and lets an explicitly granted subuser open the Italian dashboard on mobile', async () => {
   for (const owner of [true, false]) {
     const context = await browser.newContext({
       viewport: owner ? { width: 1280, height: 720 } : { width: 390, height: 844 },
@@ -52,12 +52,11 @@ it('opens an authenticated private dashboard on desktop and presents read-only s
     let enabled = !owner;
     let configurationReads = 0;
     let statusReads = 0;
+    let recovered = !owner;
     let simulateLimit = owner;
     await page.route('**/v1/servers/**/openworld/dashboard**', async (route) => {
       const req = route.request(),
         path = new URL(req.url()).pathname;
-      if (path.endsWith('/password'))
-        return route.fulfill({ json: { password: 'isolated native dashboard password' } });
       if (path.endsWith('/status')) {
         statusReads++;
         return route.fulfill({
@@ -77,18 +76,24 @@ it('opens an authenticated private dashboard on desktop and presents read-only s
           });
         }
         enabled = req.postDataJSON().enabled;
-      } else configurationReads++;
+      } else {
+        configurationReads++;
+        if (enabled) recovered = true;
+      }
       return route.fulfill({
         json: {
           enabled,
           canConfigure: owner,
-          privateAddress: owner && enabled ? 'http://10.0.0.2:23001' : null,
+          hostname: 'aurora.example.test',
+          phase: !enabled ? 'disabled' : recovered ? 'active' : 'pending',
+          nativePrepared: true,
+          canOpen: true,
         },
       });
     });
     await page.goto(`${origin}dashboard-fixture${owner ? '' : '?subuser'}`);
     const toggle = page.getByRole('switch', {
-      name: owner ? 'Enable web dashboard' : 'Attiva la dashboard web',
+      name: owner ? 'Publish web dashboard' : 'Pubblica dashboard web',
     });
     if (owner) {
       await check(toggle).not.toBeChecked();
@@ -99,25 +104,21 @@ it('opens an authenticated private dashboard on desktop and presents read-only s
       await check(toggle).not.toBeChecked();
       await toggle.click();
       await check(toggle).toBeChecked();
-      expect(configurationReads).toBe(1);
-      await check(
-        page.getByText('Restart the game server to start the web dashboard.'),
-      ).toBeVisible();
-      expect(statusReads).toBe(0);
-      await page.getByRole('button', { name: 'Refresh', exact: true }).click();
-      await check(page.getByRole('link', { name: 'Open native dashboard' })).toHaveAttribute(
+      await check(page.getByRole('status')).toContainText('Publishing the dashboard');
+      await check(page.getByRole('link', { name: 'Open dashboard' })).toHaveAttribute(
         'href',
-        'http://10.0.0.2:23001',
+        'https://aurora.example.test',
+        { timeout: 10000 },
       );
-      await page.getByRole('button', { name: 'Show dashboard password' }).click();
-      await check(page.getByText('isolated native dashboard password')).toBeVisible();
-      await page.getByRole('button', { name: 'Hide password' }).click();
-      await check(page.getByText('isolated native dashboard password')).toHaveCount(0);
+      expect(configurationReads).toBeGreaterThanOrEqual(2);
     } else {
-      await check(toggle).toBeDisabled();
-      await check(page.getByRole('link')).toHaveCount(0);
-      await check(page.getByRole('button', { name: /password/i })).toHaveCount(0);
+      await check(toggle).toHaveCount(0);
+      await check(page.getByRole('link', { name: 'Apri dashboard' })).toHaveAttribute(
+        'href',
+        'https://aurora.example.test',
+      );
     }
+    expect(statusReads).toBeGreaterThan(0);
     await check(page.getByText('2 / 8')).toBeVisible();
     expect(
       await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth),

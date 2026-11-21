@@ -763,6 +763,7 @@ export function createIdentity(options: IdentityOptions) {
   }
 
   return {
+    hostCookies: new URL(options.baseURL).protocol === 'https:',
     auth,
     handler,
     authenticate,
