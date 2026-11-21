@@ -21,6 +21,7 @@ const messages: Record<string, [string, string]> = {
   'map.unknown': ['Unexplored', 'Inesplorato'],
   'map.zoomIn': ['Zoom in', 'Ingrandisci'],
   'map.zoomOut': ['Zoom out', 'Riduci'],
+  'map.showAllTerrain': ['Show full index', 'Mostra tutta l’area indicizzata'],
   'map.recenter': ['Recenter', 'Ricentra'],
   'map.panHint': [
     'Drag or use the arrow keys to move the map.',

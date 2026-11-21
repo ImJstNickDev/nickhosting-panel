@@ -1,5 +1,8 @@
 import { z } from 'zod';
 
+// Both the native column list and OWMS origins encode nonnegative signed int32s.
+export const maxOpenworldMapColumn = 0x7fffffff;
+
 const utf8 = new TextEncoder();
 function nativeText(maxBytes: number) {
   return z

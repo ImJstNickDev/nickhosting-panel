@@ -32,22 +32,55 @@ type Native = Parameters<typeof readMapIndex>[0];
 type MapQuery = { world: string; processRef: string };
 type CheckpointRequest = MapQuery & { requestId: string; action: OpenworldCheckpointAction };
 type Bounds = { i0: number; j0: number; i1: number; j1: number };
-type ColumnQuery = MapQuery & { face: number; stamp?: number; stride: number; bounds?: Bounds };
+type ColumnQuery = MapQuery & {
+  face: number;
+  stamp?: number;
+  stride: number;
+  sample?: '1';
+  bounds?: Bounds;
+};
 
 const revision = (row: OpenworldCheckpoint) =>
   createHash('sha256').update(JSON.stringify(row)).digest('hex');
 
-function visibleColumns(packed: Float64Array, stride: number, bounds?: Bounds) {
+// Keep the full span for "Show full index" while bounding the points used for framing.
+function sampledColumns(packed: Uint32Array) {
+  const limit = 4096;
+  const count = packed.length / 2;
+  if (count <= limit) return visibleColumns(packed, 1);
+  let minX = 0,
+    maxX = 0,
+    minZ = 0,
+    maxZ = 0;
+  for (let i = 2; i < packed.length; i += 2) {
+    const x = packed[i] as number,
+      z = packed[i + 1] as number;
+    if (x < (packed[minX] as number)) minX = i;
+    if (x > (packed[maxX] as number)) maxX = i;
+    if (z < (packed[minZ + 1] as number)) minZ = i;
+    if (z > (packed[maxZ + 1] as number)) maxZ = i;
+  }
+  const offsets = new Set([minX, maxX, minZ, maxZ]);
+  const samples = limit - offsets.size;
+  for (let n = 0; n < samples; n++) offsets.add(2 * Math.floor((n * count) / samples));
+  return {
+    columns: Array.from(offsets, (i): [number, number] => [
+      packed[i] as number,
+      packed[i + 1] as number,
+    ]),
+  };
+}
+function visibleColumns(packed: Uint32Array, stride: number, bounds?: Bounds) {
   const columns: [number, number][] = [];
-  const seen = new Set<number>();
-  for (const cell of packed) {
-    const i = Math.floor(cell / 131072),
-      j = cell % 131072;
+  const seen = new Set<string>();
+  for (let offset = 0; offset < packed.length; offset += 2) {
+    const i = packed[offset] as number,
+      j = packed[offset + 1] as number;
     if (bounds && (i < bounds.i0 || i > bounds.i1 || j < bounds.j0 || j > bounds.j1)) continue;
     const x = Math.floor(i / stride) * stride,
       y = Math.floor(j / stride) * stride;
     if (stride > 1) {
-      const key = x * 131072 + y;
+      const key = `${x},${y}`;
       if (seen.has(key)) continue;
       seen.add(key);
     }
@@ -62,7 +95,7 @@ export function createOpenworldWorldMap(options: OpenworldNativeOptions) {
   const connect = createOpenworldNativeConnection(options);
   const worlds = sharedReads<Awaited<ReturnType<typeof readOpenworldMapWorlds>>>(64, now, 1000);
   const indexes = sharedReads<Awaited<ReturnType<typeof readMapIndex>>>(64, now, 1000);
-  const columns = sharedReads<Float64Array>(8, now, 1000);
+  const columns = sharedReads<Uint32Array>(8, now, 1000);
   const deltas = sharedReads<Awaited<ReturnType<typeof readMapChanges>>>(8, now, 500);
   const tiles = sharedReads<Awaited<ReturnType<typeof readMapTile>>>(256, now, 500);
   const players = sharedReads<Awaited<ReturnType<typeof readMapPlayers>>>(64, now, 1000);
@@ -161,10 +194,14 @@ export function createOpenworldWorldMap(options: OpenworldNativeOptions) {
           withNative(scope, async (n) => {
             const response = await readMapColumns(n, q.world, q.face);
             // Store each pair in eight bytes. A large face may be shared by many viewports.
-            return Float64Array.from(response.columns, ([i, j]) => i * 131072 + j);
+            const packed = new Uint32Array(response.columns.length * 2);
+            for (const [index, coordinates] of response.columns.entries()) {
+              packed.set(coordinates, index * 2);
+            }
+            return packed;
           }),
         );
-        return visibleColumns(data, q.stride, q.bounds);
+        return q.sample ? sampledColumns(data) : visibleColumns(data, q.stride, q.bounds);
       });
     },
     changes(who: AuthContext, id: string, q: MapQuery & { since: number }) {

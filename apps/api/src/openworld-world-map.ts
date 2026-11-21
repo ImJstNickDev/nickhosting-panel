@@ -1,7 +1,9 @@
 import { DomainError } from '@nickhosting/core';
-import type { Hono } from 'hono';
+import { PterodactylError } from '@nickhosting/pterodactyl-adapter';
+import { Hono } from 'hono';
 import { z } from 'zod';
 import {
+  maxOpenworldMapColumn,
   openworldCheckpointActionSchema,
   openworldMapWorldKey,
 } from '../../../games/openworld/src/world-map.js';
@@ -22,23 +24,28 @@ const world = openworldMapWorldKey;
 const selected = session.extend({ world });
 const face = integer(5);
 const stamp = integer(0xffffffff);
-const column = integer(131071);
+const column = integer(maxOpenworldMapColumn);
 const aligned = column.refine((i) => i % 8 === 0);
 const extent = column.optional();
 const columns = selected
   .extend({
     face,
     stamp: stamp.optional(),
+    sample: z.literal('1').optional(),
     i0: extent,
     i1: extent,
     j0: extent,
     j1: extent,
-    stride: integer(8192)
-      .refine((n) => n > 0 && (n & (n - 1)) === 0)
+    stride: integer(maxOpenworldMapColumn + 1)
+      .refine((n) => n > 0 && Number.isInteger(Math.log2(n)))
       .optional()
       .default(1),
   })
   .transform(({ i0, i1, j0, j1, ...q }, ctx) => {
+    if (q.sample && (q.stride !== 1 || [i0, i1, j0, j1].some((v) => v !== undefined))) {
+      ctx.addIssue({ code: 'custom', message: 'Sample requires a full face' });
+      return z.NEVER;
+    }
     if (i0 === undefined && i1 === undefined && j0 === undefined && j1 === undefined) return q;
     if (
       i0 === undefined ||
@@ -74,15 +81,25 @@ export function registerOpenworldWorldMapRoutes(
     },
   }),
 ) {
-  const base = '/v1/servers/:id/openworld/map';
-  app.use(`${base}/*`, async (c, next) => {
+  const routes = new Hono<{ Variables: Variables }>().basePath('/v1/servers/:id/openworld/map');
+  // Coalesced requests receive the same rejected provider read throughout its cooldown.
+  const retryUntil = new WeakMap<PterodactylError, number>();
+  routes.onError((error, c) => {
+    if (!(error instanceof PterodactylError) || error.reason !== 'rate_limited') throw error;
+    const now = Date.now();
+    const until = retryUntil.get(error) ?? now + (error.retryAfterMs ?? 60_000);
+    retryUntil.set(error, until);
+    c.header('Retry-After', String(Math.max(1, Math.ceil((until - now) / 1000))));
+    throw new DomainError('rate_limited');
+  });
+  routes.use('*', async (c, next) => {
     c.header('cache-control', 'private, no-store');
     await next();
   });
-  app.get(base, async (c) =>
+  routes.get('/', async (c) =>
     c.json(await service.info(await options.principal(c), c.req.param('id'))),
   );
-  app.get(`${base}/players`, async (c) =>
+  routes.get('/players', async (c) =>
     c.json(
       await service.players(
         await options.principal(c),
@@ -91,7 +108,7 @@ export function registerOpenworldWorldMapRoutes(
       ),
     ),
   );
-  app.get(`${base}/index`, async (c) =>
+  routes.get('/index', async (c) =>
     c.json(
       await service.index(
         await options.principal(c),
@@ -100,7 +117,7 @@ export function registerOpenworldWorldMapRoutes(
       ),
     ),
   );
-  app.get(`${base}/columns`, async (c) =>
+  routes.get('/columns', async (c) =>
     c.json(
       await service.columns(
         await options.principal(c),
@@ -109,7 +126,7 @@ export function registerOpenworldWorldMapRoutes(
       ),
     ),
   );
-  app.get(`${base}/changes`, async (c) =>
+  routes.get('/changes', async (c) =>
     c.json(
       await service.changes(
         await options.principal(c),
@@ -118,7 +135,7 @@ export function registerOpenworldWorldMapRoutes(
       ),
     ),
   );
-  app.get(`${base}/surface`, async (c) =>
+  routes.get('/surface', async (c) =>
     c.json(
       await service.surface(
         await options.principal(c),
@@ -127,7 +144,7 @@ export function registerOpenworldWorldMapRoutes(
       ),
     ),
   );
-  app.get(`${base}/checkpoints`, async (c) =>
+  routes.get('/checkpoints', async (c) =>
     c.json(
       await service.checkpoints(
         await options.principal(c),
@@ -136,11 +153,12 @@ export function registerOpenworldWorldMapRoutes(
       ),
     ),
   );
-  app.post(`${base}/checkpoints`, async (c) => {
+  routes.post('/checkpoints', async (c) => {
     const who = await options.principal(c);
     if (c.req.header('content-type')?.split(';')[0]?.trim().toLowerCase() !== 'application/json')
       throw new DomainError('validation_failed');
     const input = parse(change, await c.req.json().catch(() => undefined));
     return c.json(await service.changeCheckpoint(who, c.req.param('id'), input), 202);
   });
+  app.route('/', routes);
 }

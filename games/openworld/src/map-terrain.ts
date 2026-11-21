@@ -2,10 +2,11 @@ import { DomainError } from '@nickhosting/core';
 import { z } from 'zod';
 import { OpenworldTokenExpired } from './dashboard-api.js';
 import { readNativeBytes } from './native-response.js';
+import { maxOpenworldMapColumn } from './world-map.js';
 
 type Native = { origin: string; token: string; signal: AbortSignal; fetcher: typeof fetch };
 const faceId = z.int().min(0).max(5);
-const column = z.int().min(0).max(131071);
+const column = z.int().min(0).max(maxOpenworldMapColumn);
 const stamp = z.uint32();
 const worldKey = z.string().min(1).max(128);
 const tileOrigin = column.multipleOf(8);
@@ -18,6 +19,19 @@ const faceSummary = z.object({
   j1: column.nullish(),
 });
 const invalid = () => new DomainError('integration_unavailable');
+
+// The surface endpoint may reject a column that the same game included in its index.
+// Match only its coordinate-range error for this request. Other 400s remain errors.
+async function outsideFace(response: Response, params: Record<string, string | number>) {
+  const body = json(
+    await readNativeBytes(response, 1024),
+    z.object({ error: z.string().max(400) }),
+  );
+  const match = /^paramètre « (ci|cj) » hors de \[0, (\d{1,10})\] : (\d{1,10})$/u.exec(body.error);
+  if (!match) return false;
+  const [, axis, max, requested] = match;
+  return !!axis && Number(requested) === params[axis] && Number(requested) > Number(max);
+}
 
 async function read(
   native: Native,
@@ -36,6 +50,10 @@ async function read(
       headers: { 'X-OW-Token': native.token },
     });
     if (!res.ok) {
+      if (res.status === 400 && allowMissing) {
+        if (await outsideFace(res, params)) return null;
+        throw invalid();
+      }
       await res.body?.cancel();
       if (res.status === 401) throw new OpenworldTokenExpired();
       if (res.status === 404 && allowMissing) return null;
@@ -90,7 +108,7 @@ export async function readMapColumns(native: Native, world: string, face: number
   for (let offset = 0; offset < view.byteLength; offset += 8) {
     const i = view.getInt32(offset, true),
       j = view.getInt32(offset + 4, true);
-    if (i < 0 || j < 0 || i > 131071 || j > 131071) throw invalid();
+    if (i < 0 || j < 0) throw invalid();
     columns.push([i, j]);
   }
   return { columns };

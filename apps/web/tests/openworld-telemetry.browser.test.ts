@@ -965,6 +965,7 @@ it('refreshes only changed visible tiles, suppresses reads offline and clears re
     await check(page.getByText(/offline/i)).toBeVisible();
     expect(paths).toEqual([]);
     await page.goto(`${url}telemetry-fixture?section=map`);
+    await check(page.locator('canvas')).toBeVisible();
     const tiles = () => paths.filter((p) => p.pathname.endsWith('/surface'));
     await check.poll(() => tiles().length).toBe(4);
     resume();
@@ -1073,5 +1074,133 @@ it('keeps the map available after a failed index refresh and picks up new explor
   } finally {
     resume();
     await context.close();
+  }
+});
+
+it('frames a populated cluster, then reaches distant indexed columns without unbounded tile requests', async () => {
+  const context = await browser.newContext({ viewport: { width: 1280, height: 900 } });
+  const page = await context.newPage();
+  try {
+    const { paths } = await mapRoutes(page);
+    const cluster = Array.from({ length: 2816 }, (_, k) => [
+      45632 + (k % 56),
+      76880 + Math.floor(k / 56),
+    ]);
+    const far = [12622489, 951427];
+    const indexed = [...cluster, far];
+    const queries: URL[] = [];
+    await page.route('**/map/index?**', (r) =>
+      r.fulfill({
+        json: {
+          stamp: 7,
+          faces: [{ face: 0, count: indexed.length, i0: 45632, j0: 76880, i1: far[0], j1: far[1] }],
+        },
+      }),
+    );
+    await page.route('**/map/columns?**', (r) => {
+      queries.push(new URL(r.request().url()));
+      return r.fulfill({ json: { columns: indexed } });
+    });
+    await page.goto(`${url}telemetry-fixture?section=map&reader`);
+    const all = page.getByRole('button', { name: 'Show full index' }),
+      canvas = page.locator('canvas');
+    await check(all).toBeVisible();
+    const colored = () =>
+      canvas.evaluate((c) => {
+        const el = c as HTMLCanvasElement,
+          ctx = el.getContext('2d');
+        if (!ctx) return 0;
+        const { data } = ctx.getImageData(0, 0, el.width, el.height);
+        let count = 0;
+        for (let p = 3; p < data.length; p += 4) if (data[p]) count++;
+        return count;
+      });
+    await check.poll(colored).toBeGreaterThan(10000);
+    expect(queries).toHaveLength(1);
+    expect(queries[0]?.searchParams.get('stride')).toBe('1');
+    expect(queries[0]?.searchParams.get('sample')).toBe('1');
+    expect(paths.some((u) => u.pathname.endsWith('/surface'))).toBe(false);
+    await all.click();
+    await check.poll(colored).toBeLessThan(100);
+    // Locate the rightmost visible footprint dot and open its exact tile.
+    const pixel = await canvas.evaluate((c) => {
+      const el = c as HTMLCanvasElement,
+        ctx = el.getContext('2d');
+      if (!ctx) return null;
+      const { data } = ctx.getImageData(0, 0, el.width, el.height);
+      for (let x = el.width - 1; x >= 0; x--)
+        for (let y = 0; y < el.height; y++) {
+          if (data[4 * (y * el.width + x) + 3]) return { x, y };
+        }
+      return null;
+    });
+    if (!pixel) throw new Error('Expected an indexed column on the overview');
+    await canvas.click({ position: pixel });
+    await check
+      .poll(() =>
+        paths.some(
+          (u) =>
+            u.pathname.endsWith('/surface') &&
+            Number(u.searchParams.get('ci')) === 12622488 &&
+            Number(u.searchParams.get('cj')) === 951424,
+        ),
+      )
+      .toBe(true);
+    expect(paths.filter((u) => u.pathname.endsWith('/surface')).length).toBeLessThanOrEqual(16);
+    await page.getByRole('button', { name: 'Recenter' }).click();
+    await check.poll(colored).toBeGreaterThan(10000);
+    await fits(page);
+  } finally {
+    await context.close();
+  }
+});
+
+it('uses a bounded sample to frame a larger map and fetches the actual overview inside that region', async () => {
+  const page = await browser.newPage();
+  try {
+    await mapRoutes(page);
+    const far = [0x7fffffff, 0x7fffffff];
+    const cluster = Array.from({ length: 200 }, (_, k) => [
+      500000 + (k % 10),
+      800000 + Math.floor(k / 10) * 8,
+    ]);
+    const queries: URLSearchParams[] = [];
+    await page.route('**/map/index?**', (r) =>
+      r.fulfill({
+        json: {
+          stamp: 7,
+          faces: [{ face: 0, count: 45000, i0: 500000, j0: 800000, i1: far[0], j1: far[1] }],
+        },
+      }),
+    );
+    await page.route('**/map/columns?**', (r) => {
+      const q = new URL(r.request().url()).searchParams;
+      queries.push(q);
+      return r.fulfill({ json: { columns: q.has('sample') ? [...cluster, far] : cluster } });
+    });
+    await page.goto(`${url}telemetry-fixture?section=map&reader`);
+    await check(page.getByRole('button', { name: 'Show full index' })).toBeVisible();
+    await check
+      .poll(() =>
+        queries.some(
+          (q) => !q.has('sample') && Number(q.get('i1')) > 500000 && Number(q.get('i1')) < 502000,
+        ),
+      )
+      .toBe(true);
+    expect(queries.filter((q) => q.has('sample'))).toHaveLength(1);
+    await page.getByRole('button', { name: 'Show full index' }).click();
+    await check
+      .poll(() =>
+        queries.some(
+          (q) =>
+            Number(q.get('i1')) === 0x7fffffff &&
+            Number(q.get('j1')) === 0x7fffffff &&
+            Number(q.get('stride')) > 8192,
+        ),
+      )
+      .toBe(true);
+    await fits(page);
+  } finally {
+    await page.close();
   }
 });

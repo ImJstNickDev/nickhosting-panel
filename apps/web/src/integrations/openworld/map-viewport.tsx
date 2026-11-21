@@ -4,10 +4,12 @@ import {
   type KeyboardEvent,
   type PointerEvent,
   useEffect,
+  useMemo,
   useRef,
   useState,
 } from 'react';
 import { Link } from 'react-router';
+import { maxOpenworldMapColumn } from '../../../../../games/openworld/src/world-map.js';
 import { useT } from '../../app/i18n.js';
 import { ErrorNotice } from '../../components/ui.js';
 import { CheckpointGlyph, type MapCheckpoint, type MapPoint } from './map-checkpoints.js';
@@ -52,6 +54,35 @@ function surfaceImage(tile: Surface) {
   textures.set(tile, c);
   return c;
 }
+type Footprint = { columns: [number, number][] };
+// Widely scattered columns can obscure the area where almost all the terrain is.
+// Keep multiple inhabited areas together, and offer the full outline when a few
+// isolated columns would dominate the initial frame.
+function populatedExtent(face: MapFace | undefined, cells: Footprint | undefined) {
+  const points = cells?.columns;
+  if (!face || !points || points.length < 100) return null;
+  const centralRange = (axis: 0 | 1) => {
+    const sorted = points.map((p) => p[axis]).sort((a, b) => a - b);
+    const tail = Math.floor(sorted.length / 100);
+    const lo = sorted[tail] ?? 0,
+      hi = sorted[sorted.length - 1 - tail] ?? lo;
+    const reach = 8 * Math.max(1, hi - lo + 1);
+    return { lo: lo - reach, hi: hi + reach };
+  };
+  const xs = centralRange(0),
+    zs = centralRange(1);
+  const core = points.filter(([i, j]) => i >= xs.lo && i <= xs.hi && j >= zs.lo && j <= zs.hi);
+  if (core.length === points.length || core.length < points.length * 0.99) return null;
+  const ii = core.map((p) => p[0]),
+    jj = core.map((p) => p[1]);
+  return {
+    ...face,
+    i0: Math.min(...ii),
+    i1: Math.max(...ii),
+    j0: Math.min(...jj),
+    j1: Math.max(...jj),
+  };
+}
 function fit(edge: number, b: MapFace | undefined, aspect: number, point?: MapPoint): Area {
   if (b?.i0 == null || b.j0 == null || b.i1 == null || b.j1 == null)
     return {
@@ -73,6 +104,7 @@ export function MapViewport({
   server,
   world,
   edge,
+  checkpointEdge,
   face,
   extent,
   stamp,
@@ -89,6 +121,7 @@ export function MapViewport({
   server: ServerView;
   world: string;
   edge: number;
+  checkpointEdge: number;
   face: number;
   extent?: MapFace;
   stamp: number;
@@ -119,33 +152,6 @@ export function MapViewport({
     obs.observe(el);
     return () => obs.disconnect();
   }, []);
-  const aspect = size.width / Math.max(1, size.height) || 1;
-  const [manual, setManual] = useState<Area | null>(null);
-  const area =
-      manual ?? fit(edge, extent, aspect, checkpoints.find((c) => c.pos.face === face)?.pos),
-    px = size.width / area.span || 1;
-  const zSpan = size.height / px;
-  const minX = area.x - area.span / 2,
-    minZ = area.z - zSpan / 2;
-  const colMax = Math.min(131071, Math.ceil(edge / 16) - 1);
-  const bounds: Bounds = {
-    i0: clamp(Math.floor(minX / 16), 0, colMax),
-    j0: clamp(Math.floor(minZ / 16), 0, colMax),
-    i1: clamp(Math.floor((minX + area.span) / 16), 0, colMax),
-    j1: clamp(Math.floor((minZ + zSpan) / 16), 0, colMax),
-  };
-  const [draftPan, setDraftPan] = useState<{ dx: number; dy: number } | null>(null);
-  const [pick, setPick] = useState(false);
-  const drag = useRef<{ id: number; x: number; y: number } | null>(null);
-  useEffect(() => {
-    if (focus?.face === face) {
-      setManual({
-        x: clamp(focus.x, 0, edge),
-        z: clamp(focus.z, 0, edge),
-        span: Math.min(edge, 240),
-      });
-    }
-  }, [focus, edge, face]);
   const cursor = useRef(stamp);
   const [revisions, setRevisions] = useState<{
     all: number;
@@ -184,6 +190,52 @@ export function MapViewport({
     });
     onRefreshIndex();
   }, [delta, face, onRefreshIndex]);
+  const investigateFootprint =
+    !!extent &&
+    extent.count > 0 &&
+    extent.count <= 262144 &&
+    Math.max((extent.i1 ?? 0) - (extent.i0 ?? 0), (extent.j1 ?? 0) - (extent.j0 ?? 0)) > 4096;
+  const footprintPath = `/columns?${mapParams({ world, face, processRef, stride: 1, sample: 1, stamp: revisions.columns })}`;
+  const footprint = useQuery({
+    queryKey: [...mapScope(server), footprintPath],
+    queryFn: ({ signal }) => mapData<Footprint>(server, footprintPath, signal),
+    enabled: investigateFootprint,
+    placeholderData: (prior) => prior,
+    gcTime: 0,
+    staleTime: Infinity,
+    retry: false,
+  });
+  const sample = investigateFootprint ? footprint.data : undefined;
+  const completeFootprint = investigateFootprint && extent.count <= 4096;
+  const core = useMemo(() => populatedExtent(extent, sample), [extent, sample]);
+  const aspect = size.width / Math.max(1, size.height) || 1;
+  const [manual, setManual] = useState<Area | null>(null);
+  const area =
+      manual ??
+      fit(edge, core ?? extent, aspect, checkpoints.find((c) => c.pos.face === face)?.pos),
+    px = size.width / area.span || 1;
+  const zSpan = size.height / px;
+  const minX = area.x - area.span / 2,
+    minZ = area.z - zSpan / 2;
+  const colMax = Math.min(maxOpenworldMapColumn, Math.ceil(edge / 16) - 1);
+  const bounds: Bounds = {
+    i0: clamp(Math.floor(minX / 16), 0, colMax),
+    j0: clamp(Math.floor(minZ / 16), 0, colMax),
+    i1: clamp(Math.floor((minX + area.span) / 16), 0, colMax),
+    j1: clamp(Math.floor((minZ + zSpan) / 16), 0, colMax),
+  };
+  const [draftPan, setDraftPan] = useState<{ dx: number; dy: number } | null>(null);
+  const [pick, setPick] = useState(false);
+  const drag = useRef<{ id: number; x: number; y: number } | null>(null);
+  useEffect(() => {
+    if (focus?.face === face) {
+      setManual({
+        x: clamp(focus.x, 0, edge),
+        z: clamp(focus.z, 0, edge),
+        span: Math.min(edge, 240),
+      });
+    }
+  }, [focus, edge, face]);
   const tiles: { ci: number; cj: number }[] = [];
   const iStart = bounds.i0 - (bounds.i0 % 8),
     jStart = bounds.j0 - (bounds.j0 % 8);
@@ -216,14 +268,18 @@ export function MapViewport({
       };
     }),
   });
-  const stride = Math.min(
-    8192,
-    2 **
-      Math.max(
-        0,
-        Math.ceil(Math.log2(Math.max(bounds.i1 - bounds.i0 + 1, bounds.j1 - bounds.j0 + 1) / 64)),
-      ),
-  );
+  const stride = completeFootprint
+    ? 1
+    : Math.min(
+        2 ** 31,
+        2 **
+          Math.max(
+            0,
+            Math.ceil(
+              Math.log2(Math.max(bounds.i1 - bounds.i0 + 1, bounds.j1 - bounds.j0 + 1) / 64),
+            ),
+          ),
+      );
   const tooWide = overview && (extent?.count ?? 0) > 262144;
   const columnPath =
     '/columns?' +
@@ -231,17 +287,30 @@ export function MapViewport({
   const columns = useQuery({
     queryKey: [...mapScope(server), columnPath],
     queryFn: ({ signal }) => mapData<{ columns: [number, number][] }>(server, columnPath, signal),
-    enabled: overview && !tooWide && size.width > 0,
+    enabled:
+      overview &&
+      !tooWide &&
+      !completeFootprint &&
+      (!investigateFootprint || !!sample) &&
+      size.width > 0,
     staleTime: Infinity,
     gcTime: 0,
     retry: false,
   });
   const error =
-    change.error ?? (overview ? columns.error : tileQueries.find((q) => q.error)?.error);
+    change.error ??
+    (investigateFootprint ? footprint.error : null) ??
+    (overview
+      ? completeFootprint
+        ? null
+        : columns.error
+      : tileQueries.find((q) => q.error)?.error);
   useEffect(() => {
     if (scopeLost(error)) onScopeError(error);
   }, [error, onScopeError]);
-  const loading = overview ? !tooWide && columns.isPending : tileQueries.some((q) => q.isPending);
+  const loading = overview
+    ? !tooWide && (completeFootprint ? footprint.isPending : columns.isPending)
+    : tileQueries.some((q) => q.isPending);
   useEffect(() => {
     const el = canvas.current,
       ctx = el?.getContext('2d');
@@ -258,12 +327,12 @@ export function MapViewport({
     const top = (z: number) => (z - minZ) * px + (draftPan?.dy ?? 0);
     if (overview) {
       ctx.fillStyle = '#79aa94';
-      for (const [i, j] of columns.data?.columns ?? []) {
+      for (const [i, j] of (completeFootprint ? sample : columns.data)?.columns ?? []) {
         ctx.fillRect(
           left(i * 16),
           top(j * 16),
-          Math.max(1, 16 * stride * px),
-          Math.max(1, 16 * stride * px),
+          Math.max(3, 16 * stride * px),
+          Math.max(3, 16 * stride * px),
         );
       }
     } else {
@@ -314,7 +383,7 @@ export function MapViewport({
         zoom(2);
         break;
       case 'Enter':
-        if (!pick || !onCreate) return;
+        if (!pick || !onCreate || area.x > checkpointEdge || area.z > checkpointEdge) return;
         setPick(false);
         onCreate({ face, x: area.x, z: area.z });
         break;
@@ -337,11 +406,26 @@ export function MapViewport({
       move(-dx / px, -dy / px);
       return;
     }
-    if (!pick || !onCreate) return;
     const r = e.currentTarget.getBoundingClientRect();
     const x = minX + (e.clientX - r.left) / px,
       z = minZ + (e.clientY - r.top) / px;
-    if (x < 0 || z < 0 || x > edge || z > edge) return;
+    if (!pick) {
+      if (!overview || !sample) return;
+      let nearest: MapPoint | undefined;
+      let distance = 10;
+      for (const [i, j] of sample.columns) {
+        const cx = (i + 0.5) * columnSize,
+          cz = (j + 0.5) * columnSize;
+        const d = Math.hypot(cx - x, cz - z) * px;
+        if (d < distance) {
+          distance = d;
+          nearest = { x: cx, z: cz, face };
+        }
+      }
+      if (nearest) setManual({ x: nearest.x, z: nearest.z, span: Math.min(edge, 240) });
+      return;
+    }
+    if (!onCreate || x < 0 || z < 0 || x > checkpointEdge || z > checkpointEdge) return;
     setPick(false);
     onCreate({ face, x: Math.round(x * 100) / 100, z: Math.round(z * 100) / 100 });
   }
@@ -382,6 +466,15 @@ export function MapViewport({
           <button type="button" className="secondary" onClick={() => setManual(null)}>
             {t(k('recenter'))}
           </button>
+          {core && (
+            <button
+              type="button"
+              className="secondary"
+              onClick={() => setManual(fit(edge, extent, aspect))}
+            >
+              {t(k('showAllTerrain'))}
+            </button>
+          )}
         </div>
         {onCreate && (
           <button
@@ -488,7 +581,8 @@ export function MapViewport({
           error={error}
           retry={() => {
             if (change.error) void change.refetch();
-            if (columns.error && overview) void columns.refetch();
+            if (footprint.error && investigateFootprint) void footprint.refetch();
+            if (columns.error && overview && !completeFootprint) void columns.refetch();
             for (const q of tileQueries) if (q.error) void q.refetch();
           }}
         />

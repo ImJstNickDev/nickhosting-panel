@@ -121,3 +121,47 @@ it('projects the located players from one roster read with a reconnect guard and
   expect(Math.abs((players[0]?.joinedAt ?? 0) - (Date.now() - 30000))).toBeLessThan(1000);
   expect(f.fetcher).toHaveBeenCalledTimes(1);
 });
+
+it('preserves an outlying int32 column in the index, binary footprint and delta', async () => {
+  const i = 13000007,
+    j = 980011;
+  const face = { face: 0, count: 500, i0: 42000, j0: 75000, i1: i, j1: j };
+  expect(
+    (await readMapIndex(fixture(Response.json({ stamp: 500, faces: [face] })), 'earth')).faces,
+  ).toEqual([face]);
+  const bytes = new ArrayBuffer(16),
+    view = new DataView(bytes);
+  for (const [index, n] of [i, j, 2147483647, 2147483647].entries())
+    view.setInt32(index * 4, n, true);
+  expect((await readMapColumns(fixture(new Response(bytes)), 'earth', 0)).columns).toEqual([
+    [i, j],
+    [2147483647, 2147483647],
+  ]);
+  const delta = { stamp: 501, reset: false, columns: [[0, i, j]] };
+  expect(await readMapChanges(fixture(Response.json(delta)), 'earth', 500)).toEqual(delta);
+});
+it('recognizes an indexed tile outside the native face as unknown; unrelated rejections remain visible', async () => {
+  const ci = 13000000,
+    cj = 980008;
+  for (const [axis, value] of [
+    ['ci', ci],
+    ['cj', cj],
+  ]) {
+    const response = Response.json(
+      { error: `paramètre « ${axis} » hors de [0, 90436] : ${value}` },
+      { status: 400 },
+    );
+    const tile = await readMapTile(fixture(response), 'earth', 0, ci, cj);
+    expect(tile.samples.every((v) => v === -1)).toBe(true);
+  }
+  for (const message of ['unknown world', 'paramètre « ci » hors de [0, 800] : 888']) {
+    await expect(
+      readMapTile(fixture(Response.json({ error: message }, { status: 400 })), 'earth', 0, ci, cj),
+    ).rejects.toMatchObject({ code: 'integration_unavailable' });
+  }
+  const f = fixture(new Response());
+  await expect(readMapTile(f, 'earth', 0, 2147483648, 0)).rejects.toMatchObject({
+    code: 'validation_failed',
+  });
+  expect(f.fetcher).not.toHaveBeenCalled();
+});

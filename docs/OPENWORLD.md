@@ -116,7 +116,11 @@ A capture can arrive several seconds after the game accepts the request.
 **Map** opens the selected world's explored terrain. Select a planetary face to pan or
 zoom. The overview uses explored columns, and the detailed view loads just the
 surface tiles in view. Water and elevation come from the saved or active terrain.
-Unknown ground remains blank. The map follows the game's change cursor while open
+Unknown ground remains blank. If a sparsely populated face has isolated entries
+far from the explored area, the map opens on the main cluster. **Show full index**
+includes the distant entries. The game can list a column outside its playable face;
+such a column has no surface to draw.
+The map follows the game's change cursor while open
 and loads a new index if the game resets that cursor. It reads a running instance
 through the private API, including when public dashboard access is off.
 

@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { DomainError } from '@nickhosting/core';
 import { createTestDatabase } from '@nickhosting/database/testing';
+import { PterodactylError } from '@nickhosting/pterodactyl-adapter';
 import { Hono } from 'hono';
 import { afterAll, beforeAll, expect, it, vi } from 'vitest';
 import { openworldManifest } from '../../../games/openworld/src/manifest.js';
@@ -106,6 +107,8 @@ async function fixture() {
     onWrite: undefined as (() => Response | Promise<Response>) | undefined,
     clock: Date.now(),
     explored: true,
+    columns: [4, 3, 5, 4, 17, 8],
+    changes: [[0, 4, 3, 4]],
     reset: false,
   };
   const writes: string[] = [],
@@ -139,11 +142,11 @@ async function fixture() {
           faces: explored ? [{ face: 0, count: 3, i0: 4, j0: 0, i1: 17, j1: 8 }] : [],
         });
       case 'map/columns':
-        return new Response(new Int32Array([4, 3, 5, 4, 17, 8]).buffer);
+        return new Response(new Int32Array(state.columns).buffer);
       case 'map/surface':
         return new Response(null, { status: 404 });
       case 'map/changes':
-        return Response.json({ stamp: 31, reset: state.reset, columns: [[0, 4, 3, 4]] });
+        return Response.json({ stamp: 31, reset: state.reset, columns: state.changes });
       case 'players':
         return Response.json({
           players: [
@@ -475,4 +478,85 @@ it('denies checkpoint dispatch when the reader loses the grant during native pre
   release.resolve();
   expect((await pending).status).toBe(403);
   expect(f.writes).toHaveLength(0);
+});
+
+it('round-trips wide column coordinates, overview buckets, and native tile origins without collisions', async () => {
+  const f = await fixture();
+  await f.grant(read);
+  await f.power('running');
+  const processRef = await f.ref();
+  const q = `?world=earth&face=0&processRef=${processRef}`;
+  // Both pairs used to encode as the same number for a 131072-column face.
+  f.state.columns = [131072, 262144, 131074, 0, 0x7ffffffe, 0x7fffffff];
+  expect(await (await f.request(`/columns${q}&stride=2`)).json()).toEqual({
+    columns: [
+      [131072, 262144],
+      [131074, 0],
+      [0x7ffffffe, 0x7ffffffe],
+    ],
+  });
+  expect(
+    await (
+      await f.request(`/columns${q}&i0=2147483646&i1=2147483647&j0=2147483647&j1=2147483647`)
+    ).json(),
+  ).toEqual({ columns: [[0x7ffffffe, 0x7fffffff]] });
+  expect(await (await f.request(`/columns${q}&stride=2147483648`)).json()).toEqual({
+    columns: [[0, 0]],
+  });
+  expect((await f.request(`/surface${q}&ci=2147483640&cj=951424`)).status).toBe(200);
+  expect((await f.request(`/surface${q}&ci=2147483648&cj=0`)).status).toBe(400);
+  expect((await f.request(`/columns${q}&stride=2147483647`)).status).toBe(400);
+  f.state.changes = [[0, 12622489, 951427, 5]];
+  expect(
+    await (await f.request(`/changes?world=earth&processRef=${processRef}&since=30`)).json(),
+  ).toEqual({ stamp: 31, reset: false, columns: [[0, 12622489, 951427]] });
+  expect(f.reads.filter((r) => r === 'map/columns')).toHaveLength(1);
+  expect(f.reads.filter((r) => r === 'map/surface')).toHaveLength(1);
+});
+
+it('bounds the framing sample on a large explored face and retains isolated extrema', async () => {
+  const f = await fixture();
+  await f.grant(read);
+  await f.power('running');
+  const q = `?world=earth&face=0&processRef=${await f.ref()}`;
+  f.state.columns = Array.from({ length: 40000 }, (_, n) => [
+    30000 + (n % 200),
+    45000 + Math.floor(n / 200),
+  ]).flat();
+  f.state.columns.splice(550, 2, 12500000, 930000);
+  const res = await f.request(`/columns${q}&sample=1`);
+  expect(res.status).toBe(200);
+  const { columns } = (await res.json()) as { columns: [number, number][] };
+  expect(columns.length).toBeLessThanOrEqual(4096);
+  expect(columns.length).toBeGreaterThan(4000);
+  expect(columns).toContainEqual([12500000, 930000]);
+  expect(columns.every(([i, j]) => j >= 45000 && i >= 30000)).toBe(true);
+  expect((await f.request(`/columns${q}&sample=1&stride=2`)).status).toBe(400);
+  expect((await f.request(`/columns${q}&sample=1&i0=0&i1=50&j0=0&j1=50`)).status).toBe(400);
+  expect(f.reads.filter((r) => r === 'map/columns')).toHaveLength(1);
+});
+
+it('reports the provider cooldown for map metadata and reuses its verification across retries', async () => {
+  const f = await fixture();
+  await f.grant(read);
+  await f.power('running');
+  const throttle = new PterodactylError('rate_limited', 'application', 'rejected', 429, 4250);
+  f.target.mockRejectedValueOnce(throttle);
+  const now = vi.spyOn(Date, 'now').mockImplementation(() => f.state.clock);
+  try {
+    const rejected = await f.request('');
+    expect(rejected.status).toBe(429);
+    expect(rejected.headers.get('retry-after')).toBe('5');
+    expect(await rejected.json()).toEqual({ error: 'rate_limited' });
+    f.state.clock += 2000;
+    const retry = await f.request('');
+    expect(retry.status).toBe(429);
+    expect(retry.headers.get('retry-after')).toBe('3');
+    expect(f.target).toHaveBeenCalledTimes(1);
+    f.state.clock += 4000;
+    expect((await f.request('')).status).toBe(200);
+    expect(f.target).toHaveBeenCalledTimes(2);
+  } finally {
+    now.mockRestore();
+  }
 });

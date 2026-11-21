@@ -1,5 +1,8 @@
 import { useCallback, useEffect, useState } from 'react';
-import type { OpenworldMapWorld } from '../../../../../games/openworld/src/world-map.js';
+import {
+  maxOpenworldMapColumn,
+  type OpenworldMapWorld,
+} from '../../../../../games/openworld/src/world-map.js';
 import { useFormat, useT } from '../../app/i18n.js';
 import { ErrorNotice, Loading, Select } from '../../components/ui.js';
 import { Pagination, SearchField } from '../../components/workspace-controls.js';
@@ -143,7 +146,12 @@ function MapWorld({
   const pages = Math.max(1, Math.ceil(matches.length / 30)),
     currentPage = Math.min(page, pages);
   const face = chosenFace ?? index.data?.faces.find((f) => f.count > 0)?.face ?? 0;
-  const edge = world.faceEdgeMeters ?? 16 * 131072;
+  const extent = index.data?.faces.find((f) => f.face === face);
+  const checkpointEdge = world.faceEdgeMeters ?? 0x7fffffff;
+  const terrainEdge =
+    world.faceEdgeMeters == null
+      ? 16 * (maxOpenworldMapColumn + 1)
+      : Math.max(world.faceEdgeMeters, 16 * (1 + Math.max(extent?.i1 ?? 0, extent?.j1 ?? 0)));
   const refreshIndex = useCallback(() => {
     void index.refetch();
   }, [index.refetch]);
@@ -212,9 +220,10 @@ function MapWorld({
               key={`${face}/${viewportRevision}`}
               server={server}
               world={world.key}
-              edge={edge}
+              edge={terrainEdge}
+              checkpointEdge={checkpointEdge}
               face={face}
-              extent={index.data.faces.find((f) => f.face === face)}
+              extent={extent}
               stamp={index.data.stamp}
               processRef={processRef}
               checkpoints={!checkpoints.error ? data : []}
@@ -379,7 +388,7 @@ function MapWorld({
         <CheckpointDialog
           form={form}
           world={world.key}
-          edge={edge}
+          edge={checkpointEdge}
           serverId={server.serverId}
           processRef={processRef}
           onClose={() => setForm(null)}
