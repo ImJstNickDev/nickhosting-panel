@@ -19,6 +19,9 @@ it('separates the roster and performance grants from inspection, moderation and 
     'factories',
   ]);
   expect(sections(['game.openworld.map.read'])).toEqual(['map']);
+  expect(sections(['game.openworld.seed.inspect'])).toEqual(['seed']);
+  expect(sections(['game.openworld.rules.view'])).toEqual(['rules']);
+  expect(sections(['game.openworld.rules.manage', 'game.openworld.bans.manage'])).toEqual([]);
   expect(sections(['game.openworld.checkpoints.manage'])).toEqual([]);
   expect(sections(['game.openworld.dashboard.admin'])).toEqual(['dashboard']);
   for (const role of ['viewer', 'operator', 'manager', 'owner'] as const) {
@@ -35,6 +38,10 @@ it('separates the roster and performance grants from inspection, moderation and 
       'game.openworld.players.moderate',
       'game.openworld.players.screenshots',
       'game.openworld.dashboard.admin',
+      'game.openworld.rules.view',
+      'game.openworld.rules.manage',
+      'game.openworld.bans.manage',
+      'game.openworld.seed.inspect',
     ]),
   );
 });

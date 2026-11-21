@@ -13,6 +13,7 @@ const permissionKeys = ['game.openworld.players.read', 'game.openworld.performan
 if (!params.has('reader')) permissionKeys.push('game.openworld.players.inspect');
 if (params.get('section') === 'map' || params.has('mapAccess'))
   permissionKeys.push('game.openworld.map.read');
+if (params.has('seedAccess')) permissionKeys.push('game.openworld.seed.inspect');
 if (params.has('cartographer')) permissionKeys.push('game.openworld.checkpoints.manage');
 if (params.has('moderator')) permissionKeys.push('game.openworld.players.moderate');
 if (params.has('screenshots')) permissionKeys.push('game.openworld.players.screenshots');

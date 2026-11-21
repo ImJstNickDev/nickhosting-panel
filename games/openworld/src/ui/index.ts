@@ -17,6 +17,8 @@ import { openworldGameArtwork, openworldRuntimeArtwork } from './artwork.js';
 import { openworldFactoriesCatalogs } from './factories-catalog.js';
 import { openworldMapCatalogs } from './map-catalog.js';
 import { openworldMapLayerCatalogs } from './map-layers-catalog.js';
+import { openworldRulesCatalogs } from './rules-catalog.js';
+import { openworldSeedCatalogs } from './seed-catalog.js';
 import { openworldTelemetryCatalogs } from './telemetry-catalog.js';
 
 const catalogSchema = z.object({
@@ -161,6 +163,28 @@ export const openworldUiModule = defineTrustedGameUiModule({
         columns: [],
         forms: [],
       },
+      {
+        id: 'rules',
+        titleKey: 'games.openworld.rules.title',
+        loader: 'telemetry',
+        renderer: 'openworld-rules',
+        navigation: { group: 'tools', order: 40, icon: 'settings', placement: 'sidebar' },
+        requiredPermissions: ['game.openworld.rules.view'],
+        requiredCapabilities: [],
+        columns: [],
+        forms: [],
+      },
+      {
+        id: 'seed',
+        titleKey: 'games.openworld.seed.title',
+        loader: 'telemetry',
+        renderer: 'openworld-seed',
+        navigation: { group: 'tools', order: 45, icon: 'world', placement: 'sidebar' },
+        requiredPermissions: ['game.openworld.seed.inspect'],
+        requiredCapabilities: [],
+        columns: [],
+        forms: [],
+      },
       openworldDashboardSection,
     ],
     ports: [
@@ -201,6 +225,20 @@ export const openworldUiModule = defineTrustedGameUiModule({
       ...openworldTelemetryCatalogs.en,
       ...openworldMapCatalogs.en,
       ...openworldFactoriesCatalogs.en,
+      ...openworldRulesCatalogs.en,
+      ...openworldSeedCatalogs.en,
+      'games.openworld.permissions.viewRules': 'View server rules',
+      'games.openworld.permissions.viewRulesHelp':
+        'View game roles, protected zones, planetary borders, difficulty and bans.',
+      'games.openworld.permissions.manageRules': 'Change difficulty',
+      'games.openworld.permissions.manageRulesHelp':
+        'Change the game difficulty. Requires access to server rules.',
+      'games.openworld.permissions.manageBans': 'Manage persistent bans',
+      'games.openworld.permissions.manageBansHelp':
+        'Lift account bans by UUID. Requires access to server rules.',
+      'games.openworld.permissions.inspectSeed': 'Inspect the world seed',
+      'games.openworld.permissions.inspectSeedHelp':
+        'View the seed and locate resources in unexplored terrain.',
       ...openworldMapLayerCatalogs.en,
       'games.openworld.permissions.viewPlayers': 'View players',
       'games.openworld.permissions.inspect': 'Inspect player details',
@@ -228,6 +266,20 @@ export const openworldUiModule = defineTrustedGameUiModule({
       ...openworldTelemetryCatalogs.it,
       ...openworldMapCatalogs.it,
       ...openworldFactoriesCatalogs.it,
+      ...openworldRulesCatalogs.it,
+      ...openworldSeedCatalogs.it,
+      'games.openworld.permissions.viewRules': 'Consulta le regole del server',
+      'games.openworld.permissions.viewRulesHelp':
+        'Mostra ruoli di gioco, zone protette, confini planetari, difficoltà e ban.',
+      'games.openworld.permissions.manageRules': 'Modifica la difficoltà',
+      'games.openworld.permissions.manageRulesHelp':
+        'Modifica la difficoltà del gioco. Richiede l’accesso alle regole del server.',
+      'games.openworld.permissions.manageBans': 'Gestisci i ban persistenti',
+      'games.openworld.permissions.manageBansHelp':
+        'Revoca i ban degli account per UUID. Richiede l’accesso alle regole del server.',
+      'games.openworld.permissions.inspectSeed': 'Ispeziona il seed del mondo',
+      'games.openworld.permissions.inspectSeedHelp':
+        'Mostra il seed e permette di localizzare risorse nel terreno inesplorato.',
       ...openworldMapLayerCatalogs.it,
       'games.openworld.permissions.viewPlayers': 'Visualizza i giocatori',
       'games.openworld.permissions.inspect': 'Ispeziona i dettagli dei giocatori',

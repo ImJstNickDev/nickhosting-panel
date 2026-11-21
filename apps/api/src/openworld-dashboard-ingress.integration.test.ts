@@ -6,7 +6,7 @@ import { afterAll, beforeAll, expect, it, vi } from 'vitest';
 import { openworldManifest } from '../../../games/openworld/src/manifest.js';
 import { managementFixture } from '../../../packages/server-management/src/test-fixtures.js';
 import { createOpenworldDashboardIngress } from './openworld-dashboard-ingress.js';
-import { issueDashboardCode } from './openworld-dashboard-sso.js';
+import { issueDashboardCode, publishedInspectorLink } from './openworld-dashboard-sso.js';
 
 let database: Awaited<ReturnType<typeof createTestDatabase>>;
 beforeAll(async () => {
@@ -228,11 +228,94 @@ it('binds the panel login to one host, browser and parent session and rechecks n
     .execute();
   const subCookie = await grant(sub.context);
   expect((await post('/api/live/console', origin, subCookie)).status).toBe(200);
+  const enteredLive = Promise.withResolvers<void>(),
+    releaseLive = Promise.withResolvers<void>();
+  upstream.mockImplementationOnce(async () => {
+    enteredLive.resolve();
+    await releaseLive.promise;
+    return Response.json({ players: ['private example'] });
+  });
+  const pendingLive = get('/api/live/players', { cookie: subCookie });
+  await enteredLive.promise;
+  await db
+    .updateTable('server_subusers')
+    .set({ permission_keys: JSON.stringify(['game.openworld.seed.inspect']) })
+    .where('server_id', '=', id)
+    .where('user_id', '=', sub.context.actorUserId)
+    .execute();
+  releaseLive.resolve();
+  expect((await pendingLive).status).toBe(403);
+  const seedCookie = await grant(sub.context);
+  expect(await publishedInspectorLink(db, sub.context, id)).toEqual({
+    inspectorUrl: `${origin}/inspector/`,
+    inspectorPublished: true,
+  });
+  expect(
+    await publishedInspectorLink(db, { ...sub.context, sessionType: 'support' } as AuthContext, id),
+  ).toEqual({ inspectorUrl: null, inspectorPublished: true });
+  // The regular panel session works on this host for the narrower reader.
+  for (const path of [
+    '/inspector/',
+    '/inspector/js/main.js',
+    '/inspector/vendor/three.module.js',
+    '/pack/ow_stone.png',
+    '/fonts/Nunito-Bold.ttf',
+    '/api/info',
+    '/api/tile',
+  ]) {
+    expect((await get(path, { cookie: seedCookie })).status).toBe(200);
+  }
+  const pendingCatalogs = Promise.withResolvers<void>(),
+    finishCatalogs = Promise.withResolvers<void>();
+  let catalogReads = 0;
+  for (let i = 0; i < 12; i++)
+    upstream.mockImplementationOnce(async () => {
+      if (++catalogReads === 12) pendingCatalogs.resolve();
+      await finishCatalogs.promise;
+      return Response.json({ planet: 'moon' });
+    });
+  const catalogs = Array.from({ length: 12 }, () =>
+    get('/api/info?planet=moon', { cookie: seedCookie }),
+  );
+  try {
+    await pendingCatalogs.promise;
+    const delayed = await get('/api/doc?planet=moon', { cookie: seedCookie });
+    expect(delayed.status).toBe(429);
+    expect(delayed.headers.get('retry-after')).toBe('1');
+    expect((await get('/api/live/status', { cookie: ownerCookie })).status).toBe(200);
+  } finally {
+    finishCatalogs.resolve();
+  }
+  expect((await Promise.all(catalogs)).every((r) => r.ok)).toBe(true);
+  const limitedBefore = upstream.mock.calls.length;
+  for (const path of [
+    '/',
+    '/api/live/status',
+    '/api/live/checkpoints',
+    '/api/live/screenshot',
+    '/api/live/players',
+  ]) {
+    expect((await get(path, { cookie: seedCookie })).status).toBe(403);
+  }
+  expect((await post('/api/live/console', origin, subCookie)).status).toBe(403);
+  expect((await post('/api/live/console', origin, seedCookie)).status).toBe(403);
+  expect(upstream.mock.calls).toHaveLength(limitedBefore);
+  const entered = Promise.withResolvers<void>(),
+    release = Promise.withResolvers<void>();
+  upstream.mockImplementationOnce(async () => {
+    entered.resolve();
+    await release.promise;
+    return Response.json({ seed: 'private catalog' });
+  });
+  const pendingInfo = get('/api/info', { cookie: seedCookie });
+  await entered.promise;
   await db
     .deleteFrom('server_subusers')
     .where('server_id', '=', id)
     .where('user_id', '=', sub.context.actorUserId)
     .execute();
+  release.resolve();
+  expect((await pendingInfo).status).toBe(403);
   const before = upstream.mock.calls.length;
   expect((await post('/api/live/console', origin, subCookie)).status).toBe(403);
   expect((await get('/api/info', { cookie: subCookie })).status).toBe(403);

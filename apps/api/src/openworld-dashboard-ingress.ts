@@ -11,7 +11,9 @@ import { Hono } from 'hono';
 import { deleteCookie, getCookie, setCookie } from 'hono/cookie';
 import type { Kysely } from 'kysely';
 import { openworldDashboardToken } from '../../../games/openworld/src/dashboard-api.js';
+import { isOpenworldSeedPath } from '../../../games/openworld/src/seed-inspector.js';
 import { resolveOpenworldDashboardTarget } from '../../../packages/server-management/src/openworld-dashboard.js';
+import { sharedReads } from '../../../packages/server-management/src/openworld-telemetry.js';
 import {
   callbackPath,
   dashboardSessionBinding,
@@ -78,6 +80,9 @@ export function createOpenworldDashboardIngress(options: {
     (async (serverId: string) =>
       resolveOpenworldDashboardTarget(db, (await options.management()).adapter, serverId));
   const tokens = new Map<string, { expires: number; value: Promise<string> }>();
+  const generationReads = new Map<string, number>();
+  let activeGeneration = 0;
+  const verifiedSeedTargets = sharedReads<void>(256, Date.now, 1000);
   function tokenFor(key: string, serverId: string, origin: string) {
     const entry = tokens.get(key);
     if (entry && entry.expires > Date.now()) return entry.value;
@@ -203,6 +208,8 @@ export function createOpenworldDashboardIngress(options: {
       authorize.searchParams.set('challenge', challenge);
       return c.redirect(authorize.href, 303);
     }
+    const inspector = isOpenworldSeedPath(url.pathname, request.method);
+    if (!binding.dashboard && !inspector) return c.body(null, 403);
     if (
       !binding.running ||
       !binding.provider ||
@@ -222,21 +229,79 @@ export function createOpenworldDashboardIngress(options: {
       binding.allocation,
       backend,
     ]);
-    const token = await tokenFor(key, route.serverId, backend);
-    if (body && (await lookup(db, hostname))?.serverId !== route.serverId) return c.notFound();
+    // Verify the same private allocation before serving seed assets. A seed-only
+    // session never obtains a native console token or forwards one to the game.
+    let token: string | undefined;
+    if (binding.dashboard) token = await tokenFor(key, route.serverId, backend);
+    else
+      await verifiedSeedTargets.get(key, 60000, async () => {
+        const assigned = await target(route.serverId);
+        if (assigned.address !== backend) throw new DomainError('provenance_mismatch');
+      });
+    const authorizedBinding = binding;
+    const serverId = route.serverId;
+    async function stillBound(requireDashboard: boolean) {
+      const [current, publication] = await Promise.all([
+        dashboardSessionBinding(db, hostname, serverId, session ?? ''),
+        lookup(db, hostname),
+      ]);
+      return (
+        !!current?.running &&
+        (!requireDashboard || current.dashboard) &&
+        current.allocation === authorizedBinding.allocation &&
+        current.provider === authorizedBinding.provider &&
+        current.mapping === authorizedBinding.mapping &&
+        current.node === authorizedBinding.node &&
+        current.address === authorizedBinding.address &&
+        current.port === authorizedBinding.port &&
+        publication?.serverId === serverId
+      );
+    }
+    if (body && !(await stillBound(true))) return c.body(null, 403);
     const upstream = new URL(backend);
     upstream.pathname = url.pathname;
     upstream.search = url.search;
     const headers = new Headers();
-    if (url.pathname.startsWith('/api/live/')) headers.set('X-OW-Token', token);
+    if (token && url.pathname.startsWith('/api/live/')) headers.set('X-OW-Token', token);
     if (body) headers.set('content-type', 'application/json');
-    const response = await fetcher(upstream, {
-      method: request.method,
-      redirect: 'manual',
-      headers,
-      body,
-      signal: AbortSignal.any([request.signal, AbortSignal.timeout(30_000)]),
-    });
+    // info and doc may initialize another planet when the native viewer changes worlds.
+    const generationRead = inspector && url.pathname.startsWith('/api/');
+    const limited = generationRead && !binding.dashboard;
+    const active = generationReads.get(key) ?? 0;
+    if (limited && (active >= 12 || activeGeneration >= 96)) {
+      c.header('Retry-After', '1');
+      return c.body(null, 429);
+    }
+    if (limited) {
+      generationReads.set(key, active + 1);
+      activeGeneration++;
+    }
+    let response: Response;
+    try {
+      response = await fetcher(upstream, {
+        method: request.method,
+        redirect: 'manual',
+        headers,
+        body,
+        signal: AbortSignal.any([
+          request.signal,
+          AbortSignal.timeout(generationRead ? 55_000 : 30_000),
+        ]),
+      });
+    } finally {
+      if (limited) {
+        activeGeneration--;
+        const remaining = (generationReads.get(key) ?? 1) - 1;
+        if (remaining) generationReads.set(key, remaining);
+        else generationReads.delete(key);
+      }
+    }
+    // Recheck the grant and allocation after a slow read. Removing administrative
+    // access while retaining the seed grant must hide pending live responses too.
+    if (!body && url.pathname.startsWith('/api/') && !(await stillBound(!inspector))) {
+      await response.body?.cancel();
+      return c.body(null, 403);
+    }
     if (response.status === 401 || response.status === 403) {
       tokens.delete(key);
       await response.body?.cancel();
@@ -250,7 +315,8 @@ export function createOpenworldDashboardIngress(options: {
       if (
         redirect.origin !== upstream.origin ||
         !nativePath.test(redirect.pathname) ||
-        redirect.pathname.startsWith('//')
+        redirect.pathname.startsWith('//') ||
+        (!binding.dashboard && !isOpenworldSeedPath(redirect.pathname, 'GET'))
       )
         return c.body(null, 502);
       return c.redirect(origin + redirect.pathname + redirect.search, 302);

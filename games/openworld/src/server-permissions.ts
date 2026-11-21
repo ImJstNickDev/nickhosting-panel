@@ -2,6 +2,42 @@ import type { ServerPermissionDefinition } from '@nickhosting/core';
 
 export const openworldTelemetryPermissions: ServerPermissionDefinition[] = [
   {
+    key: 'game.openworld.rules.view',
+    resource: 'game.openworld.rules',
+    kind: 'additional',
+    legacy: 'explicit',
+    labelKey: 'games.openworld.permissions.viewRules',
+    resourceLabelKey: 'games.openworld.rules.title',
+    descriptionKey: 'games.openworld.permissions.viewRulesHelp',
+  },
+  {
+    key: 'game.openworld.rules.manage',
+    resource: 'game.openworld.rules',
+    kind: 'additional',
+    legacy: 'explicit',
+    labelKey: 'games.openworld.permissions.manageRules',
+    resourceLabelKey: 'games.openworld.rules.title',
+    descriptionKey: 'games.openworld.permissions.manageRulesHelp',
+  },
+  {
+    key: 'game.openworld.bans.manage',
+    resource: 'game.openworld.bans',
+    kind: 'additional',
+    legacy: 'explicit',
+    labelKey: 'games.openworld.permissions.manageBans',
+    resourceLabelKey: 'games.openworld.rules.bans',
+    descriptionKey: 'games.openworld.permissions.manageBansHelp',
+  },
+  {
+    key: 'game.openworld.seed.inspect',
+    resource: 'game.openworld.seed',
+    kind: 'additional',
+    legacy: 'explicit',
+    labelKey: 'games.openworld.permissions.inspectSeed',
+    resourceLabelKey: 'games.openworld.seed.title',
+    descriptionKey: 'games.openworld.permissions.inspectSeedHelp',
+  },
+  {
     key: 'game.openworld.map.read',
     resource: 'game.openworld.map',
     kind: 'read',

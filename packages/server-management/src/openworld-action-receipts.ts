@@ -9,7 +9,7 @@ export function openworldActionReceipt(
   db: Kysely<Database>,
   who: AuthContext,
   serverId: string,
-  family: 'player' | 'checkpoint',
+  family: 'player' | 'checkpoint' | 'rule',
   input: { requestId: string },
   attributes: Record<string, string | number>,
 ) {

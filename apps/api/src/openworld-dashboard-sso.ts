@@ -21,9 +21,33 @@ const requestSchema = z.strictObject({
 type DB = Kysely<Database>;
 // The native interface is an explicit administrative grant. Platform roles and
 // legacy/project permissions alone do not convey this game credential.
-const hasAccess = sql<boolean>`(s.owner_id = p."userId" OR EXISTS (
+const hasDashboard = sql<boolean>`(s.owner_id = p."userId" OR EXISTS (
   SELECT 1 FROM server_subusers su WHERE su.server_id = s.id AND su.user_id = p."userId"
   AND su.permission_keys @> '["game.openworld.dashboard.admin"]'::jsonb))`;
+
+const hasAccess = sql<boolean>`(${hasDashboard} OR EXISTS (
+  SELECT 1 FROM server_subusers su WHERE su.server_id = s.id AND su.user_id = p."userId"
+  AND su.permission_keys @> '["game.openworld.seed.inspect"]'::jsonb))`;
+
+export async function publishedInspectorLink(db: DB, who: AuthContext, id: string) {
+  const result = await sql<{ hostname: string; allowed: boolean }>`SELECT d.hostname,
+    (p.id IS NOT NULL AND ${hasAccess}) AS allowed
+    FROM openworld_dashboard_dns d
+    JOIN openworld_dashboard_publications pub ON pub.server_id=d.server_id
+    JOIN managed_servers s ON s.id=d.server_id
+    LEFT JOIN session p ON p.id=${who[authSessionId] ?? ''} AND p."userId"=${who.subjectUserId} AND p."expiresAt">now()
+    WHERE d.server_id=${id}::uuid AND pub.enabled AND pub.state='active'
+      AND pub.tracked_hostname=d.hostname AND pub.proxy_host_id IS NOT NULL`.execute(db);
+  const row = result.rows[0];
+  if (!row || !dashboardHostname(row.hostname))
+    return { inspectorUrl: null, inspectorPublished: false };
+  const allowed =
+    row.allowed && who.sessionType === 'regular' && who.actorUserId === who.subjectUserId;
+  return {
+    inspectorUrl: allowed ? new URL('/inspector/', `https://${row.hostname}`).href : null,
+    inspectorPublished: true,
+  };
+}
 
 export async function issueDashboardCode(
   db: DB,
@@ -102,9 +126,11 @@ export async function dashboardSessionBinding(
     address: string | null;
     port: number | null;
     running: boolean;
+    dashboard: boolean;
   }>`SELECT s.pterodactyl_uuid AS provider, s.mapping_id AS mapping, s.node_id AS node,
        a.id AS allocation, a.backend_address AS address, a.port,
-       (s.runtime_state = 'running' AND s.installation_state = 'installed') AS running
+       (s.runtime_state = 'running' AND s.installation_state = 'installed') AS running,
+       ${hasDashboard} AS dashboard
      FROM openworld_dashboard_sessions g
      JOIN session p ON p.id = g.parent_id
      JOIN managed_servers s ON s.id = g.server_id

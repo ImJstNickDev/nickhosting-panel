@@ -90,9 +90,8 @@ function dirEntry(list: readonly FilemanEntry[], name: string, kind: 'directory'
   return entry;
 }
 
-/** Traverse only real folders from the configured data root. Returned refs always come from these listings. */
-export async function listSavedPlayerFiles(files: FilemanReadService) {
-  let entries = await files.list('');
+export async function openworldDataRoot(files: FilemanReadService, root: readonly FilemanEntry[]) {
+  let entries = root;
   const config = dirEntry(entries, 'server.json', 'file');
   let dataDir = 'owserver_data';
   if (config) {
@@ -110,11 +109,21 @@ export async function listSavedPlayerFiles(files: FilemanReadService) {
     }
   }
   let directory = '';
-  for (const component of [...dataDir.split('/').filter(Boolean), 'players']) {
-    if (!dirEntry(entries, component, 'directory')) return new Map<string, SavedPlayerFiles>();
+  for (const component of dataDir.split('/').filter(Boolean)) {
+    if (!dirEntry(entries, component, 'directory')) return undefined;
     directory = directory ? `${directory}/${component}` : component;
     entries = await files.list(directory);
   }
+  return { directory, entries };
+}
+
+/** Traverse only real folders from the configured data root. Returned refs always come from these listings. */
+export async function listSavedPlayerFiles(files: FilemanReadService) {
+  const data = await openworldDataRoot(files, await files.list(''));
+  if (!data || !dirEntry(data.entries, 'players', 'directory'))
+    return new Map<string, SavedPlayerFiles>();
+  const directory = data.directory ? `${data.directory}/players` : 'players';
+  const entries = await files.list(directory);
   const refs = new Map<string, SavedPlayerFiles>();
   const add = (list: readonly FilemanEntry[], kind: 'save' | 'stats', root: string) => {
     for (const file of list) {

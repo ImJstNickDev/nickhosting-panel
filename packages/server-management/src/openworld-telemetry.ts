@@ -34,6 +34,7 @@ type Sample = { data: OpenworldTelemetryData[Resource]; observedAt: number };
 export type OpenworldScope = {
   serverId: string;
   binding: string;
+  version: string;
   liveKey: string;
   origin: string;
   canManageCheckpoints?: boolean;
@@ -104,6 +105,8 @@ export async function readOpenworldScope(
   serverId: string,
   reader?:
     | { who: AuthContext; resource: Resource | 'factories'; playerGrant?: OpenworldPlayerGrant }
+    | { who: AuthContext; resource: 'seed' }
+    | { who: AuthContext; resource: 'rules'; ruleGrant?: 'rules.manage' | 'bans.manage' }
     | {
         who: AuthContext;
         resource: 'map';
@@ -145,6 +148,7 @@ export async function readOpenworldScope(
       'member.role as member_role',
       'sub.permission_keys',
       'p.sha256',
+      'p.version',
       'p.dashboard_credential_prepared',
       'm.nest_id',
       'm.egg_id',
@@ -185,7 +189,15 @@ export async function readOpenworldScope(
             scope.member_role ?? undefined,
             scope.permission_keys,
           );
-    if (reader.resource === 'map') {
+    if (reader.resource === 'seed') {
+      if (!keys.includes('game.openworld.seed.inspect')) throw new DomainError('forbidden');
+    } else if (reader.resource === 'rules') {
+      if (
+        !keys.includes('game.openworld.rules.view') ||
+        (reader.ruleGrant && !keys.includes(`game.openworld.${reader.ruleGrant}`))
+      )
+        throw new DomainError('forbidden');
+    } else if (reader.resource === 'map') {
       canManageCheckpoints = keys.includes('game.openworld.checkpoints.manage');
       canInspectPlayers =
         keys.includes('game.openworld.players.read') &&
@@ -239,6 +251,7 @@ export async function readOpenworldScope(
   if (!ready)
     return {
       serverId,
+      version: scope.version,
       binding,
       liveKey,
       origin: '',
@@ -258,6 +271,7 @@ export async function readOpenworldScope(
     isIP(scope.backend_address) === 6 ? `[${scope.backend_address}]` : scope.backend_address;
   return {
     serverId,
+    version: scope.version,
     binding,
     liveKey,
     canManageCheckpoints,

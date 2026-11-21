@@ -154,6 +154,25 @@ inspection access. Administrative checkpoints require the checkpoint management
 permission. The orbital view omits checkpoint notes. Opening the terrain map alone
 does not request the factory, creature or orbital feeds.
 
+**Rules** shows the difficulty, game roles and their permissions, protected zones,
+planetary borders and bans on the running server. Access to this list is an
+explicit subuser permission. Two additional grants allow changing difficulty and
+lifting a ban by account UUID. The panel confirms changes by reading the resulting
+game state and keeps a receipt for each request. A repeated request with the same
+ID cannot send the command twice. On a1.2.9 the game's ban command identifies a
+connected player by name. Operators who can send console commands can use the
+server console for that operation.
+
+**Seed Inspector** has its own explicit grant. Inside NickPanel it shows the actual
+seed, spawn, world dimensions, planets, biomes, materials, structures and tree
+species from the private service. Opening the panel catalog does not generate
+terrain. If the dashboard hostname is published, **Open Seed Inspector** opens
+the game's native renderer on that host. A subuser with only the seed grant can
+explore generated terrain, including unexplored areas, and cannot read the native
+player roster or issue administrative commands. The broader native dashboard
+permission retains its administrative access. Seed and rules reads leave sleeping
+servers asleep.
+
 The verified Linux builds are a1.0.11–a1.0.13, a1.1.0–a1.1.3, a1.2.0–a1.2.9 and
 pre-a1.2.0-1. The a1.0.10 package requires glibc 2.38 and cannot run on the Debian
 Bookworm image used by this egg. When that release is present in the catalog, the
