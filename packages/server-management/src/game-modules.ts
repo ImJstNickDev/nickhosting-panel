@@ -3,6 +3,7 @@ import {
   DomainError,
   type GatewayPresentation,
   type PlatformConfig,
+  type SecretCodec,
 } from '@nickhosting/core';
 import type { Database, gameCatalog } from '@nickhosting/database';
 import {
@@ -13,6 +14,7 @@ import {
 } from '@nickhosting/game-sdk';
 import type {
   ApplicationServer,
+  Egg,
   PterodactylAdapter,
   ServerFile,
 } from '@nickhosting/pterodactyl-adapter';
@@ -20,6 +22,7 @@ import type { Kysely, Selectable } from 'kysely';
 import type { DB, Environment } from './admission.js';
 import type { GameLifecycleContext } from './lifecycle.js';
 import { minecraftModule } from './minecraft-module.js';
+import { openworldModule } from './openworld-module.js';
 import { satisfactoryModule } from './satisfactory-module.js';
 
 export type ManagedGameServer = Selectable<Database['managed_servers']>;
@@ -41,6 +44,32 @@ export interface TrustedGameModule {
   id: string;
   manifest: GameManifest;
   provisionAsResourceOwner: boolean;
+  validateEggMapping?(
+    input: {
+      startup: string;
+      environment: Readonly<Record<string, string>>;
+      portRoles: Array<{
+        role: string;
+        primary: boolean;
+        protocols: ('tcp' | 'udp')[];
+        environmentVariable?: string;
+      }>;
+    },
+    egg: Egg,
+  ): void;
+  prepareCreation?(input: {
+    db: DB;
+    env: Environment;
+    codec?: SecretCodec;
+    context: AuthContext;
+    mappingId: string;
+    configuration: Record<string, unknown>;
+    name: string;
+  }): Promise<{
+    gateway: boolean;
+    environment: Record<string, string>;
+    persist(connection: DB, serverId: string): Promise<void>;
+  }>;
   /** Management screens shipped by this module use compiled declarations even
    * when the registered manifest predates them. Never overrides lifecycle policy. */
   managementCapabilities?: readonly ('players' | 'mods' | 'worlds')[];
@@ -88,6 +117,8 @@ export interface FileMutationContext {
   listFiles(directory: string): Promise<ServerFile[]>;
 }
 export interface GameRuntimeHooks extends GameBackupHooks<GameLifecycleContext> {
+  /** Issue narrowly scoped installer credentials at the provider handoff. */
+  installerEnvironment?(context: GameLifecycleContext): Promise<Record<string, string>>;
   configureProvision(context: GameLifecycleContext): Promise<boolean>;
   installationRetry?(
     context: GameLifecycleContext,
@@ -186,7 +217,11 @@ export function createGameModuleRegistry(modules: readonly TrustedGameModule[]) 
     },
   });
 }
-export const trustedGameModules = createGameModuleRegistry([minecraftModule, satisfactoryModule]);
+export const trustedGameModules = createGameModuleRegistry([
+  minecraftModule,
+  satisfactoryModule,
+  openworldModule,
+]);
 
 /** A registry-bound dispatcher protects all content/lifecycle entry points.
  * Unknown generic games retain M2 lifecycle support but cannot acquire content

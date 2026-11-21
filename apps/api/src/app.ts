@@ -37,9 +37,13 @@ import { availableGameCatalog, registerGameModuleRoutes } from './game-modules.j
 import { registerGatewayRoutes } from './gateway.js';
 import { registerGatewayMessageRoutes } from './gateway-messages.js';
 import { registerHealthRoutes } from './health.js';
+import { registerOwnerMetivaRoutes } from './metiva.js';
 import { registerMinecraftRoutes } from './minecraft.js';
 import { registerMinecraftSourceRoutes } from './minecraft-sources.js';
 import { registerMinecraftWorldCatalogRoutes } from './minecraft-world-catalog.js';
+import { registerOpenworldRoutes } from './openworld.js';
+import { registerOpenworldArtifactRoute } from './openworld-artifacts.js';
+import { registerOpenworldDashboardRoutes } from './openworld-dashboard.js';
 import { registerPlatformRoutes } from './platform.js';
 import { registerProfilePhotoRoutes } from './profile-photo.js';
 import { PROVIDER_EVENTS_PATH, receiveProviderEvent } from './provider-events.js';
@@ -318,6 +322,7 @@ export function createApp(options: Options) {
       }),
     );
   });
+  registerOpenworldArtifactRoute(app, { db, codec: options.codec, env });
   app.get('/healthz', (c) => c.json({ status: 'ok' }));
   app.get('/readyz', async (c) => {
     try {
@@ -520,6 +525,7 @@ export function createApp(options: Options) {
     const key = validate(platformConfigSchema.keyof(), Object.keys(normalized as object)[0]);
     return c.json(await updateSettings(db, await principal(c, true), { [key]: undefined }, env));
   });
+  registerOwnerMetivaRoutes(app, { db, codec: options.codec, env, principal });
   app.put('/v1/owner/secrets/:name', async (c) => {
     const name = validate(z.enum(secretNames), c.req.param('name'));
     const input = validate(
@@ -667,6 +673,8 @@ export function createApp(options: Options) {
     acquireUploadSlot,
     http: options.minecraftContentHttp,
   });
+  registerOpenworldDashboardRoutes(app, { db, principal, management: options.management });
+  registerOpenworldRoutes(app, { db, env, codec: options.codec, principal });
   registerSatisfactoryRoutes(app, { db, principal });
   registerSatisfactoryOverviewRoutes(app, { db, codec: options.codec, principal });
   registerSatisfactoryApiRoutes(app, { db, codec: options.codec, principal });

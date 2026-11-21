@@ -189,6 +189,7 @@ export interface ServerTables {
     role: string;
     protocols: ('tcp' | 'udp')[];
     is_primary: boolean;
+    private_only: Generated<boolean>;
   };
   resource_reservations: {
     server_id: string;

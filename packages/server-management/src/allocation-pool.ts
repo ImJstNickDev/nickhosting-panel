@@ -27,7 +27,7 @@ export function allocationAddressesOverlap(first: string, second: string) {
   return !a || !b || a === b || ['0.0.0.0', '::'].includes(a) || ['0.0.0.0', '::'].includes(b);
 }
 
-function privateBackendAddress(value: string) {
+export function privateBackendAddress(value: string) {
   if (isIP(value) === 4) {
     const [a, b] = value.split('.').map(Number);
     return (
@@ -127,7 +127,7 @@ export const backendAllocationPoolSchema = z
         .size === pool.allocations.length &&
       new Set(pool.gatewayBindAddresses).size === pool.gatewayBindAddresses.length &&
       (pool.gatewayBindAddresses.length > 0 ||
-        pool.allocations.every((pin) => pin.directEndpoint)) &&
+        pool.allocations.some((pin) => pin.directEndpoint)) &&
       new Set(
         pool.allocations
           .filter((pin) => pin.directEndpoint)
@@ -154,6 +154,44 @@ export type BackendAllocation = Allocation & {
   delivery?: 'backend' | 'direct';
   directEndpoint?: { hostname: string; port: number };
 };
+/** Reserve the more restricted private pins before assigning the public game roles. */
+export function assignRoleAllocations(
+  roles: readonly { role: string; primary: boolean }[],
+  privateRoles: ReadonlySet<string>,
+  candidates: readonly BackendAllocation[],
+  mode: 'direct' | 'gateway',
+  gatewayAvailable: boolean,
+) {
+  const selected = new Map<string, BackendAllocation>();
+  const publicPins = candidates.filter((pin) =>
+    mode === 'direct' ? Boolean(pin.directEndpoint) : gatewayAvailable && pin.delivery !== 'direct',
+  );
+  const publicPorts = new Set(publicPins.map((pin) => pin.port));
+  // Wings publishes both transports for each allocation. A public IP at the
+  // same numeric port would also publish the container's dashboard TCP socket.
+  const privatePins = candidates
+    .filter(
+      (pin) =>
+        !pin.directEndpoint &&
+        pin.delivery !== 'direct' &&
+        privateBackendAddress(pin.backendAddress),
+    )
+    .sort((a, b) => Number(publicPorts.has(a.port)) - Number(publicPorts.has(b.port)));
+  const used = new Set<number>();
+  for (const role of [...roles].sort(
+    (a, b) => Number(privateRoles.has(b.role)) - Number(privateRoles.has(a.role)),
+  )) {
+    const privateOnly = privateRoles.has(role.role);
+    if (privateOnly && role.primary) throw new DomainError('configuration_invalid');
+    const options = privateOnly ? privatePins : publicPins;
+    const index = options.findIndex((pin) => !privateRoles.size || !used.has(pin.port));
+    if (index === -1) throw new DomainError('allocation_unavailable');
+    const pin = options.splice(index, 1)[0] as BackendAllocation;
+    selected.set(role.role, pin);
+    used.add(pin.port);
+  }
+  return selected;
+}
 export function poolAllowsLoopbackEgg(
   pool: BackendAllocationPool,
   mapping: { nest_id: number; egg_id: number },
@@ -274,6 +312,8 @@ export async function assertServerBackendAllocations(
     new Set(claims.map((claim) => claim.pterodactyl_allocation_id)).size !== claims.length ||
     claims.some(
       (claim) =>
+        (claim.private_only &&
+          claims.some((other) => other.id !== claim.id && other.port === claim.port)) ||
         claim.node_id !== node.id ||
         !allocations.some(
           (allocation) =>
@@ -282,10 +322,14 @@ export async function assertServerBackendAllocations(
             canonicalAllocationAddress(allocation.ip) === claim.address &&
             allocation.backendAddress === claim.backend_address &&
             allocation.port === claim.port &&
-            (server.connection_mode === 'direct'
-              ? isDeepStrictEqual(allocation.directEndpoint ?? null, claim.direct_endpoint) &&
-                claim.direct_endpoint !== null
-              : allocation.delivery !== 'direct'),
+            (claim.private_only
+              ? !allocation.directEndpoint &&
+                allocation.delivery !== 'direct' &&
+                privateBackendAddress(allocation.backendAddress)
+              : server.connection_mode === 'direct'
+                ? isDeepStrictEqual(allocation.directEndpoint ?? null, claim.direct_endpoint) &&
+                  claim.direct_endpoint !== null
+                : allocation.delivery !== 'direct'),
         ),
     )
   )
@@ -326,6 +370,7 @@ export async function assertBackendPoolNamespace(
       'allocation.address',
       'allocation.backend_address',
       'allocation.port',
+      'allocation.private_only',
       'ownerServer.connection_mode',
     ])
     .where('ownerNode.physical_host_id', '=', node.physical_host_id)
@@ -339,7 +384,7 @@ export async function assertBackendPoolNamespace(
     )
       throw new DomainError('allocation_unavailable');
     if (
-      claim.connection_mode !== 'direct' &&
+      (claim.private_only || claim.connection_mode !== 'direct') &&
       pool.gatewayBindAddresses.some((gateway) =>
         allocationAddressesOverlap(gateway, claim.backend_address),
       )
@@ -353,7 +398,11 @@ export async function assertBackendPoolNamespace(
         (claim.address !== pin.address ||
           claim.backend_address !== backendAllocationAddress(pin) ||
           claim.port !== pin.port ||
-          (claim.connection_mode === 'gateway' && pin.delivery === 'direct'))
+          (claim.connection_mode === 'gateway' && pin.delivery === 'direct') ||
+          (claim.private_only &&
+            (pin.delivery === 'direct' ||
+              pin.directEndpoint ||
+              !privateBackendAddress(backendAllocationAddress(pin)))))
       )
         throw new DomainError('allocation_unavailable');
       if (

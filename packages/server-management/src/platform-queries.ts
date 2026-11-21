@@ -1439,6 +1439,7 @@ export async function getPlatformConnections(
       .selectFrom('server_allocations')
       .select(['id', 'role', 'port', 'protocols', 'is_primary', 'direct_endpoint'])
       .where('server_id', '=', serverId)
+      .where('private_only', '=', false)
       .orderBy('role')
       .execute(),
     db

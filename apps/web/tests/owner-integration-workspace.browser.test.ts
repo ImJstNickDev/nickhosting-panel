@@ -188,6 +188,36 @@ describe('Owner integration workspace (real components, isolated API responses)'
     await browser?.close();
     await vite?.close();
   });
+  it('edits a scoped Metiva token and restores inheritance without retrieving the value', async () => {
+    const path = '/v1/owner/integrations/minecraft/metiva-token';
+    let stored = false;
+    await page.route(`**${path}`, async (route) => {
+      const method = route.request().method();
+      if (method === 'GET')
+        return route.fulfill({ json: { configured: stored, inherited: true, locked: false } });
+      if (method === 'PUT') {
+        expect(route.request().postDataJSON()).toEqual({ value: 'mtv_fixture' });
+        stored = true;
+      } else if (method === 'DELETE') stored = false;
+      else throw new Error('Unexpected method');
+      return route.fulfill({ status: 204 });
+    });
+    await page.goto(`${origin}owner/integrations/minecraft`);
+    await page.getByText('Metiva access token', { exact: true }).click();
+    await check(page.getByText('Using the platform token')).toBeVisible();
+    await page.locator('input[type=password]').fill('mtv_fixture');
+    const box = page
+      .locator('details')
+      .filter({ has: page.getByText('Metiva access token', { exact: true }) });
+    await box.getByRole('button', { name: 'Save changes', exact: true }).click();
+    await check(box.getByText('Integration token configured')).toBeVisible();
+    await check(box.locator('input')).toHaveValue('');
+    await page.screenshot({ path: '.codex/local/m5-browser/screenshots/metiva-token-desktop.png' });
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.screenshot({ path: '.codex/local/m5-browser/screenshots/metiva-token-mobile.png' });
+    await box.getByRole('button', { name: 'Remove token' }).click();
+    await check(box.getByText('Using the platform token')).toBeVisible();
+  });
   it('keeps the index compact and generic setup available even without a bespoke game renderer', async () => {
     await page.goto(`${origin}owner/integrations`);
     await check(page.getByRole('link', { name: /Minecraft/ })).toBeVisible();

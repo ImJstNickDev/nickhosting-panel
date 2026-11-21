@@ -61,6 +61,12 @@ export interface Database
     value: Partial<PlatformConfig>;
     updated_at: Generated<Date>;
   };
+  openworld_server_profiles: {
+    server_id: string;
+    version: string;
+    sha256: string;
+    size: number;
+  };
   satisfactory_server_state: {
     server_id: string;
     snapshot: Record<string, unknown>;

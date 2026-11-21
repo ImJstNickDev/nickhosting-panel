@@ -166,6 +166,7 @@ export const secretNames = [
   'cloudflareApiToken',
   'gatewayControlToken',
   'curseforgeApiKey',
+  'metivaAccessToken',
 ] as const;
 export type SecretName = (typeof secretNames)[number];
 const secretEnv: Record<SecretName, string> = {
@@ -179,15 +180,29 @@ const secretEnv: Record<SecretName, string> = {
   cloudflareApiToken: 'NH_CLOUDFLARE_API_TOKEN',
   gatewayControlToken: 'NH_GATEWAY_CONTROL_TOKEN',
   curseforgeApiKey: 'NH_CURSEFORGE_API_KEY',
+  metivaAccessToken: 'NH_METIVA_ACCESS_TOKEN',
 };
+
+export function gameMetivaSecret(gameId: string): `metiva:${string}` {
+  if (!/^[a-z][a-z0-9-]{0,63}$/.test(gameId)) throw new DomainError('validation_failed');
+  return `metiva:${gameId}`;
+}
+
+type StoredSecret = SecretName | ReturnType<typeof gameMetivaSecret>;
+
+function envName(name: StoredSecret): string {
+  if (name.startsWith('metiva:'))
+    return `NH_METIVA_ACCESS_TOKEN_${name.slice(7).toUpperCase().replaceAll('-', '_')}`;
+  return secretEnv[name as SecretName];
+}
 
 export async function getSecret(
   db: DB,
   codec: SecretCodec,
-  name: SecretName,
+  name: StoredSecret,
   env: Environment = {},
 ) {
-  const override = env[secretEnv[name]];
+  const override = env[envName(name)];
   if (override !== undefined) {
     if (!override.trim()) throw new DomainError('configuration_invalid');
     return override;
@@ -207,9 +222,9 @@ export async function secretStatus(db: DB, env: Environment = {}) {
     .filter((name) => name !== 'pterodactylClientKey')
     .map((name) => ({
       name,
-      configured: env[secretEnv[name]] !== undefined || rows.some((r) => r.name === name),
-      source: env[secretEnv[name]] !== undefined ? 'environment' : 'database',
-      locked: env[secretEnv[name]] !== undefined,
+      configured: env[envName(name)] !== undefined || rows.some((r) => r.name === name),
+      source: env[envName(name)] !== undefined ? 'environment' : 'database',
+      locked: env[envName(name)] !== undefined,
     }));
 }
 
@@ -217,12 +232,17 @@ export async function storeSecret(
   db: Kysely<Database>,
   context: AuthContext,
   codec: SecretCodec,
-  name: SecretName,
+  name: StoredSecret,
   value: string,
   env: Environment = {},
 ) {
   regularOwner(context);
-  if (env[secretEnv[name]] !== undefined) throw new DomainError('conflict');
+  if (env[envName(name)] !== undefined) throw new DomainError('conflict');
+  if (
+    (name === 'metivaAccessToken' || name.startsWith('metiva:')) &&
+    !/^mtv_[A-Za-z0-9_-]{1,1024}$/.test(value)
+  )
+    throw new DomainError('validation_failed');
   const envelope = codec.encrypt(value, name);
   await db.transaction().execute(async (tx) => {
     await tx
@@ -232,6 +252,54 @@ export async function storeSecret(
       .execute();
     await recordAudit(tx, context, 'secret.updated', { name });
   });
+}
+
+export async function clearMetivaSecret(
+  db: Kysely<Database>,
+  context: AuthContext,
+  name: 'metivaAccessToken' | ReturnType<typeof gameMetivaSecret>,
+  env: Environment = {},
+) {
+  regularOwner(context);
+  if (env[envName(name)] !== undefined) throw new DomainError('conflict');
+  await db.transaction().execute(async (tx) => {
+    await tx.deleteFrom('encrypted_secrets').where('name', '=', name).execute();
+    await recordAudit(tx, context, 'secret.removed', { name });
+  });
+}
+
+export async function getGameMetivaStatus(
+  db: DB,
+  context: AuthContext,
+  gameId: string,
+  env: Environment = {},
+) {
+  regularOwner(context);
+  const name = gameMetivaSecret(gameId);
+  const rows = await db
+    .selectFrom('encrypted_secrets')
+    .select('name')
+    .where('name', 'in', [name, 'metivaAccessToken'])
+    .execute();
+  const configured = (id: StoredSecret) =>
+    env[envName(id)] !== undefined || rows.some((row) => row.name === id);
+  return {
+    configured: configured(name),
+    inherited: configured('metivaAccessToken'),
+    locked: env[envName(name)] !== undefined,
+  };
+}
+
+export async function getGameMetivaToken(
+  db: DB,
+  codec: SecretCodec,
+  gameId: string,
+  env: Environment = {},
+) {
+  return (
+    (await getSecret(db, codec, gameMetivaSecret(gameId), env)) ??
+    getSecret(db, codec, 'metivaAccessToken', env)
+  );
 }
 
 export async function saveBootstrapConfiguration(
@@ -273,7 +341,7 @@ export async function saveBootstrapConfiguration(
     ['pterodactylApplicationKey', input.pterodactylApplicationKey],
   ];
   for (const [name, value] of entries) {
-    if (value && env[secretEnv[name]] === undefined)
+    if (value && env[envName(name)] === undefined)
       await client.query(
         'INSERT INTO encrypted_secrets(name,envelope) VALUES ($1,$2) ON CONFLICT(name) DO UPDATE SET envelope=excluded.envelope,updated_at=now()',
         [name, JSON.stringify(codec.encrypt(value, name))],

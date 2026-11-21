@@ -70,8 +70,11 @@ beforeEach(async () => {
         subject: user,
       });
     }
+    if (path === '/v1/games/openworld/choices')
+      return response({ mappings: [{ mappingId: id, node: 1 }], versions: ['a1.2.9', 'a1.2.8'] });
     if (path === '/v1/games')
       return response([
+        { id: 'openworld', access: { canCreate: true }, manifest: { runtimes: ['dedicated'] } },
         { id: 'satisfactory', access: { canCreate: true }, manifest: { runtimes: ['dedicated'] } },
       ]);
     if (path === '/v1/games/satisfactory/choices')
@@ -228,3 +231,48 @@ it('keeps the optional credentials form usable on Italian mobile', async () => {
   await next('it');
   await check(page.getByLabel('Password amministratore', { exact: true })).toHaveCount(0);
 });
+
+it.each(['en', 'it'])(
+  'selects the Openworld release through the creation wizard in %s',
+  async (locale) => {
+    await page.addInitScript((language) => localStorage.setItem('nh.locale', language), locale);
+    if (locale === 'it') await page.setViewportSize({ width: 390, height: 844 });
+    await page.goto(`${origin}domains-fixture?view=wizard`);
+    const game = page.getByRole('button', { name: 'Openworld', exact: true });
+    await check(game).toBeVisible();
+    await check
+      .poll(() => game.locator('img').evaluate((img) => (img as HTMLImageElement).naturalWidth))
+      .toBeGreaterThan(0);
+    await game.click();
+    await next(locale);
+    await page
+      .getByLabel(locale === 'en' ? 'Server name' : 'Nome del server', { exact: true })
+      .fill('Openworld QA');
+    await next(locale);
+    await page
+      .locator('.installer-choice-card')
+      .filter({
+        has: page.getByRole('radio', {
+          name: locale === 'en' ? /Dedicated server/ : /Server dedicato/,
+        }),
+      })
+      .click();
+    await next(locale);
+    await page
+      .locator('.installer-version')
+      .filter({ has: page.getByRole('radio', { name: 'a1.2.8', exact: true }) })
+      .click();
+    await page.screenshot({ path: `test-results/openworld-wizard-${locale}.png`, fullPage: true });
+    await next(locale);
+    await next(locale);
+    await page
+      .getByRole('button', { name: locale === 'en' ? 'Create server' : 'Crea server', exact: true })
+      .click();
+    await check(page.getByTestId('created-console')).toBeVisible();
+    expect(writes).toHaveLength(1);
+    expect(writes[0]).toMatchObject({
+      mappingId: id,
+      game: { id: 'openworld', configuration: { version: 'a1.2.8' } },
+    });
+  },
+);

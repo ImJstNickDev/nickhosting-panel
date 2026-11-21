@@ -51,6 +51,7 @@ import {
 import {
   allocationAddressesOverlap,
   assertBackendPoolNamespace,
+  assignRoleAllocations,
   canonicalAllocationAddress,
   poolAllowsLoopbackEgg,
   validatedBackendInventory,
@@ -112,6 +113,12 @@ export const createServerSchema = z
         subdomain: z.string().min(1).max(63).optional(),
       })
       .strict()
+      .optional(),
+    game: z
+      .strictObject({
+        id: z.string().regex(/^[a-z][a-z0-9-]{0,63}$/),
+        configuration: z.record(z.string(), z.unknown()),
+      })
       .optional(),
     satisfactory: satisfactoryConfigurationSchema
       .extend({ setup: satisfactorySetupSchema.optional() })
@@ -564,6 +571,26 @@ export async function createManagedServer(
     subject: context.subjectUserId,
     value: satisfactoryCreationHashInput(options.creationRequest ?? request),
   });
+  const module = request.game ? trustedGameModules.get(request.game.id) : undefined;
+  if (request.game && !module?.prepareCreation) throw new DomainError('validation_failed');
+  if (request.game) {
+    const accepted = await previousRequest(db, context, request.idempotencyKey, hash);
+    if (accepted) return accepted;
+  }
+  // Resolve a release before taking the global reservation lock. The transaction
+  // rechecks the mapping and rollout and pins the exact artifact with the server.
+  const selection =
+    request.game && module?.prepareCreation
+      ? await module.prepareCreation({
+          db,
+          env,
+          codec: options.codec,
+          context,
+          mappingId: request.mappingId,
+          name: request.name,
+          configuration: request.game.configuration,
+        })
+      : undefined;
   return db.transaction().execute(async (tx) => {
     await requestLock(tx, context, request.idempotencyKey);
     const previous = await previousRequest(tx, context, request.idempotencyKey, hash);
@@ -611,6 +638,11 @@ export async function createManagedServer(
       .where('id', '=', value.mappingId)
       .executeTakeFirst();
     if (!mapping?.enabled) throw new DomainError('not_found');
+    if (
+      (request.game && mapping.game_id !== request.game.id) ||
+      (trustedGameModules.get(mapping.game_id)?.prepareCreation && !selection)
+    )
+      throw new DomainError('validation_failed');
     const minecraft =
       mapping.game_id === 'minecraft'
         ? await requireMinecraftChoice(
@@ -735,7 +767,8 @@ export async function createManagedServer(
     const { pool, allocations: inventory } = await validatedBackendInventory(adapter, node, env);
     await assertBackendPoolNamespace(tx, node, pool, env);
     const connectionMode =
-      minecraft && (!minecraft.capabilities.gateway || !config.gatewayEnabled)
+      (minecraft && (!minecraft.capabilities.gateway || !config.gatewayEnabled)) ||
+      (selection && (!selection.gateway || !config.gatewayEnabled))
         ? 'direct'
         : 'gateway';
     if (connectionMode === 'direct' && !inventory.some((allocation) => allocation.directEndpoint))
@@ -759,15 +792,14 @@ export async function createManagedServer(
       .execute();
     const free: typeof inventory = [];
     for (const allocation of inventory) {
-      if (connectionMode === 'direct') {
-        if (
-          !allocation.directEndpoint ||
-          directClaims.some((claim) =>
-            isDeepStrictEqual(claim.direct_endpoint, allocation.directEndpoint),
-          )
+      if (
+        connectionMode === 'direct' &&
+        allocation.directEndpoint &&
+        directClaims.some((claim) =>
+          isDeepStrictEqual(claim.direct_endpoint, allocation.directEndpoint),
         )
-          continue;
-      } else if (allocation.delivery === 'direct' || !pool.gatewayBindAddresses.length) continue;
+      )
+        continue;
       if (
         allocation.assigned ||
         (canonicalAllocationAddress(allocation.ip) === '127.0.0.1' &&
@@ -798,6 +830,19 @@ export async function createManagedServer(
     const roles = mapping.port_roles;
     if (!roles.length || free.length < roles.length || roles.filter((r) => r.primary).length !== 1)
       throw new DomainError('allocation_unavailable');
+    const privateRoles = new Set(
+      trustedGameModules
+        .get(mapping.game_id)
+        ?.manifest.ports.filter((port) => port.visibility === 'private')
+        .map((port) => port.role),
+    );
+    const assignedRoles = assignRoleAllocations(
+      roles,
+      privateRoles,
+      free,
+      connectionMode,
+      pool.gatewayBindAddresses.length > 0,
+    );
     const serverId = randomUUID(),
       jobId = randomUUID(),
       externalId = `nh-${serverId}`;
@@ -822,6 +867,7 @@ export async function createManagedServer(
         deleted_at: null,
       })
       .execute();
+    await selection?.persist(tx, serverId);
     const reservedConnection =
       value.connection?.subdomain || value.connection?.reservationId
         ? await consumeDnsWizardReservation(
@@ -848,8 +894,8 @@ export async function createManagedServer(
         })
         .execute();
     }
-    const allocationRows = roles.map((role, index) => {
-      const allocation = free[index];
+    const allocationRows = roles.map((role) => {
+      const allocation = assignedRoles.get(role.role);
       if (!allocation) throw new DomainError('allocation_unavailable');
       return {
         id: randomUUID(),
@@ -859,7 +905,10 @@ export async function createManagedServer(
         address: canonicalAllocationAddress(allocation.ip),
         backend_address: allocation.backendAddress,
         direct_endpoint:
-          connectionMode === 'direct' ? JSON.stringify(allocation.directEndpoint) : null,
+          connectionMode === 'direct' && !privateRoles.has(role.role)
+            ? JSON.stringify(allocation.directEndpoint)
+            : null,
+        private_only: privateRoles.has(role.role),
         port: allocation.port,
         role: role.role,
         protocols: role.protocols,
@@ -875,7 +924,7 @@ export async function createManagedServer(
     const gatewayProvision = await planProvisionGateway(tx, plannedServer, mapping.game_id, env);
     const primary = allocationRows.find((r) => r.is_primary);
     if (!primary) throw new DomainError('configuration_invalid');
-    const environment = { ...mapping.environment };
+    const environment = { ...mapping.environment, ...selection?.environment };
     if (minecraft)
       Object.assign(
         environment,
@@ -1756,6 +1805,8 @@ export async function setRuntimeMapping(
   for (const port of manifest.ports) {
     const mapped = value.portRoles.find((p) => p.role === port.role);
     const protocols = port.transport === 'both' ? ['tcp', 'udp'] : [port.transport];
+    if (port.visibility === 'private' && mapped?.primary)
+      throw new DomainError('validation_failed');
     if (
       port.required &&
       (!mapped || protocols.some((p) => !mapped.protocols.includes(p as 'tcp' | 'udp')))
@@ -1769,6 +1820,7 @@ export async function setRuntimeMapping(
     .executeTakeFirstOrThrow();
   await adapter.getNode(node.pterodactyl_node_id);
   const egg = await adapter.getEgg(value.nestId, value.eggId);
+  trustedGameModules.get(value.gameId)?.validateEggMapping?.(value, egg);
   if (
     !supportsStopConfirmation(egg) ||
     egg.nest !== value.nestId ||

@@ -472,6 +472,7 @@ const secretLabels: Record<string, readonly [string, string]> = {
   cloudflareApiToken: ['Cloudflare API token', 'Token API Cloudflare'],
   gatewayControlToken: ['Gateway control token', 'Token controllo Gateway'],
   curseforgeApiKey: ['CurseForge API key', 'Chiave API CurseForge'],
+  metivaAccessToken: ['Metiva access token', 'Token di accesso Metiva'],
 };
 for (const [key, pair] of Object.entries(secretLabels))
   ownerWebMessages[`owner.secret.${key}`] = pair;

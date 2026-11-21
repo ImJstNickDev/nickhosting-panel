@@ -281,6 +281,7 @@ export async function validateGatewayRouteEndpoint(
     !node.enabled ||
     node.physical_host_id !== config.gatewayPhysicalHostId ||
     !claim ||
+    claim.private_only ||
     !claim.protocols.includes(value.transport) ||
     !pool?.gatewayBindAddresses.includes(address) ||
     allocationAddressesOverlap(address, claim.backend_address)
@@ -439,6 +440,7 @@ async function buildGatewayRoutes(
       ),
     )
     .where('node.enabled', '=', true)
+    .where('allocation.private_only', '=', false)
     .where('node.physical_host_id', '=', config.gatewayPhysicalHostId)
     .orderBy('route.id')
     .limit(10001)

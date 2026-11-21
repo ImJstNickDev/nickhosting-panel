@@ -62,6 +62,7 @@ import { assertNoModpackPublication } from './minecraft-modpack-schema.js';
 import { createMinecraftModuleRuntime } from './minecraft-module.js';
 import { runMinecraftVersionChange } from './minecraft-version-change.js';
 import { createMinecraftWorldPreparation } from './minecraft-world-preparation.js';
+import { createOpenworldModuleRuntime } from './openworld-module.js';
 import type { OperationTiming } from './operation-timing.js';
 import { resolveProviderCredential } from './provider-accounts.js';
 import {
@@ -746,6 +747,7 @@ export async function createManagementRuntime(options: ManagementOptions) {
     trustedGameModules,
     new Map<string, import('./game-modules.js').GameRuntimeHooks>([
       [minecraft.id, minecraft],
+      ['openworld', createOpenworldModuleRuntime(options.codec, env)],
       ['satisfactory', createSatisfactoryModuleRuntime(options.codec, env)],
     ]),
   );
@@ -897,6 +899,8 @@ export async function createManagementRuntime(options: ManagementOptions) {
       (await gameRuntime(connection, serverId))?.cleanupSecrets?.(serverId, connection),
     finalizeGameStart: async (context: import('./lifecycle.js').GameLifecycleContext) =>
       (await gameRuntime(context.db, context.server.id))?.finalizeStart?.(context) ?? true,
+    gameInstallerEnvironment: async (context: import('./lifecycle.js').GameLifecycleContext) =>
+      (await gameRuntime(context.db, context.server.id))?.installerEnvironment?.(context),
     configureGameProvision: async (context: import('./lifecycle.js').GameLifecycleContext) =>
       (await gameRuntime(context.db, context.server.id))?.configureProvision(context) ?? true,
     minecraftVersionChange: async (

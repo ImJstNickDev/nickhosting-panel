@@ -19,6 +19,7 @@ import {
 } from '../components/ui.js';
 import { GlobalWakeSettings } from './auto-wake-policy.js';
 import { domainSettingKeys, OwnerDomains } from './owner-domains.js';
+import { OwnerSecretForm } from './owner-secret-form.js';
 import { OwnerStoragePolicy } from './owner-storage-policy.js';
 import { GlobalSleepSettings } from './sleep-timeout.js';
 
@@ -237,8 +238,9 @@ export function OwnerSettingsPage() {
                   {t(editable ? 'owner.environmentLocked' : 'owner.readOnlySettings')}
                 </Notice>
               ) : (
-                <SecretForm
-                  name={secret.name}
+                <OwnerSecretForm
+                  path={`/v1/owner/secrets/${secret.name}`}
+                  allowClear={secret.name === 'metivaAccessToken' && secret.configured}
                   onSaved={async () => {
                     await settings.refetch();
                   }}
@@ -380,30 +382,6 @@ function SettingForm({
           />
         ))}
       {primitiveArray && <small>{t('owner.onePerLine')}</small>}
-    </ActionForm>
-  );
-}
-function SecretForm({ name, onSaved }: { name: string; onSaved: () => Promise<void> }) {
-  const t = useT();
-  const [value, setValue] = useState('');
-  return (
-    <ActionForm
-      onSubmit={async () => {
-        await api(`/v1/owner/secrets/${name}`, { method: 'PUT', body: { value } });
-        setValue('');
-        await onSaved();
-      }}
-    >
-      <Input
-        label={t('owner.newCredential')}
-        name="value"
-        type="password"
-        autoComplete="new-password"
-        value={value}
-        onChange={(event) => setValue(event.target.value)}
-        required
-        maxLength={4096}
-      />
     </ActionForm>
   );
 }

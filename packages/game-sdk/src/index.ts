@@ -95,6 +95,8 @@ export const portRequirementSchema = z
   .object({
     role: identifier,
     transport: z.enum(['tcp', 'udp', 'both']),
+    /** Backend administration only; never receives a public route or direct endpoint. */
+    visibility: z.literal('private').optional(),
     defaultPort: z.number().int().min(1).max(65535).optional(),
     required: z.boolean(),
   })

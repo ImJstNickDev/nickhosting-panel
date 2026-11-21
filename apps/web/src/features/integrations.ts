@@ -5,6 +5,7 @@ import {
   type GameUiClient,
 } from '@nickhosting/game-sdk/ui';
 import { minecraftUiModule } from '@nickhosting/minecraft/ui';
+import { openworldUiModule } from '../../../../games/openworld/src/ui/index.js';
 import { satisfactoryUiModule } from '../../../../games/satisfactory/src/ui/index.js';
 import { api, queryClient, upload } from '../api/client.js';
 import type { ServerInfo } from './service-contracts.js';
@@ -13,6 +14,7 @@ import type { ServerInfo } from './service-contracts.js';
 export const gameUiRegistry = createTrustedGameUiRegistry([
   minecraftUiModule,
   satisfactoryUiModule,
+  openworldUiModule,
 ]);
 export function availableGameSections(
   server: ServerInfo,
@@ -200,6 +202,9 @@ const SatisfactorySettingsSection = sectionView(async () => ({
 const SatisfactoryModsSection = sectionView(async () => ({
   default: (await import('../integrations/satisfactory/mods.js')).SatisfactoryModsSection,
 }));
+const OpenworldDashboardSection = sectionView(async () => ({
+  default: (await import('../integrations/openworld/dashboard.js')).OpenworldDashboard,
+}));
 const SatisfactoryOverviewSection = sectionView(async () => ({
   default: (await import('../integrations/satisfactory/overview.js')).SatisfactoryOverviewSection,
 }));
@@ -207,6 +212,7 @@ const SatisfactoryWorldsSection = sectionView(async () => ({
   default: (await import('../integrations/satisfactory/worlds.js')).SatisfactoryWorldsSection,
 }));
 const sectionViews = new Map<string, ComponentType<GameSectionViewProps> & { preload(): void }>([
+  ['openworld-dashboard', OpenworldDashboardSection],
   ['satisfactory-overview', SatisfactoryOverviewSection],
   ['satisfactory-worlds', SatisfactoryWorldsSection],
   ['satisfactory-mods', SatisfactoryModsSection],

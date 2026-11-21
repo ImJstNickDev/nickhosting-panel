@@ -21,6 +21,7 @@ import {
 } from '../components/ui.js';
 import { IntegrationWakeSettings } from './auto-wake-policy.js';
 import { IntegrationContentPolicy } from './integration-content-policy.js';
+import { IntegrationMetivaToken } from './integration-metiva-token.js';
 import { IntegrationRuntimeMappings } from './integration-runtime-mappings.js';
 import {
   getGameAdminSections,
@@ -172,7 +173,12 @@ function IntegrationWorkspace({ module, section }: { module: Module; section: st
         ))}
       </nav>
       <div className="owner-integration-body">
-        {section === 'general' && <IntegrationGeneral module={module} />}
+        {section === 'general' && (
+          <div className="stack">
+            <IntegrationGeneral module={module} />
+            <IntegrationMetivaToken gameId={gameId} />
+          </div>
+        )}
         {section === 'runtime' && (
           <IntegrationRuntimeMappings gameId={gameId} manifest={module.manifest} />
         )}

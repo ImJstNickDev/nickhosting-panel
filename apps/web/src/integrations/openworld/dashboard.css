@@ -1,0 +1,21 @@
+.openworld-dashboard-access {
+  margin-top: 1rem;
+}
+.openworld-dashboard-password {
+  display: block;
+  margin-top: 0.75rem;
+  font-family: monospace;
+  overflow-wrap: anywhere;
+  user-select: all;
+}
+.openworld-dashboard-metrics {
+  display: grid;
+  grid-template-columns: auto max-content;
+  gap: 0.35rem 2rem;
+  justify-content: start;
+}
+.openworld-dashboard-metrics dd {
+  margin: 0;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}

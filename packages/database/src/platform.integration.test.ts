@@ -2,8 +2,12 @@ import { randomBytes } from 'node:crypto';
 import { type AuthContext, SecretCodec } from '@nickhosting/core';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
+  clearMetivaSecret,
   createDatabase,
   gameCatalog,
+  gameMetivaSecret,
+  getGameMetivaStatus,
+  getGameMetivaToken,
   getSecret,
   getSettings,
   migrate,
@@ -125,6 +129,57 @@ describe('PostgreSQL platform authority', () => {
     } finally {
       await reopened.db.destroy();
     }
+  });
+  it('protects Metiva tokens at both scopes, inherits and restores the platform token', async () => {
+    const db = database.db;
+    const localName = gameMetivaSecret('openworld');
+    const local = `mtv_${randomBytes(30).toString('hex')}`;
+    const global = `mtv_${randomBytes(30).toString('hex')}`;
+    await storeSecret(db, owner, codec, 'metivaAccessToken', global);
+    expect(await getGameMetivaToken(db, codec, 'openworld')).toBe(global);
+    await storeSecret(db, owner, codec, localName, local);
+    expect(await getGameMetivaToken(db, codec, 'openworld')).toBe(local);
+    expect(await getGameMetivaToken(db, codec, 'other')).toBe(global);
+    expect(await getGameMetivaStatus(db, owner, 'openworld')).toEqual({
+      configured: true,
+      inherited: true,
+      locked: false,
+    });
+    await expect(storeSecret(db, member, codec, localName, global)).rejects.toMatchObject({
+      code: 'forbidden',
+    });
+    await expect(
+      clearMetivaSecret(db, owner, localName, { NH_METIVA_ACCESS_TOKEN_OPENWORLD: local }),
+    ).rejects.toMatchObject({ code: 'conflict' });
+    await expect(
+      clearMetivaSecret(
+        db,
+        {
+          ...owner,
+          subjectUserId: 'member',
+          ownerElevation: true,
+          sessionType: 'support',
+          support: {
+            id: 'fixture',
+            reason: 'support fixture',
+            startedAt: new Date(),
+            lastActivityAt: new Date(),
+            expiresAt: new Date(Date.now() + 60_000),
+            revokedAt: null,
+          },
+        },
+        localName,
+      ),
+    ).rejects.toMatchObject({ code: 'forbidden' });
+    const stored = JSON.stringify(
+      (await database.pool.query('SELECT * FROM encrypted_secrets')).rows,
+    );
+    expect(stored).not.toContain(local);
+    expect(stored).not.toContain(global);
+    await clearMetivaSecret(db, owner, localName);
+    expect(await getGameMetivaToken(db, codec, 'openworld')).toBe(global);
+    await clearMetivaSecret(db, owner, 'metivaAccessToken');
+    expect(await getGameMetivaToken(db, codec, 'openworld')).toBeUndefined();
   });
   it('persists canonical rollout and filters catalog by actual user authority', async () => {
     const manifest = {
