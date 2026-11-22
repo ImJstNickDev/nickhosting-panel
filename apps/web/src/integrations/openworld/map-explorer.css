@@ -92,8 +92,9 @@
   max-height: none;
 }
 .ow-map .ow-panel:fullscreen .ow-atlas[data-flying] {
-  position: absolute;
+  position: fixed;
   inset: 0;
+  height: 100dvh;
   z-index: 1;
   display: flex;
   flex-direction: column;

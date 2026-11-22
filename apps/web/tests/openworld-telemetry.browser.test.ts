@@ -2733,6 +2733,11 @@ it.each([true, false])(
       await check.poll(locked).toBe(true);
       await check(stage).toHaveAttribute('aria-description', keyboardCapture ? /Ctrl/ : /Q/);
       expect(await page.evaluate(() => !!document.fullscreenElement)).toBe(keyboardCapture);
+      if (keyboardCapture) {
+        await check
+          .poll(() => stage.evaluate((el) => el.clientHeight / window.innerHeight))
+          .toBeGreaterThan(0.85);
+      }
       await check.poll(async () => Number.isFinite((await shader()).altitude)).toBe(true);
       const start = await shader();
       // Entering pointer lock can recenter the system cursor before pointerlockchange.
