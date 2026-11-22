@@ -175,6 +175,33 @@ function Players(props: TelemetryViewProps) {
           selected.name,
       }
     : null;
+  // An account page follows its only verified connection, including after a
+  // disconnect. Connection-only links remain bound to their original session.
+  const sessions = profile?.account ? (sessionsByAccount.get(profile.account) ?? []) : [];
+  const unique = sessions.length === 1 ? sessions[0] : undefined;
+  const soleConnection = unique && sessionFor(unique);
+  const replacement =
+    unique &&
+    soleConnection &&
+    profile &&
+    (!matching ||
+      (!pinned?.processRef && soleConnection.processRef) ||
+      (pinned?.joinedAt == null && soleConnection.joinedAt !== null))
+      ? playerPath(props.serverId, {
+          ...profile,
+          name: unique.name,
+          connection: soleConnection,
+        })
+      : null;
+  const sessionName = unique?.name;
+  const visit = location.state?.owVisit ?? detailPath;
+  useEffect(() => {
+    if (replacement && sessionName)
+      void navigate(replacement, {
+        replace: true,
+        state: { owViewer: viewer, owName: sessionName, owVisit: visit },
+      });
+  }, [replacement, sessionName, viewer, visit, navigate]);
   const targets = current
     ? live.flatMap((p) => {
         const session = sessionFor(p);
@@ -233,14 +260,6 @@ function Players(props: TelemetryViewProps) {
           <p role="alert">{t(allowed ? 'web.errors.notFound' : 'errors.forbidden')}</p>
         </div>
       );
-    if (profile.account && !profile.connection && !location.state?.owViewer && current) {
-      const sessions = sessionsByAccount.get(profile.account);
-      const member = sessions?.length === 1 ? sessions[0] : undefined;
-      const bound = member
-        ? { ...profile, name: member.name, connection: sessionFor(member) }
-        : profile;
-      return <Navigate replace to={playerPath(props.serverId, bound)} state={entryState(bound)} />;
-    }
     return (
       <div className="ow-workspace ow-people">
         <PlayerProfile
@@ -248,9 +267,7 @@ function Players(props: TelemetryViewProps) {
           server={props}
           selected={profile}
           connected={matching}
-          accountSessions={
-            (inspect && profile.account ? sessionsByAccount.get(profile.account) : undefined) ?? []
-          }
+          accountSessions={sessions}
           onChooseSession={(p) =>
             replaceProfile({ ...profile, name: p.name, connection: sessionFor(p) })
           }
@@ -258,7 +275,7 @@ function Players(props: TelemetryViewProps) {
             if (!profile.account && profile.connection) replaceProfile({ ...profile, account: id });
           }}
           version={observation?.gameVersion}
-          pendingRoster={roster.isPending || (needsIdentity && proof.isPending)}
+          pendingRoster={!!replacement || roster.isPending || (needsIdentity && proof.isPending)}
           rosterReason={
             roster.error ? 'unreachable' : !current ? (observation?.reason ?? 'unavailable') : null
           }

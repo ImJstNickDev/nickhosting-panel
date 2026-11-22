@@ -46,6 +46,7 @@ it('projects the native save and stats files, rejects mismatched identities and 
     position: { x: 0, y: 4, z: 5, face: 0 },
     stats: { joins: 4, walkedMeters: 30 },
     inventory: { selected: 0, hotbar: [{ code: 123, count: 2 }, null], bag: [] },
+    heldItem: { code: 123, count: 2 },
   });
   values.set('stats', bytes({ uuid: 'guest_Ada', joins: 4 }));
   expect(projectSavedPlayer(ref, values)?.stats).toBeNull();
@@ -53,6 +54,60 @@ it('projects the native save and stats files, rejects mismatched identities and 
   expect(projectSavedPlayer(ref, values)).toBeNull();
   values.set('stats', bytes({ uuid: 'Elsewhere', pseudo: 'Ada' }));
   expect(projectSavedPlayer(ref, values)).toBeNull();
+});
+it('reads saved character state including empty slots, gear and air in the same units as the live API', () => {
+  const save = { path: 'save', size: 512, time: null };
+  const ref = { save, stats: null, revision: '', stem: 'Ada' };
+  const project = (state: object) =>
+    projectSavedPlayer(ref, new Map([['save', bytes({ uuid: 'Ada', ...state })]]));
+  const inventory = {
+    selected: 1,
+    hotbar: [
+      [0, 0],
+      [123, 2],
+    ],
+    bag: [],
+    armor: [0, 55, 0, 0],
+    gear: [0, 88],
+  };
+  const vitals = { health: 67.25, food: 0, saturation: 22.5, air: 201 };
+  expect(project({ format: 3, vitals, inventory })).toMatchObject({
+    vitals: {
+      health: 67.25,
+      maxHealth: 100,
+      hunger: 0,
+      maxHunger: 100,
+      saturation: 22.5,
+      air: 10.05,
+      maxAir: 20,
+    },
+    heldItem: { code: 123, count: 2 },
+    armor: [null, { code: 55, count: 1, slot: 'chestplate' }, null, null],
+    gear: [null, { code: 88, count: 1, slot: 'equipment' }],
+  });
+  const partial = project({
+    format: 3,
+    vitals: { health: 0, food: 'redacted' },
+    inventory: { ...inventory, armor: [0, -3, 0, 0], selected: 0 },
+  });
+  expect(partial?.vitals).toEqual({ health: 0, maxHealth: 100 });
+  expect(partial?.armor).toBeUndefined();
+  expect(partial?.heldItem).toBeNull();
+  expect(partial?.gear?.[1]?.code).toBe(88);
+  expect(project({ inventory: { ...inventory, selected: 7 } })?.heldItem).toBeUndefined();
+  expect(project({ inventory: {} })?.vitals).toBeUndefined();
+  expect(project({ format: 4, vitals })?.vitals).toBeUndefined();
+  expect(
+    project({ format: 2, vitals: { health: 10, food: 15, saturation: 12, air: 151 } })?.vitals,
+  ).toEqual({
+    health: 50,
+    maxHealth: 100,
+    hunger: 75,
+    maxHunger: 100,
+    saturation: 50,
+    air: 10.05,
+    maxAir: 20,
+  });
 });
 it('resolves dot and custom data roots, refuses traversal and symlinks before listing their contents', async () => {
   let dataDir = './';

@@ -23,6 +23,7 @@ import {
   verifiedAccount,
 } from './player-identity.js';
 import { PlayerEquipment, PlayerInventory } from './player-inventory.js';
+import { PlayerVitals } from './player-vitals.js';
 import { usePlayerResource } from './player-workspace.js';
 import {
   key,
@@ -33,7 +34,7 @@ import {
   useTelemetry,
 } from './telemetry.js';
 
-type Pane = 'character' | 'inventory' | 'activity' | 'gallery' | 'network' | 'actions';
+type Pane = 'character' | 'inventory' | 'activity' | 'gallery' | 'network';
 type Detail = OpenworldTelemetryData['player'];
 const captureAccount = z.uuid();
 export function PlayerProfile({
@@ -82,25 +83,23 @@ export function PlayerProfile({
   useEffect(() => {
     heading.current?.focus();
   }, []);
-  const [requested, setTab] = useState<Pane>(inspect ? 'character' : 'actions');
+  const [requested, setTab] = useState<Pane>('character');
   const [preferredSource, setSource] = useState<'live' | 'saved'>('live');
-  const [busy, setBusy] = useState(false);
   const [receipt, setReceipt] = useState<ActionReceipt | null>(null);
   const session = selected.connection;
   const live = !!connected && !!session;
   const account = inspect ? selected.account || (connected && verifiedAccount(connected)) : null;
   const hasConnection = !!session || accountSessions.length > 0;
-  const needsChoice = !live && accountSessions.length > 0;
+  const needsChoice = !live && accountSessions.length > 1;
   const canShowShots = !!(screenshots && account && captureAccount.safeParse(account).success);
   const panes: Pane[] = [
-    ...(inspect ? (['character', 'inventory', 'activity'] as const) : []),
+    'character',
+    ...(inspect ? (['inventory', 'activity'] as const) : []),
     ...(canShowShots ? (['gallery'] as const) : []),
     ...(inspect && hasConnection ? (['network'] as const) : []),
-    ...((moderate || screenshots) && hasConnection ? (['actions'] as const) : []),
   ];
   const tab = panes.includes(requested) ? requested : panes[0];
-  const wantsLive =
-    tab !== 'gallery' && tab !== 'actions' && (preferredSource === 'live' || tab === 'network');
+  const wantsLive = tab !== 'gallery' && (preferredSource === 'live' || tab === 'network');
   const detail = useTelemetry(
     server,
     'player',
@@ -126,7 +125,8 @@ export function PlayerProfile({
   useEffect(() => {
     if (inspect && observedAccount && !selected.account) onIdentify(observedAccount);
   }, [inspect, observedAccount, selected.account, onIdentify]);
-  const resourcePane = tab === 'character' || tab === 'inventory' || tab === 'activity';
+  const resourcePane =
+    inspect && (tab === 'character' || tab === 'inventory' || tab === 'activity');
   const source = !live || preferredSource === 'saved' ? 'saved' : 'live';
   const saved = usePlayerResource<OpenworldSavedPlayerDetail>(
     server,
@@ -142,30 +142,29 @@ export function PlayerProfile({
   ) : (
     unavailable(confirmedGone ? 'playerGone' : rosterReason || 'unavailable')
   );
+  function commands() {
+    if ((!moderate && !screenshots) || !session || !live) return null;
+    if (session.joinedAt === null || !session.processRef) return unavailable('unconfirmedSession');
+    return (
+      <PlayerActions
+        key={JSON.stringify([session.processRef, session.id, session.name, session.joinedAt])}
+        server={server}
+        player={{ id: session.id, name: session.name, joinedAt: session.joinedAt }}
+        processRef={session.processRef}
+        otherPlayers={otherPlayers}
+        moderate={moderate}
+        screenshots={screenshots}
+        onAccepted={(r) => {
+          setReceipt(r);
+          onRequestAccepted(r);
+        }}
+      />
+    );
+  }
   function content() {
     if (tab === 'gallery' && account && canShowShots)
       return <PlayerGallery server={server} account={account} watchUntil={watchUntil} />;
-    if (tab === 'actions') {
-      if (!live || !session) return pendingRoster ? <Loading /> : onlineOnlyMessage;
-      if (session.joinedAt === null || !session.processRef)
-        return unavailable('unconfirmedSession');
-      return (
-        <PlayerActions
-          key={JSON.stringify([session.processRef, session.id, session.name, session.joinedAt])}
-          server={server}
-          player={{ id: session.id, name: session.name, joinedAt: session.joinedAt }}
-          processRef={session.processRef}
-          otherPlayers={otherPlayers}
-          moderate={moderate}
-          screenshots={screenshots}
-          onBusy={setBusy}
-          onAccepted={(r) => {
-            setReceipt(r);
-            onRequestAccepted(r);
-          }}
-        />
-      );
-    }
+    if (!inspect) return !live ? pendingRoster ? <Loading /> : onlineOnlyMessage : null;
     if (tab === 'network' && !live) return pendingRoster ? <Loading /> : onlineOnlyMessage;
     if (source === 'live' || tab === 'network') {
       if (detail.error instanceof ApiError && detail.error.status === 404)
@@ -202,15 +201,7 @@ export function PlayerProfile({
     if (!archive) return <Loading />;
     if (tab === 'inventory')
       return <PlayerInventory source="saved" player={archive} version={version} />;
-    if (tab === 'activity')
-      return (
-        <>
-          {archive.statsAt && (
-            <p className="muted">{t(key('statsAt'), { time: f.stamp(archive.statsAt) })}</p>
-          )}
-          <Activity stats={archive.stats} />
-        </>
-      );
+    if (tab === 'activity') return <Activity stats={archive.stats} />;
     return <Character server={server} archive={archive} mapAccess={mapAccess} version={version} />;
   }
   return (
@@ -243,10 +234,9 @@ export function PlayerProfile({
           )}
           {live && data?.accountVerified && <span>{t(key('verified'))}</span>}
         </div>
-        {(accountSessions.length > 1 || needsChoice) && (
+        {accountSessions.length > 1 && (
           <Select
             label={t(key('session'))}
-            disabled={busy}
             value={live ? String(connected.id) : ''}
             onChange={(e) => {
               const pick = accountSessions.find((p) => p.id === Number(e.target.value));
@@ -270,7 +260,7 @@ export function PlayerProfile({
           </Select>
         )}
         {panes.length > 1 && (
-          <fieldset className="ow-filters ow-profile-tabs" disabled={busy && live}>
+          <fieldset className="ow-filters ow-profile-tabs">
             <legend className="visually-hidden">{t(key('details'))}</legend>
             {panes.map((p) => (
               <button key={p} type="button" aria-pressed={tab === p} onClick={() => setTab(p)}>
@@ -326,13 +316,23 @@ export function PlayerProfile({
             {source === 'live' && data && <ObservationStamp value={detail.data} />}
             {source === 'saved' && archive && (
               <span className="ow-source-time">
-                {t(key('lastSave'))} · {f.stamp(archive.savedAt)}
+                {t(key('lastSave'))} ·{' '}
+                {f.stamp(
+                  tab === 'activity' ? (archive.statsAt ?? archive.savedAt) : archive.savedAt,
+                )}
               </span>
             )}
           </div>
         )}
         <div className={resourcePane || tab === 'network' ? 'ow-detail-content' : undefined}>
-          {content()}
+          {tab === 'character' && source === 'live' && (moderate || screenshots) ? (
+            <div className={inspect ? 'ow-character-workspace' : undefined}>
+              {inspect && <div className="ow-character-main">{content()}</div>}
+              {commands()}
+            </div>
+          ) : (
+            content()
+          )}
         </div>
       </section>
     </>
@@ -381,13 +381,6 @@ function Character({
         })
       : null;
   const account = live?.account ?? archive?.uuid;
-  const vitals = live?.vitals;
-  const vitalList = [
-    ['health', vitals?.health, vitals?.maxHealth],
-    ['hunger', vitals?.hunger, vitals?.maxHunger],
-    ['air', vitals?.air, vitals?.maxAir],
-    ['saturation', vitals?.saturation, null],
-  ] as const;
   return (
     <>
       <div className="ow-character">
@@ -416,31 +409,9 @@ function Character({
           )}
           {map && <Link to={map}>{t('games.openworld.map.showOnMap')}</Link>}
         </div>
-        {live && vitals && (
-          <dl className="ow-vitals" aria-label={t(people('vitalStats'))}>
-            {vitalList
-              .filter(([, value]) => numeric(value))
-              .map(([name, value, max]) => (
-                <div key={name}>
-                  <dt>{t(key(name))}</dt>
-                  <dd>
-                    {f.metric(value)}
-                    {numeric(max) && <> / {f.metric(max)}</>}
-                  </dd>
-                  {numeric(value) && numeric(max) && max > 0 && (
-                    <meter
-                      aria-label={t(key(name))}
-                      min={0}
-                      max={max}
-                      value={Math.max(0, Math.min(value, max))}
-                    />
-                  )}
-                </div>
-              ))}
-          </dl>
-        )}
+        <PlayerVitals vitals={person.vitals} version={version} />
       </div>
-      {live && <PlayerEquipment player={live} version={version} />}
+      <PlayerEquipment player={person} version={version} />
       {(pos || account || live?.geo) && (
         <details className="ow-disclosure ow-identity-details">
           <summary>{t(people('details'))}</summary>

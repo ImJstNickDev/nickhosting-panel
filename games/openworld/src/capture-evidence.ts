@@ -6,10 +6,18 @@ const sequence = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
 const uint = z.number().int().nonnegative().max(0xffffffff);
 const account = z.uuid();
 const session = z.object({ connection: uint, account });
-const request = session.extend({ request: uint, seq: sequence, at: sequence });
+const request = session.extend({
+  request: uint,
+  seq: sequence,
+  at: sequence,
+  utc: sequence.optional(),
+});
 const captureWrite = request.extend({
   writtenSeq: sequence,
   writtenAt: sequence,
+  // Legacy cursor entries already used UTC. A first-page write instead keeps
+  // its wall time and the UTC upper bound until a fresh line establishes the offset.
+  receivedBy: sequence.optional(),
   name: screenshotName,
   bytes: sequence,
 });
@@ -17,6 +25,18 @@ const cursor = z.object({
   seq: sequence,
   anchor: z.string().max(64),
   seeded: z.boolean(),
+  // UTC start of the last completed read of the native console tail.
+  caughtUpAt: sequence.optional(),
+  clock: z
+    .object({
+      offset: z
+        .number()
+        .int()
+        .min(-12 * 3_600_000)
+        .max(14 * 3_600_000),
+      at: sequence,
+    })
+    .optional(),
   sessions: z.array(session).max(1024),
   requests: z.array(request).max(512),
   awaitingFiles: z
@@ -57,13 +77,28 @@ function forget(state: CaptureCursor, connection: number) {
   state.requests = state.requests.filter((r) => r.connection !== connection);
 }
 
-function event(state: CaptureCursor, line: ConsoleLine, touched: Set<number>) {
+// Native log text uses the game host's local clock without its offset. A newly
+// appended line was emitted between two reads of the same console tail. In a
+// sufficiently short interval there is at most one contemporary UTC offset that
+// places it inside those bounds, including half-hour and quarter-hour zones.
+function observedUtc(local: number, from: number | undefined, to: number | undefined) {
+  if (from === undefined || to === undefined || to < from) return undefined;
+  const step = 15 * 60_000;
+  const skew = 30_000;
+  const low = Math.max(-48, Math.ceil((local - to - skew) / step));
+  const high = Math.min(56, Math.floor((local - from + skew) / step));
+  return low === high ? local - low * step : undefined;
+}
+
+function event(state: CaptureCursor, line: ConsoleLine, touched: Set<number>, receivedAt?: number) {
   if (line.text.length > 4096 || /[\r\n]/u.test(line.text) || line.text.includes('\0')) return;
   const fields = envelope.exec(line.text);
   if (!fields) return;
   const [, timestamp, channel, message, file] = fields;
   const at = Date.parse(`${timestamp?.replace(' ', 'T')}Z`);
   if (!Number.isSafeInteger(at) || !message) return;
+  const utc = observedUtc(at, state.caughtUpAt, receivedAt);
+  if (utc !== undefined) state.clock = { offset: at - utc, at: utc };
   if (file === 'PlayerAuth.cpp' && channel === 'server-auth') {
     const match = admitted.exec(message);
     if (match) {
@@ -96,8 +131,19 @@ function event(state: CaptureCursor, line: ConsoleLine, touched: Set<number>) {
     const pending = state.requests.find((r) => r.connection === connection && r.request === id);
     if (!pending) return;
     state.requests = state.requests.filter((r) => r !== pending);
-    if (at < pending.at || at - pending.at > 120_000) return;
-    return { ...pending, writtenSeq: line.seq, writtenAt: at, name, bytes: Number(match[4]) };
+    // Across a daylight-saving transition the two wall times can be an hour apart.
+    const duration =
+      utc !== undefined && pending.utc !== undefined ? utc - pending.utc : at - pending.at;
+    if (duration < 0 || duration > 120_000) return;
+    if (state.caughtUpAt !== undefined && receivedAt !== undefined && utc === undefined) return;
+    return {
+      ...pending,
+      writtenSeq: line.seq,
+      writtenAt: utc ?? at,
+      ...(utc === undefined && receivedAt !== undefined ? { receivedBy: receivedAt } : {}),
+      name,
+      bytes: Number(match[4]),
+    };
   } else if (channel === 'server-console' && file === 'ConsoleVerbs.cpp') {
     const match = requested.exec(message);
     if (!match) return;
@@ -106,14 +152,24 @@ function event(state: CaptureCursor, line: ConsoleLine, touched: Set<number>) {
     const owner = state.sessions.find((s) => s.connection === connection);
     state.requests = state.requests.filter((r) => r.connection !== connection || r.request !== id);
     if (owner && id <= 0xffffffff)
-      state.requests.push({ ...owner, request: id, seq: line.seq, at });
+      state.requests.push({
+        ...owner,
+        request: id,
+        seq: line.seq,
+        at,
+        utc,
+      });
     if (state.requests.length > 512) state.requests.shift();
   }
 }
 
 // Each continuation overlaps its last record. Reused sequence numbers after a restart,
 // missed pages, and truncated rings all invalidate session-local evidence.
-export function consumeCapturePage(state: CaptureCursor, page: z.output<typeof consolePage>) {
+export function consumeCapturePage(
+  state: CaptureCursor,
+  page: z.output<typeof consolePage>,
+  observed?: { before: number; after: number },
+) {
   const captures: CaptureWrite[] = [];
   const touched = new Set<number>();
   const first = page.lines[0];
@@ -121,7 +177,10 @@ export function consumeCapturePage(state: CaptureCursor, page: z.output<typeof c
   let gap = false;
   function reset() {
     Object.assign(state, captureCursor());
+    delete state.caughtUpAt;
+    delete state.clock;
     touched.clear();
+    captures.length = 0;
     gap = true;
   }
   if (state.anchor) {
@@ -130,25 +189,41 @@ export function consumeCapturePage(state: CaptureCursor, page: z.output<typeof c
   }
   for (const line of page.lines.slice(start)) {
     if (line.seq !== state.seq + 1) reset();
-    const write = event(state, line, touched);
+    const write = event(state, line, touched, observed?.after);
     if (write) captures.push(write);
     state.seq = line.seq;
   }
   const last = page.lines.at(-1);
   if (last) state.anchor = digest(last);
   if (state.sessions.length > 1024) reset();
-  return { captures, touched, gap, caughtUp: state.seq === page.last };
+  const caughtUp = state.seq === page.last;
+  if (caughtUp && observed) state.caughtUpAt = observed.before;
+  return { captures, touched, gap, caughtUp };
 }
 
-export function matchCaptureFiles(writes: CaptureWrite[], files: OpenworldScreenshot[]) {
+export function matchCaptureFiles(
+  writes: CaptureWrite[],
+  files: OpenworldScreenshot[],
+  clock?: CaptureCursor['clock'],
+) {
   const byName = new Map<string, OpenworldScreenshot | null>();
   for (const file of files) byName.set(file.name, byName.has(file.name) ? null : file);
   return writes.flatMap((write) => {
     const file = byName.get(write.name);
-    // On the tested dedicated runtime the native logger uses UTC. The file mtime
-    // immediately precedes the written event (6–7 ms in the real-client fixture).
-    if (!file || file.bytes !== write.bytes || Math.abs(file.mtimeMs - write.writtenAt) > 2_000)
-      return [];
+    let when = write.writtenAt;
+    if (write.receivedBy !== undefined) {
+      if (!clock) return [];
+      when -= clock.offset;
+      if (
+        when > write.receivedBy + 30_000 ||
+        when < write.receivedBy - 600_000 ||
+        Math.abs(when - clock.at) > 600_000
+      )
+        return [];
+    }
+    // Match the native write against the filesystem timestamp and size even
+    // when the write and the gallery listing are observed in different polls.
+    if (!file || file.bytes !== write.bytes || Math.abs(file.mtimeMs - when) > 2_000) return [];
     return [{ ...write, mtimeMs: file.mtimeMs }];
   });
 }

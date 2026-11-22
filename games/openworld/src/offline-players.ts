@@ -1,6 +1,7 @@
 import { DomainError } from '@nickhosting/core';
 import type { FilemanEntry, FilemanReadService } from '@nickhosting/game-sdk';
 import { z } from 'zod';
+import type { OpenworldTelemetryData } from './telemetry.js';
 
 const maxDocument = 128 * 1024;
 const maxCandidates = 20000;
@@ -23,10 +24,16 @@ const statsSchema = z.object({
   deaths: counter.optional(),
   playerKills: counter.optional(),
   creatureKills: counter.optional(),
+  damageDealt: counter.optional().catch(undefined),
+  damageTaken: counter.optional().catch(undefined),
   walkedMeters: counter.optional(),
+  flownMeters: counter.optional().catch(undefined),
+  highestAltitude: z.number().optional().catch(undefined),
+  chatMessages: counter.optional().catch(undefined),
 });
+const uint32 = z.number().int().min(0).max(0xffffffff);
 const slot = z
-  .tuple([z.number().int().min(0).max(0xffffffff), z.number().int().min(0).max(0xffffffff)])
+  .tuple([uint32, uint32])
   .transform(([code, count]) => (code && count ? { code, count } : null));
 const inventorySchema = z.object({
   selected: z.number().int().min(0).max(11).nullable().catch(null),
@@ -41,6 +48,46 @@ const positionSchema = z.object({
 });
 type Stats = z.output<typeof statsSchema>;
 type Inventory = z.output<typeof inventorySchema>;
+type NativePlayer = OpenworldTelemetryData['player'];
+const savedInventoryEquipment = z.object({
+  armor: z.array(uint32).length(4).optional().catch(undefined),
+  gear: z.array(uint32).length(2).optional().catch(undefined),
+});
+const savedVitals = z.object({
+  health: counter.optional().catch(undefined),
+  food: uint32.optional().catch(undefined),
+  saturation: counter.optional().catch(undefined),
+  air: uint32.optional().catch(undefined),
+});
+function characterVitals(value: unknown, format: unknown): NativePlayer['vitals'] {
+  const raw = savedVitals.safeParse(value).data;
+  if (!raw || !Object.values(raw).some((n) => n !== undefined)) return undefined;
+  // PlayerStore moved health, food and saturation to a new scale in save format 3.
+  // Saved air is in ticks. The live API expresses it in seconds at 20 ticks/s.
+  if (format !== undefined && (typeof format !== 'number' || ![1, 2, 3].includes(format)))
+    return undefined;
+  const legacy = format !== 3;
+  return {
+    ...(raw.health !== undefined && {
+      health: legacy ? Math.min(100, raw.health * 5) : raw.health,
+      maxHealth: 100,
+    }),
+    ...(raw.food !== undefined && {
+      hunger: legacy ? Math.min(100, raw.food * 5) : raw.food,
+      maxHunger: 100,
+    }),
+    ...(raw.saturation !== undefined && {
+      saturation: legacy ? Math.min(50, raw.saturation * 5) : raw.saturation,
+    }),
+    ...(raw.air !== undefined && {
+      air: (legacy ? Math.min(400, Math.floor((raw.air * 4) / 3)) : raw.air) / 20,
+      maxAir: 20,
+    }),
+  };
+}
+function equipment(codes: number[], slots: readonly string[]) {
+  return codes.map((code, i) => (code ? { code, count: 1, slot: slots[i] } : null));
+}
 export type OpenworldSavedPlayerSummary = {
   uuid: string;
   name: string | null;
@@ -63,6 +110,10 @@ export type OpenworldSavedPlayerDetail = OpenworldSavedPlayerSummary & {
   position: z.output<typeof positionSchema> | null;
   stats: Stats | null;
   inventory: Inventory | null;
+  heldItem?: NativePlayer['heldItem'];
+  armor?: NativePlayer['armor'];
+  gear?: NativePlayer['armor'];
+  vitals?: NativePlayer['vitals'];
 };
 
 type Ref = { path: string; size: number; time: string | null };
@@ -184,6 +235,10 @@ export function projectSavedPlayer(
   const position = positionSchema.safeParse(data?.position);
   const statsResult = statsSchema.safeParse(record);
   const inventory = inventorySchema.safeParse(data?.inventory);
+  const worn = savedInventoryEquipment.safeParse(data?.inventory).data;
+  const selected = inventory.data?.selected;
+  const heldItem = selected == null ? undefined : inventory.data?.hotbar[selected];
+  const vitals = characterVitals(data?.vitals, data?.format);
   return {
     uuid: identity.id,
     name: maybeLabel(data?.pseudo) ?? maybeLabel(record?.pseudo),
@@ -195,6 +250,12 @@ export function projectSavedPlayer(
     position: position.success ? position.data : null,
     stats: statsResult.success ? statsResult.data : null,
     inventory: inventory.success ? inventory.data : null,
+    ...(heldItem !== undefined && { heldItem }),
+    ...(worn?.armor && {
+      armor: equipment(worn.armor, ['helmet', 'chestplate', 'leggings', 'boots']),
+    }),
+    ...(worn?.gear && { gear: equipment(worn.gear, ['outfit', 'equipment']) }),
+    ...(vitals && { vitals }),
   };
 }
 export async function readSavedPlayerDocuments(

@@ -55,6 +55,64 @@ describe('native screenshot provenance', () => {
     ).toEqual([]);
     expect(matchCaptureFiles(captures, [file(1), file(1)])).toEqual([]);
   });
+  it.each([60, -210, 345, 765])(
+    'matches the disk revision across a native clock offset of %i minutes',
+    (offset) => {
+      const local = Date.parse(`${stamp.replace(' ', 'T')}Z`);
+      const when = local - offset * 60_000;
+      const state = captureCursor();
+      consumeCapturePage(state, page(1, admit()), { before: when - 7_000, after: when - 6_800 });
+      const { captures } = consumeCapturePage(
+        captureCursor(state),
+        page(1, admit(), request(7), written(7)),
+        { before: when + 1_000, after: when + 1_100 },
+      );
+      expect(matchCaptureFiles(captures, [{ ...file(7), mtimeMs: when - 7 }])).toHaveLength(1);
+      expect(matchCaptureFiles(captures, [{ ...file(7), mtimeMs: when - 3_600_000 }])).toEqual([]);
+    },
+  );
+  it('holds recent first-page captures until a subsequent observed native line proves the clock offset', () => {
+    const when = Date.parse('2026-11-21T22:20:21.307Z');
+    const state = captureCursor();
+    const { captures } = consumeCapturePage(state, page(200, admit(), request(1), written(1)), {
+      before: when + 700,
+      after: when + 880,
+    });
+    const original = { ...file(1), mtimeMs: when - 7 };
+    expect(matchCaptureFiles(captures, [original], state.clock)).toEqual([]);
+    expect(matchCaptureFiles(captures, [file(1)], state.clock)).toEqual([]);
+    const fresh = admit().replace(stamp, '2026-11-21 23:20:22.607');
+    consumeCapturePage(state, page(202, written(1), fresh), {
+      before: when + 1500,
+      after: when + 1600,
+    });
+    expect(matchCaptureFiles(captures, [original], state.clock)).toHaveLength(1);
+    expect(matchCaptureFiles(captures, [file(1)], state.clock)).toEqual([]);
+  });
+  it('rejects ambiguous offsets after a long pause and accepts a clock change during a request', () => {
+    const when = Date.parse('2026-10-25T00:59:58Z');
+    const state = captureCursor();
+    const connecting = admit().replace(stamp, '2026-10-25 02:59:50.000');
+    const beforeChange = request(1).replace(stamp, '2026-10-25 02:59:58.000');
+    const afterChange = written(1).replace(stamp, '2026-10-25 02:00:02.000');
+    consumeCapturePage(state, page(1, connecting), { before: when - 5_000, after: when - 5_000 });
+    consumeCapturePage(state, page(1, connecting, beforeChange), {
+      before: when + 100,
+      after: when + 120,
+    });
+    const ambiguous = captureCursor(state);
+    expect(
+      consumeCapturePage(ambiguous, page(2, beforeChange, afterChange), {
+        before: when + 86_400_000,
+        after: when + 86_400_100,
+      }).captures,
+    ).toEqual([]);
+    const { captures } = consumeCapturePage(state, page(2, beforeChange, afterChange), {
+      before: when + 4200,
+      after: when + 4220,
+    });
+    expect(matchCaptureFiles(captures, [{ ...file(1), mtimeMs: when + 3995 }])).toHaveLength(1);
+  });
   it('does not carry a request across a dropped page, a reused console sequence or a new admission', () => {
     for (const next of [
       page(9, written(7)),

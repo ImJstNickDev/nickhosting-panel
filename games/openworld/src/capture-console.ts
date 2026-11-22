@@ -25,6 +25,7 @@ export async function readCaptureEvidence(
   signal: AbortSignal,
   state: CaptureCursor,
   fetcher = fetch,
+  now = Date.now,
 ) {
   async function read(path: string) {
     const response = await fetcher(new URL(path, origin), {
@@ -46,6 +47,7 @@ export async function readCaptureEvidence(
   }
   async function page() {
     const after = Math.max(0, state.seq - 1);
+    const before = now();
     const result = consolePage.parse(await read(`/api/live/console?after=${after}&limit=500`));
     if (
       result.lines.some(
@@ -53,13 +55,14 @@ export async function readCaptureEvidence(
       )
     )
       throw new DomainError('integration_unavailable');
-    return consumeCapturePage(state, result);
+    return consumeCapturePage(state, result, { before, after: now() });
   }
   const writes: CaptureWrite[] = [];
   let caughtUp = false;
   // Bound recovery per pass so a busy server does not monopolize the worker.
   for (let i = 0; i < 4 && !caughtUp; ++i) {
     const result = await page();
+    if (result.gap) writes.length = 0;
     writes.push(...result.captures);
     caughtUp = result.caughtUp;
   }
@@ -68,6 +71,7 @@ export async function readCaptureEvidence(
     // the verified live roster between console reads. Never apply it retroactively.
     const current = roster.parse(await read('/api/live/players'));
     const fence = await page();
+    if (fence.gap) writes.length = 0;
     writes.push(...fence.captures);
     caughtUp = fence.caughtUp;
     if (fence.caughtUp && !fence.gap) {
@@ -94,7 +98,7 @@ export async function readCaptureEvidence(
   const gallery = pending.length
     ? await openworldScreenshots(origin, token, signal, fetcher)
     : { files: [] };
-  const captures = matchCaptureFiles(pending, gallery.files);
+  const captures = matchCaptureFiles(pending, gallery.files, state.clock);
   const matched = new Set(captures.map((c) => c.writtenSeq));
   state.awaitingFiles = pending
     .filter((w) => !matched.has(w.writtenSeq) && w.remaining > 1)

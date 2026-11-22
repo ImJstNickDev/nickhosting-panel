@@ -739,7 +739,7 @@ it('isolates screenshot metadata and image bytes from inspection and moderation 
 it('collects native captures independently, fences the verified roster, and protects account attribution', async () => {
   const account = randomUUID();
   const filename = 'world-screenshot-mono100-conn2-req1.png';
-  const stamp = '2026-11-21 23:20:24.710';
+  const stamp = '2026-11-22 00:20:24.710';
   const log = (channel: string, message: string, source: string) =>
     `${stamp} [INFO ] [${channel}] [t0] ${message}  (${source}.cpp:100)`;
   const logs = ['booted'];
@@ -763,7 +763,12 @@ it('collects native captures independently, fences the verified roster, and prot
     }
   });
   await power('running');
-  const scan = createOpenworldCaptureCollector({ db, target, fetcher });
+  const scan = createOpenworldCaptureCollector({
+    db,
+    target,
+    fetcher,
+    now: () => file.mtimeMs + 20,
+  });
   async function claim() {
     // The test schema may also contain servers created by earlier cases.
     const [a, b] = await Promise.all([
@@ -810,7 +815,9 @@ it('collects native captures independently, fences the verified roster, and prot
     .set({ next_scan_at: new Date(0) })
     .where('server_id', '=', id)
     .execute();
-  await createOpenworldCaptureCollector({ db, target, fetcher })(await claim());
+  await createOpenworldCaptureCollector({ db, target, fetcher, now: () => file.mtimeMs + 20 })(
+    await claim(),
+  );
   const row = await db
     .selectFrom('openworld_capture_owners')
     .selectAll()

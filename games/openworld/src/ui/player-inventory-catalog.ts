@@ -1,5 +1,8 @@
 const messages: Record<string, [string, string]> = {
   unnamed: ['Unidentified item', 'Oggetto non identificato'],
+  gear: ['Gear', 'Accessori'],
+  accessory: ['Equipment', 'Accessorio'],
+  bagUsage: ['{filled} / {total} slots', '{filled} / {total} slot'],
   slot: ['Slot {number}', 'Slot {number}'],
   stack: ['Quantity {count}', 'Quantità {count}'],
   missing: ['Not reported', 'Non trasmesso'],

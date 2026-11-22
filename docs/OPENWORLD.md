@@ -118,17 +118,26 @@ while the server is stopped. NickPanel joins live and saved records by verified 
 identity. Guests and unrelated players with the same display name remain separate.
 The directory indexes the last visit reported by the game. A save timestamp identifies
 the saved inventory. When a verified player disconnects, their open profile can show
-the most recent available save. The inventory uses the configured release's item
+the most recent available save. The character page follows a single verified connection
+when that account rejoins. Accounts with multiple simultaneous connections have a
+session selector. A prepared command belongs to its original connection. Player
+saves preserve vitals, the selected hotbar item and equipped armor and gear when
+those fields are available. The inventory uses the configured release's item
 catalog where available and retains the native code for unknown saved items.
 The catalog covers the 18 Linux releases with verified Gateway support. On a1.2.9
 it maps 927 codes. The atlas preserves 326 distinct texture tiles across releases. The
 base-color tiles come from the game's default texture pack, licensed CC0-1.0 in
 `assets/textures/packs/default/pack.txt`. Items without a matching pack texture use
-a category icon. Live names supplied by the game take precedence.
+a category icon. Live names supplied by the game take precedence. The inventory
+shows the 36-slot bag and 12-slot hotbar, with armor and gear when reported. The
+HUD uses the bundled Nunito and Pixelify Sans fonts under SIL OFL 1.1. In a1.2.9
+the hunger gauge includes the saturation reserve on its own 0–50 scale. The air
+gauge uses seconds.
 
 The separate **Moderate players** permission enables private messages, kick, game
 mode changes, kill, respawn and teleport to coordinates, a connected player or a
-checkpoint. Commands target a running session. NickPanel rechecks the connection
+checkpoint. These commands are accessible directly on the character page and target
+a running session. NickPanel rechecks the connection
 and records the request before sending it. If the game stops responding after dispatch,
 the panel reports the uncertain outcome. **Request and view game screenshots** is a
 separate grant. It covers requests to the game client and the whole instance's gallery.
@@ -136,7 +145,10 @@ A capture can arrive several seconds after the game accepts the request. The gal
 opens private thumbnails on demand. With player inspection, captures also appear in
 a player's profile when the worker can match their verified account, connection,
 request and written file in the same run. This includes captures requested through
-the game's console. Files without sufficient evidence remain in the server gallery.
+the game's console. The native logger uses local time. The worker uses observations
+of the same console stream to reconcile that clock with the file's UTC modification
+time before publishing an attribution. Files without sufficient evidence remain in
+the server gallery.
 
 **Map** opens the selected world's explored terrain. Select a planetary face to pan or
 zoom. The overview uses explored columns, and the detailed view loads just the

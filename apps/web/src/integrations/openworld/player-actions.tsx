@@ -6,7 +6,7 @@ import type {
 } from '../../../../../games/openworld/src/player-actions.js';
 import { ApiError, api } from '../../api/client.js';
 import { useT } from '../../app/i18n.js';
-import { ErrorNotice, Input, Loading, Select, Textarea } from '../../components/ui.js';
+import { Dialog, ErrorNotice, Input, Loading, Select, Textarea } from '../../components/ui.js';
 import { playersBase, usePlayerResource } from './player-workspace.js';
 import { key, type ServerView } from './telemetry.js';
 
@@ -19,46 +19,92 @@ type Props = {
   otherPlayers: OpenworldActionPlayer[];
   moderate: boolean;
   screenshots: boolean;
-  onBusy: (value: boolean) => void;
   onAccepted: (receipt: ActionReceipt) => void;
 };
 
-const moderationActions: Kind[] = ['message', 'gamemode', 'teleport', 'respawn', 'kick', 'kill'];
+const actions: Kind[] = [
+  'message',
+  'teleport',
+  'gamemode',
+  'respawn',
+  'screenshot',
+  'kick',
+  'kill',
+];
+const paths: Record<Kind, string> = {
+  message: 'M3 4h18v12H9l-5 4v-4H3z',
+  teleport: 'm3 10 18-7-7 18-2-9z',
+  gamemode: 'M3 7h9m4 0h5M3 17h3m4 0h11M12 4v6M7 14v6',
+  respawn: 'M3 10a9 9 0 1 1 1 8M3 4v6h6',
+  screenshot: 'M3 7h4l2-3h6l2 3h4v13H3z M16 13a4 4 0 1 1-8 0 4 4 0 0 1 8 0',
+  kick: 'M10 4H4v16h6M9 12h12m-5-5 5 5-5 5',
+  kill: 'M5 14a8 8 0 1 1 14 0l-2 2v4H7v-4z M9 11h1m4 0h1m-3 6v3',
+};
 
 export function PlayerActions(props: Props) {
   const t = useT();
-  const allowed: Kind[] = [
-    ...(props.moderate ? moderationActions : []),
-    ...(props.screenshots ? ['screenshot' as const] : []),
-  ];
-  const [choice, setChoice] = useState<Kind>(allowed[0] ?? 'message');
+  const allowed = actions.filter((k) => (k === 'screenshot' ? props.screenshots : props.moderate));
+  const [choice, setChoice] = useState<Kind | null>(null);
   const [busy, setBusy] = useState(false);
-  const kind = allowed.includes(choice) ? choice : allowed[0];
-  if (!kind) return null;
+  const kind = choice && allowed.includes(choice) ? choice : null;
+  if (!allowed.length) return null;
   return (
-    <div className="ow-actions">
-      <Select
-        label={t(key('action'))}
-        value={kind}
-        onChange={(e) => setChoice(e.target.value as Kind)}
-        disabled={busy}
-      >
+    <aside className="ow-player-commands" aria-label={t(key('actions'))}>
+      <h3>{t(key('actions'))}</h3>
+      <div className="ow-command-list">
         {allowed.map((k) => (
-          <option value={k} key={k}>
+          <button
+            key={k}
+            type="button"
+            className="secondary"
+            data-destructive={k === 'kick' || k === 'kill' || undefined}
+            aria-haspopup="dialog"
+            onClick={() => setChoice(k)}
+          >
+            <svg
+              viewBox="0 0 24 24"
+              aria-hidden="true"
+              width="17"
+              height="17"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.6"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            >
+              <path d={paths[k]} />
+            </svg>
             {t(key(`action.${k}`))}
-          </option>
+          </button>
         ))}
-      </Select>
-      <ActionEditor
-        {...props}
-        key={kind}
-        kind={kind}
-        onBusy={(value) => {
-          setBusy(value);
-          props.onBusy(value);
-        }}
-      />
-    </div>
+      </div>
+      {kind && (
+        <Dialog
+          open
+          closeIcon
+          title={t(key(`action.${kind}`))}
+          className="ow-player-command-dialog"
+          onClose={() => setChoice(null)}
+          closeDisabled={busy}
+          initialFocusSelector={
+            kind === 'kill' || kind === 'respawn' || kind === 'screenshot'
+              ? '.dialog-close-icon'
+              : 'textarea, input, select'
+          }
+        >
+          <ActionEditor
+            {...props}
+            key={kind}
+            kind={kind}
+            onBusy={setBusy}
+            onAccepted={(receipt) => {
+              setChoice(null);
+              props.onAccepted(receipt);
+            }}
+          />
+        </Dialog>
+      )}
+    </aside>
   );
 }
 
@@ -70,7 +116,7 @@ function ActionEditor({
   kind,
   onBusy,
   onAccepted,
-}: Props & { kind: Kind }) {
+}: Props & { kind: Kind; onBusy: (value: boolean) => void }) {
   const t = useT();
   const [targetType, setTargetType] = useState<'coordinates' | 'player' | 'checkpoint'>('player');
   const [target, setTarget] = useState<OpenworldActionPlayer | null>(null);
@@ -78,7 +124,10 @@ function ActionEditor({
     enabled: kind === 'teleport' && targetType !== 'player',
   });
   const [message, setMessage] = useState('');
-  const [prepared, setPrepared] = useState<OpenworldPlayerAction | null>(null);
+  const directConfirmation = kind === 'respawn' || kind === 'kill' || kind === 'screenshot';
+  const [prepared, setPrepared] = useState<OpenworldPlayerAction | null>(
+    directConfirmation ? { kind } : null,
+  );
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
   const sending = useRef(false);
@@ -311,11 +360,11 @@ function ActionEditor({
             )}
           </>
         )}
-        {kind === 'screenshot' && <p className="muted">{t(key('screenshotHelp'))}</p>}
       </fieldset>
       {prepared && (
         <div className="ow-action-review">
           <strong>{t(key(`confirm.${kind}`), { name: player.name })}</strong>
+          {prepared.kind === 'screenshot' && <p>{t(key('screenshotHelp'))}</p>}
           {prepared.kind === 'kick' && prepared.reason && <p>{prepared.reason}</p>}
           {prepared.kind === 'gamemode' && (
             <p>{t(key(prepared.mode === 'spectator' ? 'spectre' : prepared.mode))}</p>
@@ -343,7 +392,7 @@ function ActionEditor({
         </div>
       )}
       <div className="ow-action-footer">
-        {prepared && !busy && !uncertain && (
+        {prepared && !directConfirmation && !busy && !uncertain && (
           <button
             className="secondary"
             type="button"

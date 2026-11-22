@@ -92,9 +92,11 @@ function fileFixture() {
       bytes({
         uuid,
         pseudo: name,
+        format: 3,
         gameMode: 'survival',
         savedAtMs: Date.parse(stamp),
-        inventory: { selected: 0, hotbar: [[11, 2]], bag: [] },
+        vitals: { health: 58, food: 76, saturation: 28.25, air: 300 },
+        inventory: { selected: 0, hotbar: [[11, 2]], bag: [], armor: [80, 0, 0, 0], gear: [0, 0] },
       }),
     );
   return { docs, stats, list, files, put };
@@ -167,6 +169,12 @@ it('keeps same-name player searches in the authorized instance, requires inspect
   expect(await (await search()).json()).toMatchObject({ total: 0, players: [] });
   const detail = await (await app.request(`${url}/${uuid}`)).json();
   expect(detail.skinHash).toBe('12ab34cd');
+  expect(detail).toMatchObject({
+    vitals: { health: 58, hunger: 76, saturation: 28.25, air: 15 },
+    heldItem: { code: 11, count: 2 },
+    armor: [{ slot: 'helmet', code: 80 }, null, null, null],
+    gear: [null, null],
+  });
   expect(detail).not.toHaveProperty('head_png');
   expect((await app.request(`${url}/${other}`)).status).toBe(404);
   await fixture.db

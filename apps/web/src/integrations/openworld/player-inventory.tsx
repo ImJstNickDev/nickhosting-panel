@@ -11,6 +11,7 @@ import { useLocale, useT } from '../../app/i18n.js';
 import { Tooltip } from '../../components/tooltip.js';
 import { InventoryGlyph } from './inventory-glyph.js';
 import { key, useMetricsFormat } from './telemetry.js';
+import './player-hud-fonts.css';
 import './player-inventory.css';
 
 type Player = OpenworldTelemetryData['player'];
@@ -19,6 +20,9 @@ type Props = (
   | { source: 'saved'; player: OpenworldSavedPlayerDetail }
 ) & { version?: string | null };
 type Item = ReturnType<typeof inventoryItem>;
+type Equipment = Pick<Player, 'armor' | 'heldItem'> & { gear?: Player['armor'] };
+const armorSlots = ['helmet', 'chestplate', 'leggings', 'boots'];
+const gearSlots = ['outfit', 'accessory'];
 type T = ReturnType<typeof useT>;
 const inv = (id: string) => `games.openworld.inventory.${id}`;
 const grade =
@@ -123,9 +127,14 @@ export function PlayerInventory(props: Props) {
     count: number,
   ) {
     return (
-      <section className="ow-item-group" aria-label={t(key(name))}>
+      <section className={`ow-item-group ow-kit-${name}`} aria-label={t(key(name))}>
         <div className="ow-item-heading">
           <h3>{t(key(name))}</h3>
+          {name === 'bag' && slots.length === count && (
+            <small className="ow-kit-usage">
+              {t(inv('bagUsage'), { filled: slots.filter(Boolean).length, total: count })}
+            </small>
+          )}
           {name === 'hotbar' && reported != null && (
             <small>{t(key('inventoryAge'), { age: f.duration(reported) })}</small>
           )}
@@ -142,6 +151,7 @@ export function PlayerInventory(props: Props) {
                   key={index}
                   className="ow-item-slot ow-item-empty"
                   data-in-hand={inHand}
+                  data-missing={i >= slots.length}
                   aria-label={[
                     slot,
                     t(i >= slots.length ? inv('missing') : key('emptySlot')),
@@ -194,60 +204,82 @@ export function PlayerInventory(props: Props) {
       </section>
     );
   }
+  const hasEquipment = !!props.player.armor || !!('gear' in props.player && props.player.gear);
   return (
     <div className="ow-inventory">
-      {grid(hot, 'hotbar', 0, 12)}
-      {grid(bag, 'bag', 12, 36)}
-      {detail && <Details item={detail} t={t} />}
+      <div className="ow-kit-board" data-equipped={hasEquipment}>
+        {hasEquipment && (
+          <PlayerEquipment player={props.player} version={props.version} inventory />
+        )}
+        {grid(bag, 'bag', 12, 36)}
+        {grid(hot, 'hotbar', 0, 12)}
+        {detail && <Details item={detail} t={t} />}
+      </div>
     </div>
   );
 }
-export function PlayerEquipment({ player, version }: { player: Player; version?: string | null }) {
-  const t = useT(),
-    f = useMetricsFormat();
-  const armor = player.armor;
-  if (!armor && player.heldItem == null) return null;
-  const slots = [
-    ...(player.heldItem !== undefined ? [{ id: 'held', slot: 'held', item: player.heldItem }] : []),
-    ...(armor ?? []).map((a, i) => ({
-      id: `armor-${String(i)}`,
-      slot: a?.slot || ['helmet', 'chestplate', 'leggings', 'boots'][i] || 'equipment',
-      item: a,
-    })),
-  ];
+
+export function PlayerEquipment({
+  player,
+  version,
+  inventory = false,
+}: {
+  player: Equipment;
+  version?: string | null;
+  inventory?: boolean;
+}) {
+  const t = useT();
+  const f = useMetricsFormat();
+  const groups = [
+    { id: 'armor', label: t(key('equipment')), slots: armorSlots, items: player.armor },
+    { id: 'gear', label: t(inv('gear')), slots: gearSlots, items: player.gear },
+    ...(!inventory && player.heldItem !== undefined
+      ? [{ id: 'held', label: t(key('held')), slots: ['held'], items: [player.heldItem] }]
+      : []),
+  ].filter((group) => group.items != null);
+  if (!groups.length) return null;
   return (
-    <section className="ow-equipment">
-      <h3>{t(key('equipment'))}</h3>
-      <ul>
-        {slots.map(({ item: raw, slot, id }) => {
-          const item = raw ? inventoryItem(raw, version) : null;
-          const slotName = t(
-            knownInventoryKind(slot) ? inv(slot) : key(slot === 'held' ? 'held' : 'equipment'),
-          );
-          const { name, material } = item
-            ? presentation(item, t)
-            : { name: t(key('emptySlot')), material: undefined };
-          return (
-            <li key={id} data-empty={!item}>
-              <div className="ow-equipment-art" aria-hidden="true">
-                <InventoryGlyph
-                  kind={item?.kind ?? slot}
-                  tile={item?.tile ?? null}
-                  material={material}
-                />
-              </div>
-              <div>
-                <small>{slotName}</small>
-                <strong>{name}</strong>
-                {item?.wear != null && (
-                  <small>{t(key('wear'), { value: f.metric(item.wear, '%') })}</small>
-                )}
-                {item?.code != null && <small className="ow-equipment-id">#{item.code}</small>}
-              </div>
-            </li>
-          );
-        })}
-      </ul>
-    </section>
+    <div className="ow-equipment">
+      {groups.map(({ id, label, slots, items }) => (
+        <section key={id} className="ow-kit-loadout" aria-label={label}>
+          <h3>{label}</h3>
+          <ul>
+            {slots.map((slot, i) => {
+              const keyInSave = slot === 'accessory' ? 'equipment' : slot;
+              const indexItem = items?.[i];
+              const raw =
+                items?.find((entry) => entry && 'slot' in entry && entry.slot === keyInSave) ??
+                (indexItem && 'slot' in indexItem && indexItem.slot && indexItem.slot !== keyInSave
+                  ? undefined
+                  : indexItem);
+              const item = raw ? inventoryItem(raw, version) : null;
+              const view = item ? presentation(item, t) : null;
+              const glyph = slot === 'accessory' ? 'parachute' : slot;
+              return (
+                <li key={slot} data-empty={!item}>
+                  <span className="ow-equipment-art" aria-hidden="true">
+                    <InventoryGlyph
+                      kind={item?.kind ?? glyph}
+                      tile={item?.tile ?? null}
+                      material={view?.material}
+                    />
+                  </span>
+                  <div>
+                    {id !== 'held' && <small>{t(inv(slot))}</small>}
+                    <strong>
+                      {view?.name ?? t(raw === undefined ? inv('missing') : key('emptySlot'))}
+                    </strong>
+                    {item?.wear != null && (
+                      <small>{t(key('wear'), { value: f.metric(item.wear, '%') })}</small>
+                    )}
+                    {item?.code != null && <small className="ow-equipment-id">#{item.code}</small>}
+                  </div>
+                </li>
+              );
+            })}
+          </ul>
+        </section>
+      ))}
+    </div>
   );
 }

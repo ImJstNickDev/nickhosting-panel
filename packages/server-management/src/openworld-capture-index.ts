@@ -58,7 +58,14 @@ export function createOpenworldCaptureCollector(
           ? saved.evidence
           : undefined,
       );
-      const result = await readCaptureEvidence(origin, token, signal, state, options.fetcher);
+      const result = await readCaptureEvidence(
+        origin,
+        token,
+        signal,
+        state,
+        options.fetcher,
+        options.now,
+      );
       return { state, ...result };
     });
     return db.transaction().execute(async (tx) => {

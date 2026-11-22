@@ -240,7 +240,16 @@ const player = playerIdentity
     role: z.object({ name: label.nullish() }).nullish(),
     vitals: z
       .object(
-        measurements('health', 'maxHealth', 'hunger', 'maxHunger', 'saturation', 'air', 'maxAir'),
+        measurements(
+          'health',
+          'maxHealth',
+          'hunger',
+          'maxHunger',
+          'saturation',
+          'maxSaturation',
+          'air',
+          'maxAir',
+        ),
       )
       .nullish(),
     armor: z
