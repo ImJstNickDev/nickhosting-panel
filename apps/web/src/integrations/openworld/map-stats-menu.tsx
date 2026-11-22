@@ -127,7 +127,7 @@ export function MapStatsMenu({
       ref={menu}
       className="ow-map-context-menu"
       role="menu"
-      aria-label={t(mapKey('atlas.nerdStats'))}
+      aria-label={t(mapKey('title'))}
       onBlur={() => setPoint(null)}
     >
       <button
@@ -139,7 +139,7 @@ export function MapStatsMenu({
             e.preventDefault();
             e.stopPropagation();
             dismiss();
-          }
+          } else if (['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(e.key)) e.preventDefault();
         }}
         onClick={() => {
           onToggle();
