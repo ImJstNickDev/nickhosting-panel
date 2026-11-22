@@ -42,7 +42,11 @@ import {
   recoverProvisionGateway,
 } from './gateway-provision.js';
 import { currentInteractiveContext } from './interactive-context.js';
-import { assertManagedIdentity, readManagedIdentity } from './managed-identity.js';
+import {
+  assertManagedIdentity,
+  managedIdentityClaims,
+  readManagedIdentity,
+} from './managed-identity.js';
 import {
   minecraftContentAllowsOnline,
   minecraftContentChangesOnlyMetadata,
@@ -3808,13 +3812,45 @@ export function createLifecycleProcessor(db: Kysely<Database>, options: Lifecycl
   };
 }
 
+const reconciliationRevision = sql<string>`jsonb_build_array(
+    server.xmin::text,
+    (select node.xmin::text from managed_nodes node where node.id = server.node_id),
+    (select host.xmin::text from physical_hosts host join managed_nodes node on node.physical_host_id = host.id where node.id = server.node_id),
+    (select jsonb_agg(jsonb_build_array(allocation.id, allocation.xmin::text) order by allocation.id) from server_allocations allocation where allocation.server_id = server.id),
+    (select jsonb_build_array(operation.xmin::text, job.xmin::text)
+      from server_operations operation join operation_jobs job on job.id = operation.job_id
+      where operation.job_id = server.active_operation_id and operation.server_id = server.id),
+    (select reservation.xmin::text from resource_reservations reservation where reservation.server_id = server.id),
+    (select reservation.xmin::text from installation_reservations reservation where reservation.server_id = server.id),
+    (select jsonb_build_array(operation.job_id, operation.xmin::text, job.xmin::text)
+      from installation_reservations reservation
+      join server_operations operation on operation.job_id = reservation.operation_id and operation.server_id = reservation.server_id
+      join operation_jobs job on job.id = operation.job_id
+      where reservation.server_id = server.id),
+    (select jsonb_build_array(operation.job_id, operation.xmin::text, job.xmin::text)
+      from server_operations operation join operation_jobs job on job.id = operation.job_id
+      where operation.server_id = server.id and operation.action in ('start','restart','stop','provision','reinstall','wipe','delete','restore','backup')
+      order by operation.updated_at desc, operation.job_id desc limit 1)
+  )::text`;
+const reconciliationProvider = sql<string>`jsonb_build_array(
+    (select jsonb_build_array(settings.value->'pterodactylBaseUrl', settings.value->'dockerObserverSocket') from platform_settings settings where settings.key = 'platform'),
+    (select secret.xmin::text from encrypted_secrets secret where secret.name = 'pterodactylApplicationKey'),
+    (select account.xmin::text from provider_accounts account where account.user_id = server.owner_id)
+  )::text`;
+
 /** One MVCC snapshot, including PostgreSQL row revisions rather than rounded JS
  * timestamps. A lifecycle may begin and finish during provider I/O (ABA); its
  * server revision still changes even when active_operation_id is null again.
  * No history is loaded: only the latest power receipt participates. */
-function reconciliationSnapshots(db: Kysely<Database>) {
+function reconciliationVersions(db: Kysely<Database>) {
   return db
     .selectFrom('managed_servers as server')
+    .select([reconciliationRevision.as('revision'), reconciliationProvider.as('provider_revision')])
+    .where('server.deleted_at', 'is', null);
+}
+
+function reconciliationSnapshots(db: Kysely<Database>) {
+  return reconciliationVersions(db)
     .selectAll('server')
     .select(
       sql<boolean>`server.connection_mode = 'gateway'
@@ -3835,33 +3871,7 @@ function reconciliationSnapshots(db: Kysely<Database>) {
       and not exists (select 1 from audit_events audit where audit.action = 'gateway.policy.updated'
         and audit.metadata->>'serverId' = server.id::text)
     `.as('gateway_automation_candidate'),
-    )
-    .select(
-      sql<string>`jsonb_build_array(
-    server.xmin::text,
-    (select node.xmin::text from managed_nodes node where node.id = server.node_id),
-    (select host.xmin::text from physical_hosts host join managed_nodes node on node.physical_host_id = host.id where node.id = server.node_id),
-    (select jsonb_agg(jsonb_build_array(allocation.id, allocation.xmin::text) order by allocation.id) from server_allocations allocation where allocation.server_id = server.id),
-    (select jsonb_build_array(operation.xmin::text, job.xmin::text)
-      from server_operations operation join operation_jobs job on job.id = operation.job_id
-      where operation.job_id = server.active_operation_id and operation.server_id = server.id),
-    (select reservation.xmin::text from resource_reservations reservation where reservation.server_id = server.id),
-    (select reservation.xmin::text from installation_reservations reservation where reservation.server_id = server.id),
-    (select jsonb_build_array(operation.job_id, operation.xmin::text, job.xmin::text)
-      from installation_reservations reservation
-      join server_operations operation on operation.job_id = reservation.operation_id and operation.server_id = reservation.server_id
-      join operation_jobs job on job.id = operation.job_id
-      where reservation.server_id = server.id),
-    (select jsonb_build_array(operation.job_id, operation.xmin::text, job.xmin::text)
-      from server_operations operation join operation_jobs job on job.id = operation.job_id
-      where operation.server_id = server.id and operation.action in ('start','restart','stop','provision','reinstall','wipe','delete','restore','backup')
-      order by operation.updated_at desc, operation.job_id desc limit 1),
-    (select jsonb_build_array(settings.value->'pterodactylBaseUrl', settings.value->'dockerObserverSocket') from platform_settings settings where settings.key = 'platform'),
-    (select secret.xmin::text from encrypted_secrets secret where secret.name = 'pterodactylApplicationKey'),
-    (select account.xmin::text from provider_accounts account where account.user_id = server.owner_id)
-  )::text`.as('revision'),
-    )
-    .where('server.deleted_at', 'is', null);
+    );
 }
 
 function reconciliationSnapshot(db: Kysely<Database>, serverId: string) {
@@ -3877,7 +3887,10 @@ async function readReconciliationBatch(
   options: LifecycleOptions,
 ) {
   // Capture local revisions before provider I/O, including when renewing a slow batch.
-  const snapshots = await reconciliationSnapshots(db).where('server.id', 'in', ids).execute();
+  const snapshots = await reconciliationVersions(db)
+    .select(['server.id', 'server.pterodactyl_id', 'server.pterodactyl_uuid'])
+    .where('server.id', 'in', ids)
+    .execute();
   const uuids = snapshots.flatMap((row) => (row.pterodactyl_uuid ? [row.pterodactyl_uuid] : []));
   // The adapter validates exact UUID membership and rejects duplicate UUIDs or numeric IDs.
   let remotes: ApplicationServer[];
@@ -3889,8 +3902,24 @@ async function readReconciliationBatch(
     if (error instanceof PterodactylError && error.reason === 'invalid_response') return null;
     throw error;
   }
+  const receivedAt = performance.now();
+  // Reject changes during the collective provider read. A later change, while this
+  // identity is queued behind another server, can instead start a fresh observation.
+  const after = await reconciliationVersions(db)
+    .select('server.id')
+    .where('server.id', 'in', ids)
+    .execute();
+  const completed = new Map(after.map((row) => [row.id, row]));
   return {
-    local: new Map(snapshots.map((row) => [row.id, row])),
+    receivedAt,
+    local: new Map(
+      snapshots
+        .filter((row) => {
+          const end = completed.get(row.id);
+          return end?.revision === row.revision && end.provider_revision === row.provider_revision;
+        })
+        .map((row) => [row.id, row]),
+    ),
     remote: new Map(remotes.map((row) => [row.uuid, row])),
   };
 }
@@ -3900,14 +3929,31 @@ async function reconcileBatchMember(
   options: LifecycleOptions,
   batch: NonNullable<Awaited<ReturnType<typeof readReconciliationBatch>>>,
   id: string,
-  received: number,
 ) {
   const server = batch.local.get(id);
   if (!server?.pterodactyl_id) return 'deferred';
   const remote = server.pterodactyl_uuid && batch.remote.get(server.pterodactyl_uuid);
   if (!remote) throw new DomainError('provenance_mismatch');
-  await verifyManagedIdentity(db, server, remote);
-  return reconcileVerifiedServer(db, server, remote, options, received);
+  const current = await reconciliationSnapshots(db)
+    .innerJoin('managed_nodes as identity_node', 'identity_node.id', 'server.node_id')
+    .select(['identity_node.pterodactyl_node_id', managedIdentityClaims(id).as('claims')])
+    .where('server.id', '=', id)
+    .executeTakeFirst();
+  if (!current?.pterodactyl_id || current.provider_revision !== server.provider_revision)
+    return 'deferred';
+  if (
+    current.revision !== server.revision ||
+    performance.now() - batch.receivedAt >= reconciliationBatchLifetimeMs
+  ) {
+    // The gateway may update the row several times while earlier members are
+    // sampled. Discard the queued proof and start once under the current revision.
+    return reconcileVerifiedServer(db, current, await ownedRemote(db, current, options), options);
+  }
+  assertManagedIdentity(current, remote, {
+    pterodactyl_node_id: current.pterodactyl_node_id,
+    allocations: current.claims ?? [],
+  });
+  return reconcileVerifiedServer(db, current, remote, options, batch.receivedAt);
 }
 
 function applicationRateLimit(error: unknown) {
@@ -3925,6 +3971,7 @@ export async function reconcileManagedServers(db: Kysely<Database>, options: Lif
     .select('id')
     .where('deleted_at', 'is', null)
     .where('pterodactyl_id', 'is not', null)
+    .orderBy('last_observed_at', (order) => order.asc().nullsFirst())
     .orderBy('id')
     .execute();
   const unavailable: string[] = [];
@@ -3944,20 +3991,19 @@ export async function reconcileManagedServers(db: Kysely<Database>, options: Lif
     }
     // A slow resource/backup read must not leave later servers using queued
     // identities beyond one worker polling interval. Re-batch the remainder.
-    const received = performance.now();
     for (const id of ids) {
       try {
         const outcome = batch
-          ? await reconcileBatchMember(db, options, batch, id, received)
+          ? await reconcileBatchMember(db, options, batch, id)
           : await reconcileManagedServer(db, id, options);
         if (outcome === 'observed') observed++;
         else deferred.push(id);
       } catch (error) {
-        if (!batch && applicationRateLimit(error)) break fleet;
+        if (applicationRateLimit(error)) break fleet;
         unavailable.push(id);
       }
       offset++;
-      if (batch && performance.now() - received >= reconciliationBatchLifetimeMs) break;
+      if (batch && performance.now() - batch.receivedAt >= reconciliationBatchLifetimeMs) break;
     }
   }
   for (const server of servers.slice(offset)) unavailable.push(server.id);
@@ -4285,7 +4331,12 @@ async function reconcileVerifiedServer(
       ) as acquired`.execute(tx);
     if (!acquired.rows[0]?.acquired) return 'deferred' as const;
     const fresh = await reconciliationSnapshot(tx, server.id);
-    if (!fresh || fresh.revision !== server.revision) return 'deferred' as const;
+    if (
+      !fresh ||
+      fresh.revision !== server.revision ||
+      fresh.provider_revision !== server.provider_revision
+    )
+      return 'deferred' as const;
     await tx
       .updateTable('managed_servers')
       .set({ installation_state: failedInstallationJob ? 'failed' : state })
