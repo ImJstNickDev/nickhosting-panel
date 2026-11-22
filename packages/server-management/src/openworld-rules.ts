@@ -27,7 +27,7 @@ type RulesOptions = OpenworldNativeOptions & {
 
 export function createOpenworldRules(options: RulesOptions) {
   const { db, fetcher = fetch, now = Date.now, readFiles } = options;
-  const connect = createOpenworldNativeConnection(options);
+  const connect = options.native ?? createOpenworldNativeConnection(options);
   const reads = sharedReads<Awaited<ReturnType<typeof readOpenworldRules>>>(64, now, 1000);
   return {
     async list(who: AuthContext, serverId: string) {

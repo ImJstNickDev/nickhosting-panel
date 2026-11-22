@@ -10,7 +10,7 @@ import {
 } from './openworld-telemetry.js';
 
 export function createOpenworldPlayerChannel(options: OpenworldNativeOptions) {
-  const native = createOpenworldNativeConnection(options);
+  const native = options.native ?? createOpenworldNativeConnection(options);
   async function access(
     who: AuthContext,
     serverId: string,

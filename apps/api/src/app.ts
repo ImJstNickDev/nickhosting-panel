@@ -44,19 +44,13 @@ import { registerMinecraftSourceRoutes } from './minecraft-sources.js';
 import { registerMinecraftWorldCatalogRoutes } from './minecraft-world-catalog.js';
 import { registerOpenworldRoutes } from './openworld.js';
 import { registerOpenworldArtifactRoute } from './openworld-artifacts.js';
-import { registerOpenworldDashboardRoutes } from './openworld-dashboard.js';
 import { registerOpenworldDashboardSso } from './openworld-dashboard-sso.js';
-import { registerOpenworldInspectorRoutes } from './openworld-inspector.js';
-import { registerOpenworldPlayerActionRoutes } from './openworld-player-actions.js';
+import { registerOpenworldNativeRoutes } from './openworld-native.js';
 import { registerOpenworldPlayerDirectoryRoutes } from './openworld-player-directory.js';
-import { registerOpenworldRulesRoutes } from './openworld-rules.js';
-import { registerOpenworldThumbnailRoute } from './openworld-screenshot-thumbnails.js';
-import { registerOpenworldScreenshotRoutes } from './openworld-screenshots.js';
-import { registerOpenworldTelemetryRoutes } from './openworld-telemetry.js';
-import { registerOpenworldWorldMapRoutes } from './openworld-world-map.js';
 import { registerPlatformRoutes } from './platform.js';
 import { registerProfilePhotoRoutes } from './profile-photo.js';
 import { PROVIDER_EVENTS_PATH, receiveProviderEvent } from './provider-events.js';
+import { registerProviderReadAttribution } from './provider-read-attribution.js';
 import { registerSatisfactoryRoutes } from './satisfactory.js';
 import { registerSatisfactoryApiRoutes } from './satisfactory-api.js';
 import { registerSatisfactoryModRoutes } from './satisfactory-mods.js';
@@ -111,6 +105,7 @@ function validate<T>(schema: z.ZodType<T>, input: unknown): T {
 
 export function createApp(options: Options) {
   const app = new Hono<{ Variables: Variables }>();
+  registerProviderReadAttribution(app);
   const { db, pool } = options.database;
   const env = options.env ?? {};
   const origins = (c: Context<{ Variables: Variables }>) => {
@@ -720,15 +715,8 @@ export function createApp(options: Options) {
     http: options.minecraftContentHttp,
   });
   registerOpenworldDashboardSso(app, db, principal);
-  registerOpenworldDashboardRoutes(app, { db, principal, management: options.management });
-  registerOpenworldTelemetryRoutes(app, { db, principal, management: options.management });
-  registerOpenworldPlayerActionRoutes(app, { db, principal, management: options.management });
+  registerOpenworldNativeRoutes(app, { db, principal, management: options.management });
   registerOpenworldPlayerDirectoryRoutes(app, { db, principal, management: options.management });
-  registerOpenworldThumbnailRoute(app, { db, principal, management: options.management });
-  registerOpenworldScreenshotRoutes(app, { db, principal, management: options.management });
-  registerOpenworldInspectorRoutes(app, { db, principal, management: options.management });
-  registerOpenworldRulesRoutes(app, { db, principal, management: options.management });
-  registerOpenworldWorldMapRoutes(app, { db, principal, management: options.management });
   registerOpenworldRoutes(app, { db, env, codec: options.codec, principal });
   registerSatisfactoryRoutes(app, { db, principal });
   registerSatisfactoryOverviewRoutes(app, { db, codec: options.codec, principal });

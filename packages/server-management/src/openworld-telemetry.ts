@@ -35,6 +35,7 @@ export type OpenworldScope = {
   serverId: string;
   binding: string;
   version: string;
+  processKey: string;
   liveKey: string;
   origin: string;
   canManageCheckpoints?: boolean;
@@ -53,6 +54,24 @@ const freshness: Record<Resource, number> = {
   storage: 15000,
 };
 
+class OpenworldReadCooldown extends PterodactylError {
+  readonly expiresAt: number;
+
+  constructor(
+    error: PterodactylError,
+    readonly clock: () => number,
+  ) {
+    super(error.reason, error.scope, error.outcome, error.upstreamStatus, error.retryAfterMs);
+    this.expiresAt = clock() + openworldRetryAfterMs(error);
+  }
+}
+
+export function openworldRetryAfterMs(error: PterodactylError) {
+  if (error instanceof OpenworldReadCooldown) return Math.max(0, error.expiresAt - error.clock());
+  const delay = error.retryAfterMs;
+  return delay !== undefined && Number.isFinite(delay) && delay >= 0 ? delay : 60_000;
+}
+
 // A pending read belongs to the server, not to the initiating browser. Limit active
 // as well as completed entries so a burst cannot create unbounded upstream work.
 export function sharedReads<T>(max: number, clock: () => number, failureTtl: number) {
@@ -68,19 +87,29 @@ export function sharedReads<T>(max: number, clock: () => number, failureTtl: num
         entries.delete(evictable[0]);
       }
       const entry = { promise: Promise.resolve().then(load), expires: Infinity };
-      entries.set(key, entry);
-      entry.promise.then(
-        () => {
+      entry.promise = entry.promise.then(
+        (value) => {
           entry.expires = clock() + ttl;
+          return value;
         },
         (error: unknown) => {
-          const wait =
-            error instanceof PterodactylError && error.reason === 'rate_limited'
-              ? Math.max(failureTtl, error.retryAfterMs ?? 60_000)
-              : failureTtl;
-          entry.expires = clock() + wait;
+          if (error instanceof PterodactylError && error.reason === 'rate_limited') {
+            // Nested reads inherit the first deadline, including when they join late.
+            const cooldown =
+              error instanceof OpenworldReadCooldown
+                ? error
+                : new OpenworldReadCooldown(error, clock);
+            entry.expires =
+              cooldown.clock === clock
+                ? cooldown.expiresAt
+                : clock() + openworldRetryAfterMs(cooldown);
+            throw cooldown;
+          }
+          entry.expires = clock() + failureTtl;
+          throw error;
         },
       );
+      entries.set(key, entry);
       return entry.promise;
     },
     completed(key: string) {
@@ -156,6 +185,7 @@ export async function readOpenworldScope(
       'p.sha256',
       'p.version',
       'p.dashboard_credential_prepared',
+      sql<string>`p.xmin::text`.as('profile_revision'),
       'm.nest_id',
       'm.egg_id',
       'a.backend_address',
@@ -166,11 +196,23 @@ export async function readOpenworldScope(
       'g.process_started_at',
       'r.operation_id',
       'v.identity_invalidated',
+      'v.instance_id as projection_instance',
       'v.revision',
       'v.valid',
       'n.pterodactyl_node_id',
       'account.instance_id as provider_instance',
       'account.provider_url',
+      sql<string | null>`account.xmin::text`.as('account_revision'),
+      sql<
+        string | null
+      >`(select value->>'pterodactylBaseUrl' from platform_settings where key = 'platform')`.as(
+        'configured_provider',
+      ),
+      sql<
+        string | null
+      >`(select xmin::text from encrypted_secrets where name = 'pterodactylApplicationKey')`.as(
+        'application_key_revision',
+      ),
       managedIdentityClaims(serverId).as('claims'),
     ])
     .where('server.id', '=', serverId)
@@ -259,12 +301,21 @@ export async function readOpenworldScope(
     )
     .digest('hex');
   // Snapshots survive power cycles. Credentials and live values belong to one running process.
-  const liveKey = JSON.stringify([
+  const processKey = JSON.stringify([
     binding,
     scope.process_started_at ?? scope.operation_id ?? scope.updated_at,
     scope.operation_id,
     scope.revision,
     scope.valid,
+  ]);
+  // Capture cursors persist the process reference. Credential rotation only expires live reads.
+  const liveKey = JSON.stringify([
+    processKey,
+    scope.profile_revision,
+    scope.configured_provider,
+    scope.application_key_revision,
+    scope.account_revision,
+    scope.projection_instance,
   ]);
   const ready =
     scope.installation_state === 'installed' &&
@@ -274,6 +325,7 @@ export async function readOpenworldScope(
     serverId,
     version: scope.version,
     binding,
+    processKey,
     liveKey,
     canInspectPlayers,
     ...(portrait?.skin_binding === binding && portrait.png ? { savedSkin: portrait.png } : {}),
@@ -305,7 +357,8 @@ export async function readOpenworldScope(
 }
 
 export function assertCurrentOpenworldScope(before: OpenworldScope, after: OpenworldScope) {
-  if (before.binding !== after.binding) throw new DomainError('provenance_mismatch');
+  if (before.binding !== after.binding || (!after.reason && before.origin !== after.origin))
+    throw new DomainError('provenance_mismatch');
   if (after.reason || before.liveKey !== after.liveKey) throw new DomainError('game_not_ready');
 }
 
@@ -446,10 +499,12 @@ export type OpenworldNativeOptions = {
   target: (serverId: string) => Promise<{ address: string; password: string }>;
   fetcher?: typeof fetch;
   now?: () => number;
+  native?: OpenworldNativeConnection;
 };
+export type OpenworldNativeConnection = ReturnType<typeof createOpenworldNativeConnection>;
 
 export function openworldProcessRef(scope: OpenworldScope) {
-  return createHash('sha256').update(scope.liveKey).digest('hex');
+  return createHash('sha256').update(scope.processKey).digest('hex');
 }
 
 export function createOpenworldNativeConnection(options: OpenworldNativeOptions) {
@@ -461,8 +516,9 @@ export function createOpenworldNativeConnection(options: OpenworldNativeOptions)
     retryExpired = true,
   ) {
     const signal = AbortSignal.timeout(8000);
+    const key = JSON.stringify([scope.liveKey, scope.origin]);
     const credential = () =>
-      tokens.get(scope.liveKey, 60000, async () => {
+      tokens.get(key, 60_000, async () => {
         const verified = await target(scope.serverId);
         assertCurrentOpenworldScope(scope, await readOpenworldScope(db, scope.serverId));
         if (verified.address !== scope.origin) throw new DomainError('provenance_mismatch');
@@ -476,16 +532,17 @@ export function createOpenworldNativeConnection(options: OpenworldNativeOptions)
           ),
         };
       });
-    const current = credential();
-    const auth = await current;
-    try {
-      return await work(auth.origin, auth.token, signal);
-    } catch (error) {
-      if (!(error instanceof OpenworldTokenExpired)) throw error;
-      tokens.discard(scope.liveKey, current);
-      if (!retryExpired) throw error;
-      const next = await credential();
-      return work(next.origin, next.token, signal);
+    for (let attempt = 0; ; attempt++) {
+      const current = credential();
+      const auth = await current;
+      try {
+        return await work(auth.origin, auth.token, signal);
+      } catch (error) {
+        if (!(error instanceof OpenworldTokenExpired)) throw error;
+        // A late 401 for the old token must leave a newer login in flight.
+        tokens.discard(key, current);
+        if (!retryExpired || error.code === 'operation_uncertain' || attempt > 0) throw error;
+      }
     }
   }
 
@@ -494,7 +551,7 @@ export function createOpenworldNativeConnection(options: OpenworldNativeOptions)
 
 export function createOpenworldTelemetry(options: OpenworldNativeOptions) {
   const { db, fetcher = fetch, now = Date.now } = options;
-  const native = createOpenworldNativeConnection(options);
+  const native = options.native ?? createOpenworldNativeConnection(options);
   const reads = sharedReads<Sample>(256, now, 1500);
   const skins = sharedReads<Uint8Array<ArrayBuffer>>(128, now, 1500);
   const recent = new Map<string, Sample & { persistedAt: number }>();

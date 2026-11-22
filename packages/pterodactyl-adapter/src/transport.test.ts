@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
+import { withProviderReadCaller } from './provider-read-attribution.js';
 import { createTransport, createTransportCoordinator } from './transport.js';
 
 const config = {
@@ -11,6 +12,92 @@ const schema = z.object({ value: z.number() });
 afterEach(() => vi.useRealTimers());
 
 describe('Pterodactyl request coordination', () => {
+  it('counts wire dispatches once per initiating caller, including an upstream 429', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-11-22T12:00:00Z'));
+    const coordinator = createTransportCoordinator('api');
+    const logger = { log: vi.fn() };
+    const stop = coordinator.startReadReporting(logger);
+    const pending = Promise.withResolvers<Response>();
+    const fetcher = vi
+      .fn<typeof fetch>()
+      .mockReturnValueOnce(pending.promise)
+      .mockResolvedValueOnce(new Response(null, { status: 429 }));
+    const transport = createTransport({ ...config, fetcher, coordinator });
+    const detail = (id: number) =>
+      transport.json('application', `servers/${id}?include=allocations`, schema);
+    const first = withProviderReadCaller('openworld-map', () => detail(7));
+    const joined = withProviderReadCaller('openworld-players', () => detail(7));
+    await expect(withProviderReadCaller('gateway', () => detail(8))).rejects.toMatchObject({
+      reason: 'rate_limited',
+    });
+    await expect(detail(9)).rejects.toMatchObject({ reason: 'rate_limited' });
+    pending.resolve(Response.json({ value: 1 }));
+    await Promise.all([first, joined]);
+    expect(
+      fetcher.mock.calls.map(([, init]) => new Headers(init?.headers).get('user-agent')),
+    ).toEqual(['NickPanel/openworld-map', 'NickPanel/gateway']);
+    vi.advanceTimersByTime(120_000);
+    stop();
+    expect(logger.log.mock.calls).toEqual([
+      [
+        'info',
+        'pterodactyl.server_reads',
+        {
+          runtime: 'api',
+          from: '2026-11-22T12:00:00.000Z',
+          until: '2026-11-22T12:01:00.000Z',
+          callers: { 'openworld-map': { detail: 1 }, gateway: { detail: 1 } },
+        },
+      ],
+    ]);
+  });
+
+  it('distinguishes list, filtered batch and bundle attempts from a server detail or mutation', async () => {
+    const coordinator = createTransportCoordinator('worker');
+    const logger = { log: vi.fn() };
+    const stop = coordinator.startReadReporting(logger);
+    const fetcher = vi
+      .fn<typeof fetch>()
+      .mockImplementation(async () => Response.json({ value: 1 }));
+    const transport = createTransport({ ...config, fetcher, coordinator });
+    await transport.json('application', 'servers?per_page=100&page=1', schema);
+    await transport.json(
+      'application',
+      'servers?filter%5Buuid%5D=private&per_page=100&page=1',
+      schema,
+    );
+    await transport.json(
+      'application',
+      'extensions/nickhosting/gateway-inventory',
+      schema,
+      'POST',
+      {},
+      false,
+      { readOnly: true },
+    );
+    await transport.json('application', 'servers/external/private-id?include=allocations', schema);
+    await transport.json('application', 'servers/7', schema, 'DELETE');
+    await transport.json('client', 'servers/7', schema);
+    stop();
+    expect(
+      fetcher.mock.calls.map(([, init]) => new Headers(init?.headers).get('user-agent')),
+    ).toEqual([
+      'NickPanel/worker',
+      'NickPanel/worker',
+      'NickPanel/worker',
+      'NickPanel/worker',
+      null,
+      null,
+    ]);
+    expect(logger.log).toHaveBeenCalledExactlyOnceWith('info', 'pterodactyl.server_reads', {
+      runtime: 'worker',
+      from: expect.any(String),
+      until: expect.any(String),
+      callers: { worker: { list: 1, batch: 1, bundle: 1, externalDetail: 1 } },
+    });
+  });
+
   it('isolates an ambiguous websocket 429 to that server, including other credentials', async () => {
     const coordinator = createTransportCoordinator();
     const fetcher = vi

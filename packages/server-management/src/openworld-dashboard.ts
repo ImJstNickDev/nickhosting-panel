@@ -4,12 +4,17 @@ import { type AuthContext, DomainError } from '@nickhosting/core';
 import { type Database, recordAudit } from '@nickhosting/database';
 import type { ApplicationServer, PterodactylAdapter } from '@nickhosting/pterodactyl-adapter';
 import type { Kysely, Selectable } from 'kysely';
-import { openworldDashboardStatus } from '../../../games/openworld/src/dashboard-api.js';
+import { readOpenworldDashboardStatusWithToken } from '../../../games/openworld/src/dashboard-api.js';
 import { openworldStartup } from '../../../games/openworld/src/dashboard-launch.js';
 import { privateBackendAddress } from './allocation-pool.js';
 import { type GameLifecycleContext, verifyManagedIdentity } from './lifecycle.js';
 import { canAccessOpenworldDashboard } from './openworld-dashboard-access.js';
 import { getOpenworldPublication, setOpenworldPublication } from './openworld-publication.js';
+import {
+  assertCurrentOpenworldScope,
+  type OpenworldNativeConnection,
+  readOpenworldScope,
+} from './openworld-telemetry.js';
 import { authorizeServer } from './registry.js';
 
 type DB = Kysely<Database>;
@@ -188,12 +193,18 @@ export async function updateOpenworldDashboard(
 
 export async function readOpenworldDashboardStatus(
   db: DB,
-  adapter: Adapter,
+  native: OpenworldNativeConnection,
   who: AuthContext,
   id: string,
   signal: AbortSignal,
 ) {
   await dashboardViewer(db, who, id);
-  const { password, address } = await resolveOpenworldDashboardTarget(db, adapter, id);
-  return openworldDashboardStatus(address, password, signal);
+  const scope = await readOpenworldScope(db, id);
+  if (scope.reason) throw new DomainError('game_not_ready');
+  const status = await native(scope, (origin, token, deadline) =>
+    readOpenworldDashboardStatusWithToken(origin, token, AbortSignal.any([signal, deadline])),
+  );
+  await dashboardViewer(db, who, id);
+  assertCurrentOpenworldScope(scope, await readOpenworldScope(db, id));
+  return status;
 }

@@ -7,8 +7,8 @@ import {
   openworldCheckpointActionSchema,
   openworldMapWorldKey,
 } from '../../../games/openworld/src/world-map.js';
-import { resolveOpenworldDashboardTarget } from '../../../packages/server-management/src/openworld-dashboard.js';
-import { createOpenworldWorldMap } from '../../../packages/server-management/src/openworld-world-map.js';
+import { openworldRetryAfterMs } from '../../../packages/server-management/src/openworld-telemetry.js';
+import type { createOpenworldWorldMap } from '../../../packages/server-management/src/openworld-world-map.js';
 import type { Variables } from './app.js';
 import type { ServerRouteOptions } from './servers.js';
 
@@ -72,27 +72,15 @@ function parse<T>(schema: z.ZodType<T>, value: unknown) {
 
 export function registerOpenworldWorldMapRoutes(
   app: Hono<{ Variables: Variables }>,
-  options: Pick<ServerRouteOptions, 'db' | 'principal'> &
-    Partial<Pick<ServerRouteOptions, 'management'>>,
-  service = createOpenworldWorldMap({
-    db: options.db,
-    target: async (id) => {
-      if (!options.management) throw new DomainError('integration_unavailable');
-      return resolveOpenworldDashboardTarget(options.db, (await options.management()).adapter, id);
-    },
-  }),
+  options: Pick<ServerRouteOptions, 'db' | 'principal'>,
+  service: ReturnType<typeof createOpenworldWorldMap>,
 ) {
   const base = '/v1/servers/:id/openworld';
   const routes = new Hono<{ Variables: Variables }>().basePath(base);
 
-  // Coalesced requests receive the same rejected provider read throughout its cooldown.
-  const retryUntil = new WeakMap<PterodactylError, number>();
   routes.onError((error, c) => {
     if (!(error instanceof PterodactylError) || error.reason !== 'rate_limited') throw error;
-    const now = Date.now();
-    const until = retryUntil.get(error) ?? now + (error.retryAfterMs ?? 60_000);
-    retryUntil.set(error, until);
-    c.header('Retry-After', String(Math.max(1, Math.ceil((until - now) / 1000))));
+    c.header('Retry-After', String(Math.max(1, Math.ceil(openworldRetryAfterMs(error) / 1000))));
     throw new DomainError('rate_limited');
   });
   routes.use('/map/*', async (c, next) => {

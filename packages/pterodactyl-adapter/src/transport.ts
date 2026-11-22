@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { DomainError } from '@nickhosting/core';
 import { z } from 'zod';
 import type { ContainerObserver } from './container-observer.js';
+import { createProviderReadAttribution } from './provider-read-attribution.js';
 
 export type CredentialScope = 'application' | 'client';
 export type RemoteOutcome = 'rejected' | 'unknown';
@@ -129,9 +130,10 @@ interface RequestScope {
   pendingJson: Map<string, Promise<string>>;
 }
 /** Share between adapters for one application process. It stores no plaintext credentials. */
-export function createTransportCoordinator() {
+export function createTransportCoordinator(runtime?: 'api' | 'worker') {
   const scopes = new Map<string, RequestScope>();
   return {
+    ...createProviderReadAttribution(runtime),
     scope(identity: string, credentialScope: CredentialScope): RequestScope {
       const existing = scopes.get(identity);
       if (existing) return existing;
@@ -237,7 +239,15 @@ export function createTransport(options: TransportOptions) {
     let response: Response;
     requestScope.activeRequests++;
     try {
-      response = await fetcher(new URL(`api/${scope}/${path}`, base), {
+      const url = new URL(`api/${scope}/${path}`, base);
+      const headers: Record<string, string> = {
+        Authorization: `Bearer ${key}`,
+        Accept: 'application/vnd.pterodactyl.v1+json',
+        ...(body === undefined
+          ? {}
+          : { 'Content-Type': raw ? 'text/plain; charset=utf-8' : 'application/json' }),
+      };
+      const init: RequestInit = {
         method,
         redirect: 'error',
         signal: AbortSignal.timeout(
@@ -245,15 +255,12 @@ export function createTransport(options: TransportOptions) {
             ? parseInput(z.number().int().min(1).max(120000), requestOptions.timeoutMs)
             : timeoutMs,
         ),
-        headers: {
-          Authorization: `Bearer ${key}`,
-          Accept: 'application/vnd.pterodactyl.v1+json',
-          ...(body === undefined
-            ? {}
-            : { 'Content-Type': raw ? 'text/plain; charset=utf-8' : 'application/json' }),
-        },
+        headers,
         ...(body === undefined ? {} : { body: raw ? String(body) : JSON.stringify(body) }),
-      });
+      };
+      const agent = coordinator.providerReadAgent(scope, method, path, url);
+      if (agent) headers['User-Agent'] = agent;
+      response = await fetcher(url, init);
     } catch {
       throw new PterodactylError('unavailable', scope, mutating ? 'unknown' : 'rejected');
     } finally {

@@ -15,6 +15,7 @@ import {
   recordWorkerHeartbeat,
   refreshHostObservations,
   wakeInstallationOperation,
+  withProviderReadCaller,
 } from '@nickhosting/server-management';
 import { nginxProxyManager } from '../../../packages/external-services/src/nginx-proxy-manager.js';
 import { minecraftModpackSchemaAvailable } from '../../../packages/server-management/src/minecraft-modpack-schema.js';
@@ -34,7 +35,7 @@ export async function main(env: NodeJS.ProcessEnv = process.env) {
   if (!env.DATABASE_URL || !env.REDIS_URL || !env.NH_JOB_PREFIX)
     throw new DomainError('configuration_invalid');
   const { db, pool } = createDatabase(env.DATABASE_URL);
-  const transportCoordinator = createManagementTransportCoordinator();
+  const transportCoordinator = createManagementTransportCoordinator('worker');
   let directoryIdentityCache: ReturnType<typeof createDirectoryIdentityCache> | undefined;
   let transferCache: ReturnType<typeof createPrivateTransferCache> | undefined;
   try {
@@ -213,11 +214,10 @@ export async function main(env: NodeJS.ProcessEnv = process.env) {
       },
       () => logger.log('warn', 'provider.feed_unavailable'),
     );
-    const captures = startOpenworldScreenshotLoop(
-      db,
-      management,
-      Boolean(env.NH_SECRETS_MASTER_KEY),
-      (serverId) => logger.log('warn', 'openworld.capture_index_unavailable', { serverId }),
+    const captures = withProviderReadCaller('worker-openworld-captures', () =>
+      startOpenworldScreenshotLoop(db, management, Boolean(env.NH_SECRETS_MASTER_KEY), (serverId) =>
+        logger.log('warn', 'openworld.capture_index_unavailable', { serverId }),
+      ),
     );
     const worldIndexes = startMinecraftWorldIndexLoop(db, management, env, (serverId) =>
       logger.log('warn', 'minecraft.world_index_unavailable', { serverId }),
@@ -256,7 +256,9 @@ export async function main(env: NodeJS.ProcessEnv = process.env) {
       let successful = false;
       try {
         await recoverInstallations();
-        await reconcileServers(db, management, logger, env);
+        await withProviderReadCaller('worker-reconcile', () =>
+          reconcileServers(db, management, logger, env),
+        );
         successful =
           schedulesHealthy &&
           runtime.worker.isRunning() &&
@@ -284,6 +286,7 @@ export async function main(env: NodeJS.ProcessEnv = process.env) {
     schedulePoll = pollAutomation();
     const catalogs = startMinecraftMetadataLoop(db, pool, env, logger);
     reconciliation = poll();
+    const stopReadReporting = transportCoordinator.startReadReporting(logger);
     logger.log('info', 'worker.started');
     let closed: Promise<void> | undefined;
     const close = () => {
@@ -310,6 +313,7 @@ export async function main(env: NodeJS.ProcessEnv = process.env) {
           directoryIdentityCache?.close();
           await transferCache?.close();
           await heartbeat('stopped');
+          stopReadReporting();
           await db.destroy();
         }
         logger.log('info', 'worker.stopped');

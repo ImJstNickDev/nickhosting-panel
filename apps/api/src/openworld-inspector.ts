@@ -5,11 +5,11 @@ import {
   type OpenworldSeed,
   readOpenworldSeed,
 } from '../../../games/openworld/src/seed-inspector.js';
-import { resolveOpenworldDashboardTarget } from '../../../packages/server-management/src/openworld-dashboard.js';
 import {
   assertCurrentOpenworldScope,
   createOpenworldNativeConnection,
   type OpenworldNativeOptions,
+  openworldRetryAfterMs,
   readOpenworldScope,
   sharedReads,
 } from '../../../packages/server-management/src/openworld-telemetry.js';
@@ -19,7 +19,7 @@ import type { ServerRouteOptions } from './servers.js';
 
 export function createOpenworldInspector(options: OpenworldNativeOptions) {
   const { db, fetcher = fetch, now = Date.now } = options;
-  const native = createOpenworldNativeConnection(options);
+  const native = options.native ?? createOpenworldNativeConnection(options);
   const samples = sharedReads<OpenworldSeed>(32, now, 1000);
   return async (who: AuthContext, id: string) => {
     const reader = { who, resource: 'seed' as const };
@@ -36,15 +36,8 @@ export function createOpenworldInspector(options: OpenworldNativeOptions) {
 
 export function registerOpenworldInspectorRoutes(
   app: Hono<{ Variables: Variables }>,
-  options: Pick<ServerRouteOptions, 'db' | 'principal'> &
-    Partial<Pick<ServerRouteOptions, 'management'>>,
-  read = createOpenworldInspector({
-    db: options.db,
-    target: async (id) => {
-      if (!options.management) throw new DomainError('integration_unavailable');
-      return resolveOpenworldDashboardTarget(options.db, (await options.management()).adapter, id);
-    },
-  }),
+  options: Pick<ServerRouteOptions, 'db' | 'principal'>,
+  read: ReturnType<typeof createOpenworldInspector>,
 ) {
   app.get('/v1/servers/:id/openworld/seed', async (c) => {
     c.header('cache-control', 'private, no-store');
@@ -53,7 +46,7 @@ export function registerOpenworldInspectorRoutes(
       return c.json(await read(who, c.req.param('id')));
     } catch (e) {
       if (e instanceof PterodactylError && e.reason === 'rate_limited') {
-        c.header('Retry-After', String(Math.ceil((e.retryAfterMs ?? 60000) / 1000)));
+        c.header('Retry-After', String(Math.max(1, Math.ceil(openworldRetryAfterMs(e) / 1000))));
         throw new DomainError('rate_limited');
       }
       throw e;

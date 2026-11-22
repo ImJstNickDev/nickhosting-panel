@@ -97,7 +97,7 @@ function visibleColumns(packed: Uint32Array, stride: number, bounds?: Bounds) {
 
 export function createOpenworldWorldMap(options: OpenworldNativeOptions) {
   const { db, fetcher = fetch, now = Date.now } = options;
-  const connect = createOpenworldNativeConnection(options);
+  const connect = options.native ?? createOpenworldNativeConnection(options);
   const worlds = sharedReads<Awaited<ReturnType<typeof readOpenworldMapWorlds>>>(64, now, 1000);
   const indexes = sharedReads<Awaited<ReturnType<typeof readMapIndex>>>(64, now, 1000);
   const columns = sharedReads<Uint32Array>(8, now, 1000);

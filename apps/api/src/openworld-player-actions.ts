@@ -1,22 +1,14 @@
 import { DomainError } from '@nickhosting/core';
 import type { Hono } from 'hono';
 import { openworldActionSchema } from '../../../games/openworld/src/player-actions.js';
-import { resolveOpenworldDashboardTarget } from '../../../packages/server-management/src/openworld-dashboard.js';
-import { createOpenworldPlayerActions } from '../../../packages/server-management/src/openworld-player-actions.js';
+import type { createOpenworldPlayerActions } from '../../../packages/server-management/src/openworld-player-actions.js';
 import type { Variables } from './app.js';
 import type { ServerRouteOptions } from './servers.js';
 
 export function registerOpenworldPlayerActionRoutes(
   app: Hono<{ Variables: Variables }>,
-  options: Pick<ServerRouteOptions, 'db' | 'principal'> &
-    Partial<Pick<ServerRouteOptions, 'management'>>,
-  service = createOpenworldPlayerActions({
-    db: options.db,
-    target: async (id) => {
-      if (!options.management) throw new DomainError('integration_unavailable');
-      return resolveOpenworldDashboardTarget(options.db, (await options.management()).adapter, id);
-    },
-  }),
+  options: Pick<ServerRouteOptions, 'db' | 'principal'>,
+  service: ReturnType<typeof createOpenworldPlayerActions>,
 ) {
   const base = '/v1/servers/:id/openworld/players';
   app.get(`${base}/destinations`, async (c) => {

@@ -1,4 +1,5 @@
 import { expect, it, vi } from 'vitest';
+import { OpenworldTokenExpired } from './dashboard-api.js';
 import type { OpenworldNativeConnection } from './native-diagnostics.js';
 import { canUnbanOpenworldAccount, openworldRuleActionSchema } from './rules.js';
 import { performOpenworldRule, readOpenworldRules } from './rules-native.js';
@@ -173,6 +174,25 @@ it('distinguishes native rejection from accepted HTTP with an unchanged postcond
     performOpenworldRule(f.native, 'a1.2.9', { kind: 'unban', uuid: account }, before),
   ).rejects.toMatchObject({ code: 'operation_uncertain' });
 });
+it('preserves uncertainty and token rejection when the evidence read after a command returns 401', async () => {
+  const f = fixture();
+  const fetcher = f.native.fetcher;
+  f.native.fetcher = (url, init) =>
+    f.sent.includes('difficulty hard') && init?.method === 'GET'
+      ? Promise.resolve(new Response(null, { status: 401 }))
+      : fetcher(url, init);
+  const change = performOpenworldRule(
+    f.native,
+    'a1.2.9',
+    { kind: 'difficulty', value: 'hard' },
+    async () => {},
+  );
+  await expect(change).rejects.toBeInstanceOf(OpenworldTokenExpired);
+  await expect(change).rejects.toMatchObject({ code: 'operation_uncertain' });
+  expect(f.state.level).toBe('Hard');
+  expect(f.sent).toEqual(['difficulty', 'difficulty hard']);
+});
+
 it('requires a verified release, UUID and allowed action before dispatch', async () => {
   const f = fixture();
   const before = vi.fn(async () => {});

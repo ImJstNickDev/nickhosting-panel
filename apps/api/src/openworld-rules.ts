@@ -1,10 +1,8 @@
 import { DomainError } from '@nickhosting/core';
 import type { Hono } from 'hono';
 import { z } from 'zod';
-import { readOpenworldRuleFiles } from '../../../games/openworld/src/rule-files.js';
 import { openworldRuleActionSchema } from '../../../games/openworld/src/rules.js';
-import { resolveOpenworldDashboardTarget } from '../../../packages/server-management/src/openworld-dashboard.js';
-import { createOpenworldRules } from '../../../packages/server-management/src/openworld-rules.js';
+import type { createOpenworldRules } from '../../../packages/server-management/src/openworld-rules.js';
 import type { Variables } from './app.js';
 import type { ServerRouteOptions } from './servers.js';
 
@@ -16,26 +14,8 @@ const change = z.strictObject({
 
 export function registerOpenworldRulesRoutes(
   app: Hono<{ Variables: Variables }>,
-  options: Pick<ServerRouteOptions, 'db' | 'principal'> &
-    Partial<Pick<ServerRouteOptions, 'management'>>,
-  service = createOpenworldRules({
-    db: options.db,
-    target: async (id) => {
-      if (!options.management) throw new DomainError('integration_unavailable');
-      return resolveOpenworldDashboardTarget(options.db, (await options.management()).adapter, id);
-    },
-    readFiles: async (who, id, signal) => {
-      if (!options.management) throw new DomainError('integration_unavailable');
-      const runtime = await options.management();
-      return runtime.fileReadScope(
-        who,
-        id,
-        readOpenworldRuleFiles,
-        signal,
-        'game.openworld.rules.view',
-      );
-    },
-  }),
+  options: Pick<ServerRouteOptions, 'db' | 'principal'>,
+  service: ReturnType<typeof createOpenworldRules>,
 ) {
   const path = '/v1/servers/:id/openworld/rules';
   app.get(path, async (c) => {

@@ -29,7 +29,7 @@ import { createOpenworldDashboardIngress } from './openworld-dashboard-ingress.j
 export async function createRuntime(env: Readonly<Record<string, string | undefined>>) {
   if (!env.DATABASE_URL) throw new DomainError('configuration_invalid');
   const database = createDatabase(env.DATABASE_URL);
-  const transportCoordinator = createTransportCoordinator();
+  const transportCoordinator = createTransportCoordinator('api');
   let directoryIdentityCache: ReturnType<typeof createDirectoryIdentityCache> | undefined;
   let transferCache: ReturnType<typeof createPrivateTransferCache> | undefined;
   try {
@@ -172,6 +172,7 @@ export async function createRuntime(env: Readonly<Record<string, string | undefi
       },
       log: (data) => logger.log('warn', 'api.request_failed', data),
     });
+    const stopReadReporting = transportCoordinator.startReadReporting(logger);
     return {
       app,
       createDashboardIngress,
@@ -183,6 +184,7 @@ export async function createRuntime(env: Readonly<Record<string, string | undefi
         await closeViewerArchives(database.db);
         await closeFileViewers(database.db);
         await transferCache?.close();
+        stopReadReporting();
         return database.db.destroy();
       },
     };

@@ -1,5 +1,5 @@
 import { expect, it, vi } from 'vitest';
-import { openworldDashboardStatus } from './dashboard-api.js';
+import { openworldDashboardToken, readOpenworldDashboardStatusWithToken } from './dashboard-api.js';
 
 it('requests only authenticated native status and projects just the tenant-facing metrics', async () => {
   const fetcher = vi
@@ -15,12 +15,10 @@ it('requests only authenticated native status and projects just the tenant-facin
         net: { internal: true },
       }),
     );
-  const status = await openworldDashboardStatus(
-    'http://10.2.3.4:4000',
-    'instance-only',
-    new AbortController().signal,
-    fetcher,
-  );
+  const origin = 'http://10.2.3.4:4000';
+  const signal = new AbortController().signal;
+  const token = await openworldDashboardToken(origin, 'instance-only', signal, fetcher);
+  const status = await readOpenworldDashboardStatusWithToken(origin, token, signal, fetcher);
   expect(status).toEqual({ tps: 20.1, players: { online: 2, slots: 8 }, memory: { rssMB: 70.2 } });
   expect(fetcher.mock.calls.map(([url]) => new URL(String(url)).pathname)).toEqual([
     '/api/live/auth',
@@ -38,7 +36,7 @@ it.each([
   async (auth) => {
     const fetcher = vi.fn<typeof fetch>().mockResolvedValueOnce(Response.json(auth));
     await expect(
-      openworldDashboardStatus(
+      openworldDashboardToken(
         'http://10.2.3.4:4000',
         'instance-only',
         new AbortController().signal,
@@ -50,15 +48,11 @@ it.each([
 );
 
 it('recognizes native HTTP startup before the world snapshot is ready', async () => {
-  const fetcher = vi
-    .fn<typeof fetch>()
-    .mockResolvedValueOnce(Response.json({ loopback: false, required: true, canAct: false }))
-    .mockResolvedValueOnce(Response.json({ token: 'native-session' }))
-    .mockResolvedValueOnce(new Response(null, { status: 503 }));
+  const fetcher = vi.fn<typeof fetch>().mockResolvedValueOnce(new Response(null, { status: 503 }));
   await expect(
-    openworldDashboardStatus(
+    readOpenworldDashboardStatusWithToken(
       'http://10.2.3.4:4000',
-      'instance-only',
+      'native-session',
       new AbortController().signal,
       fetcher,
     ),
