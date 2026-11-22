@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import type { OpenworldTelemetryData } from '../../../../../games/openworld/src/telemetry.js';
 import { useT } from '../../app/i18n.js';
+import { playersBase } from './player-workspace.js';
 import { base, key, numeric, useMetricsFormat } from './telemetry.js';
 
 export type Player = OpenworldTelemetryData['players']['players'][number];
@@ -46,15 +47,18 @@ export function PlayerArt({
   name,
   session,
   hash,
+  savedSkin,
   body = false,
 }: {
   serverId: string;
   name: string;
   session?: Connection | null;
   hash?: string | null;
+  savedSkin?: { account: string; hash?: string | null };
   body?: boolean;
 }) {
-  const [failedUrl, setFailedUrl] = useState('');
+  const [failedLive, setFailedLive] = useState('');
+  const [failedSave, setFailedSave] = useState('');
   // The game reports elapsed whole seconds, so successive estimates of joinedAt drift.
   // Pin the first confirmed timestamp for the image URL until the actual session changes.
   const [previous, setPrevious] = useState(session ?? null);
@@ -71,15 +75,25 @@ export function PlayerArt({
     query.set('view', body ? 'body' : 'head');
     query.set('h', hash);
   }
+  const liveUrl =
+    query && hash && pinned ? `${base(serverId)}/players/${pinned.id}/skin?${query}` : null;
+  const revision = savedSkin?.hash;
+  const savedUrl =
+    savedSkin && revision
+      ? `${playersBase(serverId)}/players/saved/${encodeURIComponent(savedSkin.account)}/skin?${new URLSearchParams({ view: body ? 'body' : 'head', h: revision })}`
+      : null;
   const url =
-    query && hash && session ? `${base(serverId)}/players/${session.id}/skin?${query}` : null;
+    liveUrl && liveUrl !== failedLive ? liveUrl : savedUrl !== failedSave ? savedUrl : null;
   return (
-    <span
-      aria-hidden="true"
-      className={body && url && url !== failedUrl ? 'ow-body-skin' : 'ow-avatar'}
-    >
-      {url && url !== failedUrl ? (
-        <img alt="" loading="lazy" decoding="async" src={url} onError={() => setFailedUrl(url)} />
+    <span aria-hidden="true" className={body && url ? 'ow-body-skin' : 'ow-avatar'}>
+      {url ? (
+        <img
+          alt=""
+          loading="lazy"
+          decoding="async"
+          src={url}
+          onError={() => (url === liveUrl ? setFailedLive(url) : setFailedSave(url))}
+        />
       ) : (
         Array.from(name.trim())[0]?.toLocaleUpperCase() || '·'
       )}

@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useId, useRef, useState } from 'react';
 import { Link } from 'react-router';
 import { z } from 'zod';
 import type { OpenworldSavedPlayerDetail } from '../../../../../games/openworld/src/offline-players.js';
@@ -6,7 +6,7 @@ import type { OpenworldActionPlayer } from '../../../../../games/openworld/src/p
 import type { OpenworldTelemetryData } from '../../../../../games/openworld/src/telemetry.js';
 import { ApiError } from '../../api/client.js';
 import { useT } from '../../app/i18n.js';
-import { Dialog, ErrorNotice, Loading, Select } from '../../components/ui.js';
+import { ErrorNotice, Loading, Select } from '../../components/ui.js';
 import { mapHref } from './map-players.js';
 import { type ActionReceipt, PlayerActions } from './player-actions.js';
 import { PlayerGallery } from './player-gallery.js';
@@ -54,7 +54,7 @@ export function PlayerProfile({
   watchUntil,
   onRequestAccepted,
   onServerGallery,
-  onClose,
+  backTo,
 }: {
   server: ServerView;
   selected: Profile;
@@ -73,10 +73,15 @@ export function PlayerProfile({
   watchUntil: number;
   onRequestAccepted: (r: ActionReceipt) => void;
   onServerGallery: () => void;
-  onClose: () => void;
+  backTo: string;
 }) {
   const t = useT(),
     f = usePlayerFormat();
+  const headingId = useId();
+  const heading = useRef<HTMLHeadingElement>(null);
+  useEffect(() => {
+    heading.current?.focus();
+  }, []);
   const [requested, setTab] = useState<Pane>(inspect ? 'character' : 'actions');
   const [preferredSource, setSource] = useState<'live' | 'saved'>('live');
   const [busy, setBusy] = useState(false);
@@ -209,123 +214,128 @@ export function PlayerProfile({
     return <Character server={server} archive={archive} mapAccess={mapAccess} version={version} />;
   }
   return (
-    <Dialog
-      title={selected.name}
-      open
-      closeIcon
-      closeDisabled={busy && live}
-      className="ow-detail ow-profile"
-      onClose={onClose}
-    >
-      <div className="ow-profile-banner">
-        <span className={`ow-presence ${live || accountSessions.length ? 'is-live' : ''}`}>
-          {t(
-            live || accountSessions.length
-              ? key('connected')
-              : people(
-                  confirmedGone || server.runtimeState === 'offline' ? 'offlinePlayer' : 'saved',
-                ),
-          )}
-        </span>
-        {live && tab !== 'character' && (
-          <span>
-            {[connected.world, connected.mode && f.mode(connected.mode), data?.role?.name]
-              .filter(Boolean)
-              .join(' · ')}
+    <>
+      <Link className="ow-profile-back" to={backTo}>
+        ← {t(key('players'))}
+      </Link>
+      <section className="ow-panel ow-profile" aria-labelledby={headingId}>
+        <header className="ow-heading">
+          <h2 id={headingId} ref={heading} tabIndex={-1}>
+            {live ? selected.name : archive?.name || selected.name}
+          </h2>
+        </header>
+        <div className="ow-profile-banner">
+          <span className={`ow-presence ${live || accountSessions.length ? 'is-live' : ''}`}>
+            {t(
+              live || accountSessions.length
+                ? key('connected')
+                : people(
+                    confirmedGone || server.runtimeState === 'offline' ? 'offlinePlayer' : 'saved',
+                  ),
+            )}
           </span>
-        )}
-        {live && data?.accountVerified && <span>{t(key('verified'))}</span>}
-      </div>
-      {(accountSessions.length > 1 || needsChoice) && (
-        <Select
-          label={t(key('session'))}
-          disabled={busy}
-          value={live ? String(connected.id) : ''}
-          onChange={(e) => {
-            const pick = accountSessions.find((p) => p.id === Number(e.target.value));
-            if (pick) {
-              setReceipt(null);
-              setSource('live');
-              onChooseSession(pick);
-            }
-          }}
-        >
-          <option value="" disabled>
-            {t(people('chooseSession'))}
-          </option>
-          {accountSessions.map((p) => (
-            <option key={p.id} value={p.id}>
-              {[p.name, t(people('sessionId'), { id: p.id }), p.world].filter(Boolean).join(' · ')}
-            </option>
-          ))}
-        </Select>
-      )}
-      {panes.length > 1 && (
-        <fieldset className="ow-filters ow-profile-tabs" disabled={busy && live}>
-          <legend className="visually-hidden">{t(key('details'))}</legend>
-          {panes.map((p) => (
-            <button key={p} type="button" aria-pressed={tab === p} onClick={() => setTab(p)}>
-              {t(key(p))}
-            </button>
-          ))}
-        </fieldset>
-      )}
-      {receipt && (
-        <div role="status" className="ow-receipt">
-          <span>
-            {t(key(receipt.kind === 'screenshot' ? 'screenshotRequested' : 'actionAccepted'), {
-              name: receipt.playerName,
-              action: t(key(`action.${receipt.kind}`)),
-            })}
-          </span>
-          {receipt.kind === 'screenshot' && screenshots && (
-            <button
-              className="secondary"
-              type="button"
-              onClick={canShowShots ? () => setTab('gallery') : onServerGallery}
-            >
-              {t(key('openGallery'))}
-            </button>
-          )}
-          <button
-            type="button"
-            className="ow-dismiss"
-            aria-label={t('web.close')}
-            onClick={() => setReceipt(null)}
-          >
-            ×
-          </button>
-        </div>
-      )}
-      {resourcePane && (
-        <div className="ow-source-row">
-          {live && account && (
-            <fieldset className="ow-switcher ow-source-picker">
-              <legend className="visually-hidden">{t(people('source'))}</legend>
-              {(['live', 'saved'] as const).map((s) => (
-                <button
-                  key={s}
-                  type="button"
-                  aria-pressed={source === s}
-                  onClick={() => setSource(s)}
-                >
-                  {t(s === 'live' ? key('live') : people('saveDetails'))}
-                </button>
-              ))}
-            </fieldset>
-          )}
-          {source === 'live' && data && <ObservationStamp value={detail.data} />}
-          {source === 'saved' && archive && (
-            <span className="ow-source-time">
-              {t(key('lastSave'))} · {f.stamp(archive.savedAt)}
+          {live && tab !== 'character' && (
+            <span>
+              {[connected.world, connected.mode && f.mode(connected.mode), data?.role?.name]
+                .filter(Boolean)
+                .join(' · ')}
             </span>
           )}
+          {live && data?.accountVerified && <span>{t(key('verified'))}</span>}
         </div>
-      )}
-      <div className={resourcePane || tab === 'network' ? 'ow-detail-content' : undefined}>
-        {content()}
-      </div>
-    </Dialog>
+        {(accountSessions.length > 1 || needsChoice) && (
+          <Select
+            label={t(key('session'))}
+            disabled={busy}
+            value={live ? String(connected.id) : ''}
+            onChange={(e) => {
+              const pick = accountSessions.find((p) => p.id === Number(e.target.value));
+              if (pick) {
+                setReceipt(null);
+                setSource('live');
+                onChooseSession(pick);
+              }
+            }}
+          >
+            <option value="" disabled>
+              {t(people('chooseSession'))}
+            </option>
+            {accountSessions.map((p) => (
+              <option key={p.id} value={p.id}>
+                {[p.name, t(people('sessionId'), { id: p.id }), p.world]
+                  .filter(Boolean)
+                  .join(' · ')}
+              </option>
+            ))}
+          </Select>
+        )}
+        {panes.length > 1 && (
+          <fieldset className="ow-filters ow-profile-tabs" disabled={busy && live}>
+            <legend className="visually-hidden">{t(key('details'))}</legend>
+            {panes.map((p) => (
+              <button key={p} type="button" aria-pressed={tab === p} onClick={() => setTab(p)}>
+                {t(key(p))}
+              </button>
+            ))}
+          </fieldset>
+        )}
+        {receipt && (
+          <div role="status" className="ow-receipt">
+            <span>
+              {t(key(receipt.kind === 'screenshot' ? 'screenshotRequested' : 'actionAccepted'), {
+                name: receipt.playerName,
+                action: t(key(`action.${receipt.kind}`)),
+              })}
+            </span>
+            {receipt.kind === 'screenshot' && screenshots && (
+              <button
+                className="secondary"
+                type="button"
+                onClick={canShowShots ? () => setTab('gallery') : onServerGallery}
+              >
+                {t(key('openGallery'))}
+              </button>
+            )}
+            <button
+              type="button"
+              className="ow-dismiss"
+              aria-label={t('web.close')}
+              onClick={() => setReceipt(null)}
+            >
+              ×
+            </button>
+          </div>
+        )}
+        {resourcePane && (
+          <div className="ow-source-row">
+            {live && account && (
+              <fieldset className="ow-switcher ow-source-picker">
+                <legend className="visually-hidden">{t(people('source'))}</legend>
+                {(['live', 'saved'] as const).map((s) => (
+                  <button
+                    key={s}
+                    type="button"
+                    aria-pressed={source === s}
+                    onClick={() => setSource(s)}
+                  >
+                    {t(s === 'live' ? key('live') : people('saveDetails'))}
+                  </button>
+                ))}
+              </fieldset>
+            )}
+            {source === 'live' && data && <ObservationStamp value={detail.data} />}
+            {source === 'saved' && archive && (
+              <span className="ow-source-time">
+                {t(key('lastSave'))} · {f.stamp(archive.savedAt)}
+              </span>
+            )}
+          </div>
+        )}
+        <div className={resourcePane || tab === 'network' ? 'ow-detail-content' : undefined}>
+          {content()}
+        </div>
+      </section>
+    </>
   );
 }
 
@@ -387,6 +397,7 @@ function Character({
             name={person.name ?? archive?.uuid ?? ''}
             session={session}
             hash={skinHash}
+            savedSkin={archive && { account: archive.uuid, hash: archive.skinHash }}
             body
           />
         </div>

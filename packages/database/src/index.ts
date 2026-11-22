@@ -103,6 +103,15 @@ export interface Database
     indexed_at: Date;
     indexing: boolean;
   };
+  openworld_player_skins: {
+    server_id: string;
+    account_id: string;
+    binding: string;
+    skin_hash: string;
+    observed_at: Date;
+    head_png: Buffer;
+    body_png: Buffer;
+  };
   openworld_saved_players: {
     server_id: string;
     file_stem: string;

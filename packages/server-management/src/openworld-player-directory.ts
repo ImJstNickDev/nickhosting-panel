@@ -242,9 +242,16 @@ export function createOpenworldPlayerDirectory(db: DB, withFiles: WithFiles, now
             .orderBy('file_stem');
           const found = await tx
             .selectFrom(summaries.as('matched'))
-            .selectAll()
+            .leftJoin('openworld_player_skins as skin', (join) =>
+              join
+                .on('skin.server_id', '=', id)
+                .on('skin.binding', '=', binding)
+                .on('skin.account_id', '=', sql<string>`lower(matched.account_id)`),
+            )
+            .selectAll('matched')
+            .select('skin.skin_hash')
             .orderBy(sql`coalesce(last_seen_at, saved_at) desc nulls last`)
-            .orderBy('account_id')
+            .orderBy('matched.account_id')
             .limit(pageSize)
             .offset((page - 1) * pageSize)
             .execute();
@@ -252,6 +259,7 @@ export function createOpenworldPlayerDirectory(db: DB, withFiles: WithFiles, now
             players: found.map((p) => ({
               uuid: p.account_id,
               name: p.display_name,
+              ...(p.skin_hash ? { skinHash: p.skin_hash } : {}),
               lastSeenMs: p.last_seen_at?.getTime() ?? null,
               savedAt: p.saved_at?.toISOString() ?? null,
             })),
@@ -262,6 +270,17 @@ export function createOpenworldPlayerDirectory(db: DB, withFiles: WithFiles, now
             stale: now() - state.indexed_at.getTime() >= 60000,
           };
         });
+    },
+    async skin(who: AuthContext, id: string, uuid: string, view: 'head' | 'body', hash: string) {
+      if (!savedAccountId.test(uuid) || !/^[0-9a-f]{8}$/.test(hash))
+        throw new DomainError('validation_failed');
+      const { savedSkin } = await readOpenworldScope(db, id, {
+        who,
+        resource: 'player',
+        savedSkin: { account: uuid, view, hash },
+      });
+      if (!savedSkin) throw new DomainError('not_found');
+      return Uint8Array.from(savedSkin);
     },
     async detail(who: AuthContext, id: string, uuid: string) {
       if (!savedAccountId.test(uuid)) throw new DomainError('validation_failed');
@@ -285,8 +304,15 @@ export function createOpenworldPlayerDirectory(db: DB, withFiles: WithFiles, now
           statsAt: stats?.statsAt ?? null,
         };
       });
+      const skin = await db
+        .selectFrom('openworld_player_skins')
+        .select('skin_hash')
+        .where('server_id', '=', id)
+        .where('binding', '=', binding)
+        .where('account_id', '=', uuid.toLowerCase())
+        .executeTakeFirst();
       await checkBinding(db, who, id, binding);
-      return detail;
+      return { ...detail, ...(skin ? { skinHash: skin.skin_hash } : {}) };
     },
   };
 }

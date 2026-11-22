@@ -4,9 +4,11 @@ import { createTestDatabase } from '@nickhosting/database/testing';
 import type { FilemanReadService } from '@nickhosting/game-sdk';
 import { Hono } from 'hono';
 import { sql } from 'kysely';
+import { PNG } from 'pngjs';
 import { afterAll, beforeAll, expect, it, vi } from 'vitest';
 import { openworldManifest } from '../../../games/openworld/src/manifest.js';
 import { createOpenworldPlayerDirectory } from '../../../packages/server-management/src/openworld-player-directory.js';
+import { readOpenworldScope } from '../../../packages/server-management/src/openworld-telemetry.js';
 import { managementFixture } from '../../../packages/server-management/src/test-fixtures.js';
 import type { Variables } from './app.js';
 import { registerOpenworldPlayerDirectoryRoutes } from './openworld-player-directory.js';
@@ -132,12 +134,26 @@ it('keeps same-name player searches in the authorized instance, requires inspect
     dir,
   );
   const url = `/v1/servers/${a.id}/openworld/players/saved`;
-  await dir.list(b.owner.context, b.id, '', 1);
+  const png = PNG.sync.write(new PNG({ width: 1, height: 1 }));
+  const binding = (await readOpenworldScope(fixture.db, a.id)).binding;
+  await fixture.db
+    .insertInto('openworld_player_skins')
+    .values({
+      server_id: a.id,
+      account_id: uuid,
+      binding,
+      skin_hash: '12ab34cd',
+      observed_at: new Date(),
+      head_png: png,
+      body_png: png,
+    })
+    .execute();
+  expect((await dir.list(b.owner.context, b.id, '', 1)).players[0]?.skinHash).toBeUndefined();
   const res = await app.request(`${url}?q=Ada`);
   expect(res.status).toBe(200);
   expect(await res.json()).toMatchObject({
     total: 1,
-    players: [{ uuid, name: 'Ada', lastSeenMs: 1740000000000 }],
+    players: [{ uuid, name: 'Ada', lastSeenMs: 1740000000000, skinHash: '12ab34cd' }],
     stale: false,
     indexing: false,
   });
@@ -149,7 +165,9 @@ it('keeps same-name player searches in the authorized instance, requires inspect
       body: JSON.stringify({ q: 'Ada', page: 1, excludeAccounts: [uuid] }),
     });
   expect(await (await search()).json()).toMatchObject({ total: 0, players: [] });
-  expect((await app.request(`${url}/${uuid}`)).status).toBe(200);
+  const detail = await (await app.request(`${url}/${uuid}`)).json();
+  expect(detail.skinHash).toBe('12ab34cd');
+  expect(detail).not.toHaveProperty('head_png');
   expect((await app.request(`${url}/${other}`)).status).toBe(404);
   await fixture.db
     .insertInto('server_subusers')

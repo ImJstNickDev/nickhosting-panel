@@ -45,6 +45,7 @@ export type OpenworldSavedPlayerSummary = {
   uuid: string;
   name: string | null;
   lastSeenMs?: number | null;
+  skinHash?: string | null;
   savedAt: string | null;
 };
 export type OpenworldSavedPlayersPage = {

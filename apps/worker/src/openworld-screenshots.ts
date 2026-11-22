@@ -5,6 +5,8 @@ import {
   createOpenworldCaptureCollector,
 } from '../../../packages/server-management/src/openworld-capture-index.js';
 import { resolveOpenworldDashboardTarget } from '../../../packages/server-management/src/openworld-dashboard.js';
+import { createOpenworldSkinCollector } from '../../../packages/server-management/src/openworld-player-skins.js';
+import { createOpenworldNativeConnection } from '../../../packages/server-management/src/openworld-telemetry.js';
 
 export function startOpenworldScreenshotLoop(
   db: ReturnType<typeof createDatabase>['db'],
@@ -12,10 +14,14 @@ export function startOpenworldScreenshotLoop(
   enabled: boolean,
   failed: (serverId?: string) => void,
 ) {
-  const scan = createOpenworldCaptureCollector({
+  const options = {
     db,
-    target: async (id) => resolveOpenworldDashboardTarget(db, (await management()).adapter, id),
-  });
+    target: async (id: string) =>
+      resolveOpenworldDashboardTarget(db, (await management()).adapter, id),
+  };
+  const native = createOpenworldNativeConnection(options);
+  const scan = createOpenworldCaptureCollector(options, native);
+  const skins = createOpenworldSkinCollector(options, native);
   const active = new Set<Promise<void>>();
   let stopped = false;
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -30,6 +36,9 @@ export function startOpenworldScreenshotLoop(
       if (leases.length === 0) delay = 4000;
       for (const lease of leases) {
         const task = scan(lease)
+          .then(async (observation) => {
+            if (observation && !stopped) await skins(observation.scope, observation.sessions);
+          })
           .catch(() => failed(lease.server_id))
           .finally(() => active.delete(task));
         active.add(task);

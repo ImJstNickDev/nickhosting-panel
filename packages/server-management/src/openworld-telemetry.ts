@@ -105,6 +105,12 @@ export async function readOpenworldScope(
   serverId: string,
   reader?:
     | { who: AuthContext; resource: Resource | 'factories'; playerGrant?: OpenworldPlayerGrant }
+    | {
+        who: AuthContext;
+        resource: 'player';
+        playerGrant?: never;
+        savedSkin: { account: string; view: 'head' | 'body'; hash: string };
+      }
     | { who: AuthContext; resource: 'seed' }
     | { who: AuthContext; resource: 'rules'; ruleGrant?: 'rules.manage' | 'bans.manage' }
     | {
@@ -113,12 +119,12 @@ export async function readOpenworldScope(
         manageCheckpoints?: boolean;
         requirePlayerInspection?: boolean;
       },
-): Promise<OpenworldScope> {
+): Promise<OpenworldScope & { savedSkin?: Buffer }> {
   if (reader) assertAuthContext(reader.who);
   if (!z.uuid().safeParse(serverId).success) throw new DomainError('validation_failed');
   // Resolve current grants and the private instance binding together on every read,
   // including when the data can be served from a cross-reader cache.
-  const scope = await db
+  const query = db
     .selectFrom('managed_servers as server')
     .innerJoin('openworld_server_profiles as p', 'p.server_id', 'server.id')
     .innerJoin('runtime_egg_mappings as m', 'm.id', 'server.mapping_id')
@@ -170,8 +176,24 @@ export async function readOpenworldScope(
     .where('server.id', '=', serverId)
     .where('server.deleted_at', 'is', null)
     .where('m.game_id', '=', 'openworld')
-    .where('m.runtime_id', '=', 'dedicated')
-    .executeTakeFirst();
+    .where('m.runtime_id', '=', 'dedicated');
+  // A directory page may render forty portraits. Resolve each requested image
+  // in the same database snapshot as the current grants and instance identity.
+  const skin =
+    reader?.resource === 'player' && 'savedSkin' in reader ? reader.savedSkin : undefined;
+  const portrait = skin
+    ? await query
+        .leftJoin('openworld_player_skins as skin', (join) =>
+          join
+            .onRef('skin.server_id', '=', 'server.id')
+            .on('skin.account_id', '=', skin.account.toLowerCase())
+            .on('skin.skin_hash', '=', skin.hash),
+        )
+        .select('skin.binding as skin_binding')
+        .select((eb) => eb.ref(skin.view === 'head' ? 'skin.head_png' : 'skin.body_png').as('png'))
+        .executeTakeFirst()
+    : undefined;
+  const scope = skin ? portrait : await query.executeTakeFirst();
   if (!scope) throw new DomainError('not_found');
   let canManageCheckpoints = false;
   let canInspectPlayers = false;
@@ -248,13 +270,17 @@ export async function readOpenworldScope(
     scope.installation_state === 'installed' &&
     scope.runtime_state === 'running' &&
     scope.dashboard_credential_prepared;
+  const common = {
+    serverId,
+    version: scope.version,
+    binding,
+    liveKey,
+    canInspectPlayers,
+    ...(portrait?.skin_binding === binding && portrait.png ? { savedSkin: portrait.png } : {}),
+  };
   if (!ready)
     return {
-      serverId,
-      version: scope.version,
-      binding,
-      liveKey,
-      canInspectPlayers,
+      ...common,
       origin: '',
       reason: scope.runtime_state === 'offline' ? 'offline' : 'not_ready',
     };
@@ -271,12 +297,8 @@ export async function readOpenworldScope(
   const host =
     isIP(scope.backend_address) === 6 ? `[${scope.backend_address}]` : scope.backend_address;
   return {
-    serverId,
-    version: scope.version,
-    binding,
-    liveKey,
+    ...common,
     canManageCheckpoints,
-    canInspectPlayers,
     reason: null,
     origin: `http://${host}:${scope.port}`,
   };

@@ -12,10 +12,16 @@ import {
 } from '../../../packages/server-management/src/openworld-capture-index.js';
 import { createOpenworldPlayerActions } from '../../../packages/server-management/src/openworld-player-actions.js';
 import { createOpenworldPlayerChannel } from '../../../packages/server-management/src/openworld-player-channel.js';
-import { createOpenworldTelemetry } from '../../../packages/server-management/src/openworld-telemetry.js';
+import { createOpenworldPlayerDirectory } from '../../../packages/server-management/src/openworld-player-directory.js';
+import { createOpenworldSkinCollector } from '../../../packages/server-management/src/openworld-player-skins.js';
+import {
+  createOpenworldTelemetry,
+  readOpenworldScope,
+} from '../../../packages/server-management/src/openworld-telemetry.js';
 import { managementFixture } from '../../../packages/server-management/src/test-fixtures.js';
 import type { Variables } from './app.js';
 import { registerOpenworldPlayerActionRoutes } from './openworld-player-actions.js';
+import { registerOpenworldPlayerDirectoryRoutes } from './openworld-player-directory.js';
 import { registerOpenworldThumbnailRoute } from './openworld-screenshot-thumbnails.js';
 import { registerOpenworldScreenshotRoutes } from './openworld-screenshots.js';
 import { registerOpenworldTelemetryRoutes } from './openworld-telemetry.js';
@@ -225,6 +231,7 @@ async function fixture(capture?: (url: URL) => Response | undefined) {
   return {
     id,
     db,
+    principal: sub.context,
     grant,
     power,
     state,
@@ -860,4 +867,219 @@ it('checks the original image revision after transfer when a same-size file is r
   const preview = `/thumbnail?name=conn7-fixture.png&bytes=${capturePng.byteLength}&mtimeMs=${mtimeMs}`;
   expect((await galleryRead(preview)).status).toBe(404);
   expect(calls.slice(-3)).toEqual(['screenshots', 'screenshot', 'screenshots']);
+});
+
+it('archives both native skin views in the background and serves the exact revision after shutdown and permission recheck', async () => {
+  const account = randomUUID();
+  const skinHash = 'cafebabe';
+  const member = {
+    id: 2,
+    name: 'Ada',
+    account: account.toUpperCase(),
+    accountVerified: true,
+    admitted: true,
+    skinHash,
+  };
+  const avatars = {
+    head: capturePng,
+    body: Uint8Array.from(PNG.sync.write(new PNG({ width: 9, height: 18 }))),
+  };
+  const { db, id, principal, power, grant, calls, target, fetcher, state } = await fixture(
+    (url) => {
+      if (url.pathname === '/api/live/console') return Response.json({ last: 0, lines: [] });
+      if (url.pathname === '/api/live/players') return Response.json({ players: [member] });
+      if (url.pathname === '/api/live/skin')
+        return new Response(avatars[url.searchParams.get('view') as keyof typeof avatars], {
+          headers: { 'content-type': 'image/png' },
+        });
+    },
+  );
+  await power('running');
+  const options = { db, target, fetcher, now: () => state.now };
+  const capture = createOpenworldCaptureCollector(options);
+  const claim = (await claimOpenworldCaptureScans(db, 128)).find((l) => l.server_id === id);
+  if (!claim) throw Error('missing lease');
+  const observation = await capture(claim);
+  if (!observation) throw Error('missing observation');
+  expect(observation.sessions).toEqual([{ connection: 2, account }]);
+  const skins = createOpenworldSkinCollector(options);
+  await skins(observation.scope, observation.sessions);
+  expect(calls.filter((c) => c === 'skin')).toHaveLength(2);
+  const before = calls.length;
+  await skins(observation.scope, observation.sessions);
+  await skins(observation.scope, []);
+  expect(calls).toHaveLength(before);
+  await skins(observation.scope, observation.sessions);
+  expect(calls.filter((c) => c === 'skin')).toHaveLength(2);
+  await power('offline');
+  const fileScope = vi.fn(async () => {
+    throw Error('Unexpected file I/O');
+  });
+  let queries = 0;
+  const directory = createOpenworldPlayerDirectory(
+    db.withPlugin({
+      transformQuery: ({ node }) => node,
+      async transformResult({ result }) {
+        queries++;
+        return result;
+      },
+    }),
+    fileScope,
+  );
+  const app = new Hono<{ Variables: Variables }>();
+  app.onError((err, c) =>
+    c.json(
+      { error: err instanceof DomainError ? err.code : 'internal_error' },
+      err instanceof DomainError ? (err.status as 400) : 500,
+    ),
+  );
+  registerOpenworldPlayerDirectoryRoutes(app, { db, principal: async () => principal }, directory);
+  const endpoint = (view: string, h = skinHash, a: string = account) =>
+    app.request(`/v1/servers/${id}/openworld/players/saved/${a}/skin?h=${h}&view=${view}`);
+  const read = 'game.openworld.players.read',
+    inspect = 'game.openworld.players.inspect';
+  await grant(read, inspect);
+  const callsWhileOff = calls.length;
+  for (const view of ['head', 'body'] as const) {
+    const response = await endpoint(view);
+    expect(response.status).toBe(200);
+    expect(response.headers.get('cache-control')).toContain('no-store');
+    expect(response.headers.get('content-type')).toBe('image/png');
+    expect(new Uint8Array(await response.arrayBuffer())).toEqual(avatars[view]);
+  }
+  expect(queries).toBe(2);
+  expect((await endpoint('head', 'abcdef01')).status).toBe(404);
+  expect((await endpoint('head', skinHash, account.toUpperCase())).status).toBe(200);
+  expect((await endpoint('body', skinHash, randomUUID())).status).toBe(404);
+  expect((await endpoint('other')).status).toBe(400);
+  for (const keys of [[read], [inspect], ['game.openworld.players.moderate']]) {
+    await grant(...keys);
+    expect((await endpoint('head')).status).toBe(403);
+  }
+  await grant(read, inspect);
+  await db
+    .updateTable('openworld_server_profiles')
+    .set({ sha256: 'b'.repeat(64) })
+    .where('server_id', '=', id)
+    .execute();
+  expect((await endpoint('body')).status).toBe(404);
+  expect(calls).toHaveLength(callsWhileOff);
+  expect(fileScope).not.toHaveBeenCalled();
+});
+
+it('skips guest, ambiguous and reassigned connections and atomically refreshes a changed skin', async () => {
+  const account = randomUUID(),
+    replacement = randomUUID();
+  const first = {
+    id: 2,
+    name: 'Ada',
+    account,
+    accountVerified: true,
+    admitted: true,
+    skinHash: '1234abcd',
+  };
+  let roster = [first],
+    replaceDuringSkin = false,
+    invalid = false;
+  const { db, id, power, state, target, fetcher, calls } = await fixture((url) => {
+    if (url.pathname === '/api/live/players') return Response.json({ players: roster });
+    if (url.pathname === '/api/live/skin') {
+      if (replaceDuringSkin) roster = [{ ...first, account: replacement }];
+      const bytes =
+        invalid && url.searchParams.get('view') === 'body'
+          ? capturePng.subarray(0, 55)
+          : capturePng;
+      return new Response(bytes, { headers: { 'content-type': 'image/png' } });
+    }
+  });
+  await power('running');
+  const scope = await readOpenworldScope(db, id),
+    session = [{ connection: 2, account }];
+  const collect = createOpenworldSkinCollector({ db, target, fetcher, now: () => state.now });
+  const scan = async () => {
+    state.now += 61000;
+    await collect(scope, session);
+  };
+  const row = () =>
+    db
+      .selectFrom('openworld_player_skins')
+      .select('skin_hash')
+      .where('server_id', '=', id)
+      .executeTakeFirst();
+  roster = [{ ...first, accountVerified: false }];
+  await scan();
+  roster = [first, { ...first, id: 3, skinHash: '00000001' }];
+  await scan();
+  expect(calls).not.toContain('skin');
+  roster = [first];
+  replaceDuringSkin = true;
+  await scan();
+  expect(await row()).toBeUndefined();
+  roster = [first];
+  replaceDuringSkin = false;
+  await scan();
+  expect(await row()).toEqual({ skin_hash: first.skinHash });
+  roster = [{ ...first, skinHash: 'cafebabe' }];
+  invalid = true;
+  await scan();
+  expect(await row()).toEqual({ skin_hash: first.skinHash });
+  invalid = false;
+  await scan();
+  expect(await row()).toEqual({ skin_hash: 'cafebabe' });
+});
+
+it('bounds concurrent skin requests and rotates past a timed-out batch of accounts', async () => {
+  const roster = Array.from({ length: 6 }, (_, i) => ({
+    id: i + 1,
+    name: 'Player',
+    account: `10000000-0000-4000-8000-00000000000${i}`,
+    accountVerified: true,
+    admitted: true,
+    skinHash: '1234abcd',
+  }));
+  let abort = new AbortController();
+  const requested: number[] = [];
+  const { db, id, power, target, fetcher, state } = await fixture((url) => {
+    if (url.pathname === '/api/live/players') return Response.json({ players: roster });
+    if (url.pathname === '/api/live/skin') {
+      requested.push(Number(url.searchParams.get('id')));
+      return new Response(capturePng, { headers: { 'content-type': 'image/png' } });
+    }
+  });
+  await power('running');
+  const scope = await readOpenworldScope(db, id);
+  const collect = createOpenworldSkinCollector(
+    { db, target, fetcher, now: () => state.now },
+    (current, work) => work(current.origin, 'fixture1', abort.signal),
+  );
+  const sessions = roster.map((p) => ({ connection: p.id, account: p.account }));
+  const gate = Promise.withResolvers<void>();
+  let waiting = 0;
+  state.beforeReply = async (resource) => {
+    if (resource === 'skin') {
+      waiting++;
+      await gate.promise;
+    }
+  };
+  const first = collect(scope, sessions);
+  try {
+    await vi.waitFor(() => expect(waiting).toBe(8));
+  } finally {
+    abort.abort();
+    gate.resolve();
+    await expect(first).rejects.toThrow();
+  }
+  expect(new Set(requested)).toEqual(new Set([1, 2, 3, 4]));
+  requested.length = 0;
+  abort = new AbortController();
+  await collect(scope, sessions);
+  expect(new Set(requested.slice(0, 4))).toEqual(new Set([5, 6]));
+  expect(requested).toHaveLength(8);
+  expect(
+    await db
+      .selectFrom('openworld_player_skins')
+      .select('account_id')
+      .where('server_id', '=', id)
+      .execute(),
+  ).toHaveLength(4);
 });

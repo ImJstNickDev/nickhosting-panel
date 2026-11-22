@@ -47,6 +47,25 @@ export function registerOpenworldPlayerDirectoryRoutes(
     const { q, page, excludeAccounts } = parsed.data;
     return c.json(await directory.list(who, c.req.param('id'), q, page, excludeAccounts));
   });
+  app.get(`${base}/:uuid/skin`, async (c) => {
+    c.header('cache-control', 'private, no-store');
+    const who = await options.principal(c);
+    const view = c.req.query('view');
+    const hash = c.req.query('h');
+    if ((view !== 'head' && view !== 'body') || !hash || !/^[a-f0-9]{8}$/i.test(hash))
+      throw new DomainError('validation_failed');
+    const image = await directory.skin(
+      who,
+      c.req.param('id'),
+      c.req.param('uuid'),
+      view,
+      hash.toLowerCase(),
+    );
+    c.header('content-type', 'image/png');
+    c.header('x-content-type-options', 'nosniff');
+    c.header('content-security-policy', "default-src 'none'; sandbox");
+    return c.body(image);
+  });
   app.get(`${base}/:uuid`, async (c) => {
     c.header('cache-control', 'private, no-store');
     return c.json(

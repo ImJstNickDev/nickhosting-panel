@@ -1,4 +1,6 @@
+import { crc32, deflateSync } from 'node:zlib';
 import { expect, it, vi } from 'vitest';
+import { archiveSkinPng } from './archived-skin.js';
 import { OpenworldTokenExpired } from './dashboard-api.js';
 import { readOpenworldPlayerSkin } from './player-skin.js';
 
@@ -49,4 +51,38 @@ it('rejects mislabeled images, oversized pixels and oversized chunked bodies', a
     new Response(new Uint8Array(512 * 1024 + 1), { headers: { 'content-type': 'image/png' } }),
   ])
     await expect(read(response).result).rejects.toMatchObject({ code: 'integration_unavailable' });
+});
+
+function chunk(tag: string, data: Buffer) {
+  const framed = Buffer.alloc(12 + data.length);
+  framed.writeUInt32BE(data.length);
+  framed.write(tag, 4, 'ascii');
+  data.copy(framed, 8);
+  framed.writeUInt32BE(crc32(framed.subarray(4, -4)), framed.length - 4);
+  return framed;
+}
+
+it('archives only bounded, complete static pixels, stripping ancillary metadata', () => {
+  const header = png.subarray(0, 33);
+  const pixels = deflateSync(Buffer.from([0, 255, 255])); // one grayscale + alpha pixel
+  const idat = chunk('IDAT', pixels);
+  const end = chunk('IEND', Buffer.alloc(0));
+  const make = (...body: Buffer[]) => Buffer.concat([header, ...body, end]);
+  const canonical = make(idat);
+  expect(archiveSkinPng(make(chunk('tEXt', Buffer.from('source\0account')), idat))).toEqual(
+    canonical,
+  );
+  const corrupt = Buffer.from(canonical);
+  corrupt[corrupt.length - 1] = 0;
+  for (const bad of [
+    corrupt,
+    canonical.subarray(0, -1),
+    Buffer.concat([canonical, Buffer.from('unrelated')]),
+    make(chunk('IDAT', Buffer.concat([pixels, Buffer.from('unrelated')]))),
+    make(chunk('IDAT', deflateSync(Buffer.from([5, 0, 0])))),
+    make(chunk('IDAT', deflateSync(Buffer.alloc(10)))),
+    make(chunk('acTL', Buffer.alloc(8)), idat),
+  ]) {
+    expect(() => archiveSkinPng(bad)).toThrow();
+  }
 });

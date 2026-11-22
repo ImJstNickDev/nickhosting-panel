@@ -97,14 +97,21 @@ by about 57.4 seconds at 19.96 ticks/s and 9.2 seconds at 3.20 ticks/s.
 **Performance** adds tick timings, the game's
 recent metric history, chunks and storage. Both use the Openworld performance read
 permission. **Players** opens a searchable directory with connected players first. The
-Online filter shows current connections. Opening a player's detailed statistics,
+Online filter shows current connections. Select a player to open a dedicated page
+inside the server workspace. A verified account has a permanent profile link. The
+browser Back button returns to the directory. Opening a player's detailed statistics,
 position and inventory also requires the separate inspection permission. These tabs use
 the instance's private HTTP service and work with web publication turned off.
 
 Opening a tab reads its data on demand. Concurrent viewers share native reads. When the
 server is offline or its private API is unavailable, each panel shows the time of its
 last saved observation when one exists. Opening a tab leaves a sleeping server asleep.
-A current player connection provides the live body preview, ping and session controls.
+A current player connection provides ping and session controls. NickPanel archives the
+native head and body previews while it can verify the connected account. The directory
+and profile can show the most recently captured skin after the player disconnects and
+when the game is stopped. Viewing saved skins requires player inspection. Openworld
+a1.2.9 player saves contain no skin image. A player whose skin has never been captured
+gets their first archived preview on a subsequent observed connection.
 
 With inspection permission the same directory also searches saved profiles, including
 while the server is stopped. NickPanel joins live and saved records by verified account

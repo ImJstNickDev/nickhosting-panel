@@ -36,9 +36,11 @@ export async function claimOpenworldCaptureScans(db: DB, capacity: number) {
   return result.rows;
 }
 
-export function createOpenworldCaptureCollector(options: OpenworldNativeOptions) {
+export function createOpenworldCaptureCollector(
+  options: OpenworldNativeOptions,
+  native = createOpenworldNativeConnection(options),
+) {
   const { db } = options;
-  const native = createOpenworldNativeConnection(options);
   return async ({ server_id: id, lease }: Lease) => {
     const scope = await readOpenworldScope(db, id);
     if (scope.reason) return;
@@ -59,7 +61,7 @@ export function createOpenworldCaptureCollector(options: OpenworldNativeOptions)
       const result = await readCaptureEvidence(origin, token, signal, state, options.fetcher);
       return { state, ...result };
     });
-    await db.transaction().execute(async (tx) => {
+    return db.transaction().execute(async (tx) => {
       await tx
         .selectFrom('managed_servers')
         .select('id')
@@ -110,6 +112,7 @@ export function createOpenworldCaptureCollector(options: OpenworldNativeOptions)
           )
           .execute();
       }
+      return { scope, sessions: collected.state.sessions };
     });
   };
 }

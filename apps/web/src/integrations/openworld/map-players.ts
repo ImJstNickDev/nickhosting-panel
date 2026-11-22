@@ -1,12 +1,12 @@
 import { useQuery } from '@tanstack/react-query';
 import type { MapPlayer } from '../../../../../games/openworld/src/map-terrain.js';
 import { ApiError, api } from '../../api/client.js';
+import { playerPath } from './player-navigation.js';
 import type { ServerView } from './telemetry.js';
 
 export type { MapPlayer };
 
 type Point = { world: string; face: number; x: number; z: number; y?: number };
-type PlayerSelection = { id: number; name: string; joinedAt: number; processRef: string };
 const fragment = () => new URLSearchParams(window.location.hash.slice(1));
 function number(params: URLSearchParams, key: string) {
   const value = params.get(key);
@@ -40,31 +40,11 @@ export function mapHref(serverId: string, p: Point) {
   return `/servers/${encodeURIComponent(serverId)}/game/map#${hash}`;
 }
 export function playerHref(serverId: string, p: MapPlayer, processRef: string) {
-  const hash = new URLSearchParams({
-    player: String(p.id),
+  return playerPath(serverId, {
+    account: null,
     name: p.name,
-    joinedAt: String(p.joinedAt),
-    processRef,
+    connection: { id: p.id, name: p.name, joinedAt: p.joinedAt, processRef },
   });
-  return `/servers/${encodeURIComponent(serverId)}/game/players#${hash}`;
-}
-export function playerSelectionFromMap(): PlayerSelection | null {
-  const p = fragment(),
-    id = number(p, 'player'),
-    joinedAt = number(p, 'joinedAt'),
-    name = p.get('name'),
-    processRef = p.get('processRef');
-  return name &&
-    name.length <= 256 &&
-    processRef &&
-    /^[a-f0-9]{64}$/.test(processRef) &&
-    Number.isSafeInteger(id) &&
-    id >= 0 &&
-    id <= 0xffffffff &&
-    Number.isSafeInteger(joinedAt) &&
-    joinedAt > 0
-    ? { id, name, joinedAt, processRef }
-    : null;
 }
 export function useMapPlayers(
   server: ServerView,

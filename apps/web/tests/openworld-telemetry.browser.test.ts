@@ -17,7 +17,8 @@ beforeAll(async () => {
         name: 'openworld-telemetry-fixture',
         configureServer(server) {
           server.middlewares.use((req, res, next) => {
-            if (!req.url?.startsWith('/telemetry-fixture')) return next();
+            if (!req.url?.startsWith('/telemetry-fixture') && !req.url?.startsWith('/servers/'))
+              return next();
             res.setHeader('content-type', 'text/html');
             res.end(
               '<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>Openworld</title></head><body><div id="root"></div><script type="module" src="/tests/fixtures/openworld-telemetry-page.tsx"></script></body></html>',
@@ -199,25 +200,42 @@ it('opens live roster and pinned read-only details in English; a roster-only rea
     await check(page.getByRole('heading', { name: 'Players', exact: true })).toBeVisible();
     await page.getByRole('searchbox').fill('sol');
     await check(page.getByText('Northwind')).toHaveCount(0);
-    await page.getByRole('button', { name: /Solstice/ }).click();
-    await check(page.getByRole('dialog')).toContainText('80 / 100');
+    const player = page.getByRole('link', { name: /Solstice/ });
+    await player.click();
+    await check(page.getByRole('dialog')).toHaveCount(0);
+    await check(page.getByRole('searchbox')).toHaveCount(0);
+    await check(page.getByRole('heading', { name: 'Solstice' })).toBeFocused();
+    const directUrl = page.url();
+    expect(new URL(directUrl).pathname).toMatch(/\/game\/players\/connection\/23$/);
+    await check(page.locator('section.ow-profile')).toContainText('80 / 100');
     await page.getByRole('button', { name: 'Inventory', exact: true }).click();
-    await check(page.getByRole('dialog')).toContainText(
+    await check(page.locator('section.ow-profile')).toContainText(
       'The client has not reported an inventory yet.',
     );
     await page.getByRole('button', { name: 'Network', exact: true }).click();
-    await check(page.getByRole('dialog')).toContainText('60');
+    await check(page.locator('section.ow-profile')).toContainText('60');
     await page.getByRole('button', { name: 'Activity', exact: true }).click();
-    await check(page.getByRole('dialog')).toContainText('Blocks placed');
-    await page.keyboard.press('Escape');
-    await check(page.getByRole('dialog')).toHaveCount(0);
+    await check(page.locator('section.ow-profile')).toContainText('Blocks placed');
+    await page.goBack();
+    await check(page.locator('section.ow-profile')).toHaveCount(0);
+    await check(page.getByRole('searchbox')).toHaveValue('sol');
+    await check(player).toBeFocused();
+    await page.goForward();
+    await check(page.getByRole('region', { name: 'Solstice' })).toContainText('80 / 100');
+    expect(page.url()).toBe(directUrl);
+    await page.reload();
+    await check(page.getByRole('region', { name: 'Solstice' })).toContainText('80 / 100');
+    const detailReads = paths.filter((p) => p === 'players/23').length;
+    expect(detailReads).toBeGreaterThan(0);
+    await page.getByRole('link', { name: '← Players' }).click();
+    await check(page.locator('section.ow-profile')).toHaveCount(0);
     await page.getByRole('searchbox').fill('');
     await page.screenshot({ path: `${shots}/telemetry-players-en.png` });
     await fits(page);
     await page.goto(`${url}telemetry-fixture?section=players&reader`);
     await check(page.getByText('Solstice', { exact: true })).toBeVisible();
-    await check(page.getByRole('button', { name: /Solstice/ })).toHaveCount(0);
-    expect(paths.filter((p) => p === 'players/23')).toHaveLength(1);
+    await check(page.getByRole('link', { name: /Solstice/ })).toHaveCount(0);
+    expect(paths.filter((p) => p === 'players/23')).toHaveLength(detailReads);
   } finally {
     await context.close();
   }
@@ -512,7 +530,7 @@ it('labels observations from a stopped server and suppresses live detail actions
     await check(page.getByText('Il server è spento.')).toBeVisible();
     await check(page.locator('time')).toHaveAttribute('datetime', instant);
     await check(page.getByText('Solstice', { exact: true })).toBeVisible();
-    await check(page.getByRole('button', { name: /Solstice/ })).toHaveCount(0);
+    await check(page.getByRole('link', { name: /Solstice/ })).toHaveCount(0);
     await page.getByRole('button', { name: 'Online', exact: true }).click();
     await check(page.getByText('Solstice', { exact: true })).toHaveCount(0);
     await check(page.getByText('Nessun giocatore connesso.')).toBeVisible();
@@ -579,25 +597,25 @@ it('renders populated slots and requests skin only from the pinned NickPanel rou
       return route.fulfill({ status: 404 });
     });
     await page.goto(`${url}telemetry-fixture?section=players`);
-    await page.getByRole('button', { name: /Solstice/ }).click();
+    await page.getByRole('link', { name: /Solstice/ }).click();
     await page.getByRole('button', { name: 'Inventario', exact: true }).click();
-    const dialog = page.getByRole('dialog');
-    const pickaxe = dialog.getByRole('button', { name: /Piccone di ferro.*Selezionato/ });
+    const profile = page.locator('section.ow-profile');
+    const pickaxe = profile.getByRole('button', { name: /Piccone di ferro.*Selezionato/ });
     await check(pickaxe).toHaveAttribute('aria-pressed', 'true');
-    await check(dialog).toContainText('Quantità 2');
-    await check(dialog).toContainText('Usura 8 %');
+    await check(profile).toContainText('Quantità 2');
+    await check(profile).toContainText('Usura 8 %');
     await pickaxe.focus();
-    await check(dialog.getByRole('tooltip')).toContainText('Piccone di ferro');
-    const stone = dialog.getByRole('button', { name: /Slot 14 · Pietra/ });
+    await check(page.getByRole('tooltip')).toContainText('Piccone di ferro');
+    const stone = profile.getByRole('button', { name: /Slot 14 · Pietra/ });
     await check(stone.locator('.ow-item-tile')).toBeVisible();
     expect(
       await stone.locator('.ow-item-tile').evaluate((el) => getComputedStyle(el).backgroundImage),
     ).toContain('url(');
     await stone.click();
-    await check(dialog).toContainText('#16777217');
-    await check(dialog).toContainText('Quantità 48');
+    await check(profile).toContainText('#16777217');
+    await check(profile).toContainText('Quantità 48');
     await pickaxe.click();
-    await check(dialog).toContainText('#52428800');
+    await check(profile).toContainText('#52428800');
     await page.mouse.move(0, 0);
     await expect.poll(() => skin?.searchParams.get('h')).toBe('aa12bc34');
     expect(skin?.origin).toBe(new URL(url).origin);
@@ -605,13 +623,13 @@ it('renders populated slots and requests skin only from the pinned NickPanel rou
     expect(skin?.searchParams.get('joinedAt')).toBe(
       String(Date.parse(instant) - person.connectedS * 1000),
     );
-    expect(await dialog.evaluate((el) => el.scrollWidth <= el.clientWidth)).toBe(true);
-    const detailBounds = await dialog.locator('.ow-item-detail').boundingBox();
-    const modalBounds = await dialog.boundingBox();
+    expect(await profile.evaluate((el) => el.scrollWidth <= el.clientWidth)).toBe(true);
+    const detailBounds = await profile.locator('.ow-item-detail').boundingBox();
+    const profileBounds = await profile.boundingBox();
     expect(
       detailBounds &&
-        modalBounds &&
-        detailBounds.y + detailBounds.height <= modalBounds.y + modalBounds.height + 1,
+        profileBounds &&
+        detailBounds.y + detailBounds.height <= profileBounds.y + profileBounds.height + 1,
     ).toBe(true);
     await page.screenshot({ path: `${shots}/telemetry-inventory-it.png` });
     await fits(page);
@@ -628,8 +646,8 @@ it('drops roster and open detail when the same server switches to an assisted id
     await serve(page);
     await page.clock.install();
     await page.goto(`${url}telemetry-fixture?section=players`);
-    await page.getByRole('button', { name: /Solstice/ }).click();
-    await check(page.getByRole('dialog')).toContainText('80 / 100');
+    await page.getByRole('link', { name: /Solstice/ }).click();
+    await check(page.locator('section.ow-profile')).toContainText('80 / 100');
     await page.route('**/v1/web/session', (route) =>
       route.fulfill({ json: viewer('reader', true) }),
     );
@@ -647,7 +665,7 @@ it('drops roster and open detail when the same server switches to an assisted id
         .catch(() => {});
     });
     await page.clock.fastForward(30001);
-    await check(page.getByRole('dialog')).toHaveCount(0);
+    await check(page.locator('section.ow-profile')).toHaveCount(0);
     await check(page.getByText('Solstice', { exact: true })).toHaveCount(0);
     await check(page.getByText('Northwind', { exact: true })).toHaveCount(0);
     hold.resolve();
@@ -679,12 +697,12 @@ it('lets a moderator act on a pinned live session without reading player details
     });
     await page.goto(`${url}telemetry-fixture?section=players&reader&moderator`);
     await check(page.getByRole('button', { name: 'Saved players' })).toHaveCount(0);
-    await page.getByRole('button', { name: /Solstice/ }).click();
-    const dialog = page.getByRole('dialog');
-    await check(dialog.getByRole('button', { name: 'Inventory' })).toHaveCount(0);
-    await check(dialog.getByRole('option', { name: 'Request screenshot' })).toHaveCount(0);
-    await dialog.getByLabel('Private message').fill('Welcome back');
-    await dialog.getByRole('button', { name: 'Send message' }).click();
+    await page.getByRole('link', { name: /Solstice/ }).click();
+    const profile = page.locator('section.ow-profile');
+    await check(profile.getByRole('button', { name: 'Inventory' })).toHaveCount(0);
+    await check(profile.getByRole('option', { name: 'Request screenshot' })).toHaveCount(0);
+    await profile.getByLabel('Private message').fill('Welcome back');
+    await profile.getByRole('button', { name: 'Send message' }).click();
     await check(page.getByRole('status')).toContainText('Request accepted for Solstice');
     expect(sent).toHaveLength(1);
     expect(sent[0]).toMatchObject({
@@ -693,18 +711,18 @@ it('lets a moderator act on a pinned live session without reading player details
       action: { kind: 'message', text: 'Welcome back' },
     });
 
-    await check(dialog.getByLabel('Private message')).toHaveValue('');
-    await dialog.getByLabel('Action', { exact: true }).selectOption('kick');
-    await dialog.getByLabel('Reason (optional)').fill('Please reconnect after the server update.');
-    await dialog.getByRole('button', { name: 'Continue' }).click();
-    await check(dialog).toContainText('Disconnect Solstice from the server?');
+    await check(profile.getByLabel('Private message')).toHaveValue('');
+    await profile.getByLabel('Action', { exact: true }).selectOption('kick');
+    await profile.getByLabel('Reason (optional)').fill('Please reconnect after the server update.');
+    await profile.getByRole('button', { name: 'Continue' }).click();
+    await check(profile).toContainText('Disconnect Solstice from the server?');
     expect(sent).toHaveLength(1);
     await page.screenshot({ path: `${shots}/block2-kick-desktop.png` });
-    await dialog.getByRole('button', { name: 'Back' }).click();
+    await profile.getByRole('button', { name: 'Back' }).click();
     expect(sent).toHaveLength(1);
-    await dialog.getByRole('button', { name: 'Continue' }).click();
-    await dialog.getByRole('button', { name: 'Kick player' }).click();
-    await check(dialog.getByRole('status')).toContainText('Kick player');
+    await profile.getByRole('button', { name: 'Continue' }).click();
+    await profile.getByRole('button', { name: 'Kick player' }).click();
+    await check(profile.getByRole('status')).toContainText('Kick player');
     expect(sent[1]?.action).toEqual({
       kind: 'kick',
       reason: 'Please reconnect after the server update.',
@@ -742,28 +760,28 @@ it('validates teleport coordinates and prevents repeating an uncertain write', a
       });
     });
     await page.goto(`${url}telemetry-fixture?section=players&reader&moderator`);
-    await page.getByRole('button', { name: /Solstice/ }).click();
-    const dialog = page.getByRole('dialog');
-    await dialog.getByLabel('Azione', { exact: true }).selectOption('teleport');
-    await dialog.getByLabel('Destinazione', { exact: true }).selectOption('coordinates');
-    await dialog.getByLabel('Mondo', { exact: true }).selectOption('earth');
-    await dialog.getByLabel('Latitudine (°)').fill('91');
-    await dialog.getByLabel('Longitudine (°)').fill('11');
-    await dialog.getByRole('button', { name: 'Continua' }).click();
+    await page.getByRole('link', { name: /Solstice/ }).click();
+    const profile = page.locator('section.ow-profile');
+    await profile.getByLabel('Azione', { exact: true }).selectOption('teleport');
+    await profile.getByLabel('Destinazione', { exact: true }).selectOption('coordinates');
+    await profile.getByLabel('Mondo', { exact: true }).selectOption('earth');
+    await profile.getByLabel('Latitudine (°)').fill('91');
+    await profile.getByLabel('Longitudine (°)').fill('11');
+    await profile.getByRole('button', { name: 'Continua' }).click();
     expect(
-      await dialog
+      await profile
         .locator('input[name="lat"]')
         .evaluate((el) => (el as HTMLInputElement).validity.rangeOverflow),
     ).toBe(true);
-    await dialog.getByLabel('Latitudine (°)').fill('41');
-    await dialog.getByRole('button', { name: 'Continua' }).click();
-    await check(dialog).toContainText('Livello del terreno');
+    await profile.getByLabel('Latitudine (°)').fill('41');
+    await profile.getByRole('button', { name: 'Continua' }).click();
+    await check(profile).toContainText('Livello del terreno');
     await fits(page);
-    await dialog.getByRole('button', { name: 'Teletrasporta' }).click();
-    await check(dialog.getByRole('alert')).toBeVisible();
-    await check(dialog.getByRole('button', { name: 'Teletrasporta' })).toBeEnabled();
-    await dialog.getByRole('button', { name: 'Teletrasporta' }).click();
-    await check(dialog.getByRole('button', { name: 'Teletrasporta' })).toBeDisabled();
+    await profile.getByRole('button', { name: 'Teletrasporta' }).click();
+    await check(profile.getByRole('alert')).toBeVisible();
+    await check(profile.getByRole('button', { name: 'Teletrasporta' })).toBeEnabled();
+    await profile.getByRole('button', { name: 'Teletrasporta' }).click();
+    await check(profile.getByRole('button', { name: 'Teletrasporta' })).toBeDisabled();
     expect(sent).toHaveLength(2);
     expect(sent[0]).toMatchObject({
       action: {
@@ -819,18 +837,24 @@ it('opens persisted player saves while offline and keeps same-name accounts sepa
       'true',
     );
     await check(page.getByRole('status')).toContainText('indice');
-    await page.getByRole('button', { name: new RegExp(archiveId) }).click();
-    const dialog = page.getByRole('dialog');
-    await check(dialog).toContainText(archiveId);
-    await check(dialog).toContainText('Ultimo salvataggio');
-    await dialog.getByRole('button', { name: 'Inventario', exact: true }).click();
-    await check(dialog).toContainText('Barra rapida');
-    await check(dialog).toContainText('Quantità 24');
-    await check(dialog).toContainText('#71');
+    await page.getByRole('link', { name: new RegExp(archiveId) }).click();
+    const profile = page.locator('section.ow-profile');
+    await check(profile).toContainText(archiveId);
+    await check(profile).toContainText('Ultimo salvataggio');
+    await profile.getByRole('button', { name: 'Inventario', exact: true }).click();
+    await check(profile).toContainText('Barra rapida');
+    await check(profile).toContainText('Quantità 24');
+    await check(profile).toContainText('#71');
     await fits(page);
     await page.screenshot({ path: `${shots}/block2-save-mobile.png` });
     expect(savedCalls).toHaveLength(1);
     expect(savedCalls[0]).toContain(`/saved/${archiveId}`);
+    const accountUrl = page.url();
+    expect(new URL(accountUrl).pathname).toMatch(new RegExp(`/game/players/${archiveId}$`));
+    await page.goto('about:blank');
+    await page.goto(accountUrl);
+    await check(page.getByRole('region', { name: 'Solstice' })).toContainText('Ultimo salvataggio');
+    await check(page.getByRole('dialog')).toHaveCount(0);
     expect(paths.some((p) => p.startsWith('players/'))).toBe(false);
   } finally {
     await context.close();
@@ -859,9 +883,9 @@ it('opens linked history using the verified account id and keeps screenshot perm
       r.fulfill({ status: 404, json: { error: { code: 'not_found' } } }),
     );
     await page.goto(`${url}telemetry-fixture?section=players`);
-    await page.getByRole('button', { name: /Solstice/ }).click();
+    await page.getByRole('link', { name: /Solstice/ }).click();
     await page.getByRole('button', { name: 'Last save', exact: true }).click();
-    await check(page.getByRole('dialog')).toContainText('No save found for this UUID.');
+    await check(page.locator('section.ow-profile')).toContainText('No save found for this UUID.');
     await page.goto(`${url}telemetry-fixture?section=players&reader&screenshots`);
     const files = Array.from({ length: 9 }, (_, i) => ({
       name: `capture-${i}.png`,
@@ -894,11 +918,11 @@ it('opens linked history using the verified account id and keeps screenshot perm
         ),
       });
     });
-    await page.getByRole('button', { name: /Solstice/ }).click();
-    const dialog = page.getByRole('dialog');
-    await check(dialog.getByRole('option', { name: 'Kick player' })).toHaveCount(0);
-    await dialog.getByRole('button', { name: 'Continue' }).click();
-    await dialog.getByRole('button', { name: 'Request screenshot' }).click();
+    await page.getByRole('link', { name: /Solstice/ }).click();
+    const profile = page.locator('section.ow-profile');
+    await check(profile.getByRole('option', { name: 'Kick player' })).toHaveCount(0);
+    await profile.getByRole('button', { name: 'Continue' }).click();
+    await profile.getByRole('button', { name: 'Request screenshot' }).click();
     await page.getByRole('button', { name: 'Open screenshots' }).click();
     await check(page.getByRole('button', { name: /capture-7/ })).toBeVisible();
     await check(page.getByRole('button', { name: /capture-8/ })).toHaveCount(0);
@@ -906,7 +930,7 @@ it('opens linked history using the verified account id and keeps screenshot perm
     await expect.poll(() => thumbs.length).toBeGreaterThan(0);
     await page.getByRole('button', { name: 'Next' }).click();
     await page.getByRole('button', { name: /capture-8/ }).click();
-    await check(dialog.getByRole('img')).toBeVisible();
+    await check(page.getByRole('dialog', { name: 'capture-8.png' }).getByRole('img')).toBeVisible();
     await expect.poll(() => imgs.length).toBe(1);
     expect(Object.fromEntries(new URL(imgs[0] ?? '').searchParams)).toEqual({
       name: 'capture-8.png',
@@ -1030,16 +1054,16 @@ it('keeps the verified profile and active pane when the player leaves, and fetch
       return r.fulfill({ json: { files: [] } });
     });
     await page.goto(`${url}telemetry-fixture?section=players&screenshots`);
-    await check(page.getByRole('button', { name: /Solstice/ })).toHaveCount(2);
+    await check(page.getByRole('link', { name: /Solstice/ })).toHaveCount(2);
     await expect
       .poll(() => excluded.some((ids) => ids.length === 1 && ids[0] === archiveId))
       .toBe(true);
-    await check(page.getByRole('button', { name: /Mistral/ })).toBeVisible();
+    await check(page.getByRole('link', { name: /Mistral/ })).toBeVisible();
     await page.screenshot({ path: `${shots}/players-unified-directory-en.png` });
     await page.getByRole('searchbox').fill('old');
-    await check(page.getByRole('button', { name: /Old Solstice/ })).toBeVisible();
-    await page.getByRole('button', { name: /Old Solstice/ }).click();
-    const profile = page.getByRole('dialog', { name: 'Solstice' });
+    await check(page.getByRole('link', { name: /Old Solstice/ })).toBeVisible();
+    await page.getByRole('link', { name: /Old Solstice/ }).click();
+    const profile = page.getByRole('region', { name: 'Solstice' });
     await check(profile).toContainText('80 / 100');
     await expect
       .poll(() => skinRequests.some((u) => u.searchParams.get('view') === 'body'))
@@ -1098,15 +1122,15 @@ it('opens only the server gallery for an unverified connection with the same nic
       }),
     );
     await page.goto(`${url}telemetry-fixture?section=players&screenshots`);
-    await check(page.getByRole('button', { name: /Solstice/ })).toHaveCount(2);
+    await check(page.getByRole('link', { name: /Solstice/ })).toHaveCount(2);
     await page.getByRole('button', { name: 'Online', exact: true }).click();
-    await check(page.getByRole('button', { name: /Solstice/ })).toHaveCount(1);
-    await page.getByRole('button', { name: /Solstice/ }).click();
-    const profile = page.getByRole('dialog');
+    await check(page.getByRole('link', { name: /Solstice/ })).toHaveCount(1);
+    await page.getByRole('link', { name: /Solstice/ }).click();
+    const profile = page.locator('section.ow-profile');
     await check(profile).toContainText('80 / 100');
     await check(profile.getByRole('button', { name: 'Screenshot', exact: true })).toHaveCount(0);
     expect(calls).toHaveLength(0);
-    await page.keyboard.press('Escape');
+    await page.getByRole('link', { name: /^← (Players|Giocatori)$/ }).click();
     await page.getByRole('button', { name: 'Screenshot del server' }).click();
     await check(page.getByRole('heading', { name: 'Screenshot del server' })).toBeVisible();
     await check(page.getByText('Nessuno screenshot ricevuto.')).toBeVisible();
@@ -1142,8 +1166,8 @@ it('closes personal captures and resumes the character when screenshot access is
     );
     await page.route('**/openworld/screenshots/thumbnail?*', (r) => r.fulfill({ status: 404 }));
     await page.goto(`${url}telemetry-fixture?section=players&screenshots`);
-    await page.getByRole('button', { name: /Solstice/ }).click();
-    const d = page.getByRole('dialog');
+    await page.getByRole('link', { name: /Solstice/ }).click();
+    const d = page.locator('section.ow-profile');
     await d.getByRole('button', { name: 'Screenshots', exact: true }).click();
     await check(d.getByRole('button', { name: /private.png/ })).toBeVisible();
     await page.evaluate(() =>
@@ -1300,25 +1324,25 @@ it('groups confirmed simultaneous connections and never retargets a prepared mod
       return r.fulfill({ status: 409 });
     });
     await page.goto(`${url}telemetry-fixture?section=players&moderator`);
-    const row = page.getByRole('button', { name: /Solstice/ });
+    const row = page.getByRole('link', { name: /Solstice/ });
     await check(row).toHaveCount(1);
     await check(row).toContainText('Solstice II');
     await check(row).toContainText('2 connections');
     await row.click();
-    const dialog = page.getByRole('dialog');
-    await dialog.getByRole('button', { name: 'Actions', exact: true }).click();
-    await check(dialog.getByRole('combobox', { name: 'Action', exact: true })).toHaveCount(0);
-    await dialog.getByRole('combobox', { name: 'Session', exact: true }).selectOption('23');
-    await dialog.getByRole('combobox', { name: 'Action', exact: true }).selectOption('kill');
-    await dialog.getByRole('button', { name: 'Continue' }).click();
-    await check(dialog).toContainText('Kill the character of Solstice?');
+    const profile = page.locator('section.ow-profile');
+    await profile.getByRole('button', { name: 'Actions', exact: true }).click();
+    await check(profile.getByRole('combobox', { name: 'Action', exact: true })).toHaveCount(0);
+    await profile.getByRole('combobox', { name: 'Session', exact: true }).selectOption('23');
+    await profile.getByRole('combobox', { name: 'Action', exact: true }).selectOption('kill');
+    await profile.getByRole('button', { name: 'Continue' }).click();
+    await check(profile).toContainText('Kill the character of Solstice?');
     connected = [secondary];
     await page.clock.fastForward(6000);
-    await check(dialog.getByRole('button', { name: 'Kill character' })).toHaveCount(0);
-    await check(dialog.getByRole('combobox', { name: 'Session', exact: true })).toHaveValue('');
-    await dialog.getByRole('combobox', { name: 'Session', exact: true }).selectOption('73');
-    await check(dialog).toHaveAccessibleName('Solstice II');
-    await check(dialog.getByRole('combobox', { name: 'Action', exact: true })).toHaveValue(
+    await check(profile.getByRole('button', { name: 'Kill character' })).toHaveCount(0);
+    await check(profile.getByRole('combobox', { name: 'Session', exact: true })).toHaveValue('');
+    await profile.getByRole('combobox', { name: 'Session', exact: true }).selectOption('73');
+    await check(profile).toHaveAccessibleName('Solstice II');
+    await check(profile.getByRole('combobox', { name: 'Action', exact: true })).toHaveValue(
       'message',
     );
     await fits(page);
@@ -1335,11 +1359,11 @@ it('disables a prepared action when the same player id appears in another game p
     await serve(page);
     await page.clock.install();
     await page.goto(`${url}telemetry-fixture?section=players&reader&moderator`);
-    await page.getByRole('button', { name: /Solstice/ }).click();
-    const dialog = page.getByRole('dialog');
-    await dialog.getByLabel('Action', { exact: true }).selectOption('kill');
-    await dialog.getByRole('button', { name: 'Continue' }).click();
-    await check(dialog).toContainText('Kill the character of Solstice?');
+    await page.getByRole('link', { name: /Solstice/ }).click();
+    const profile = page.locator('section.ow-profile');
+    await profile.getByLabel('Action', { exact: true }).selectOption('kill');
+    await profile.getByRole('button', { name: 'Continue' }).click();
+    await check(profile).toContainText('Kill the character of Solstice?');
     await page.route('**/telemetry/players', (r) =>
       r.fulfill({
         json: {
@@ -1352,8 +1376,8 @@ it('disables a prepared action when the same player id appears in another game p
       }),
     );
     await page.clock.fastForward(6000);
-    await check(dialog.getByRole('button', { name: 'Kill character' })).toHaveCount(0);
-    await check(dialog).toContainText('This player has left the server.');
+    await check(profile.getByRole('button', { name: 'Kill character' })).toHaveCount(0);
+    await check(profile).toContainText('This player has left the server.');
   } finally {
     await context.close();
   }
@@ -1371,10 +1395,11 @@ it('opens the exact connected player from a map marker and links back to their l
     });
     const target = `${url}telemetry-fixture?section=players&mapAccess#`;
     await page.goto(target + fromMap);
-    const dialog = page.getByRole('dialog', { name: 'Solstice' });
+    const dialog = page.getByRole('region', { name: 'Solstice' });
     await check(dialog).toBeVisible();
     const link = dialog.getByRole('link', { name: 'Show on map' });
     await check(link).toBeVisible();
+    expect(new URL(page.url()).pathname).toMatch(/\/game\/players\/connection\/23$/);
     const href = new URL((await link.getAttribute('href')) ?? '', url);
     expect(href.pathname).toBe('/servers/10000000-0000-4000-8000-000000000001/game/map');
     expect(Object.fromEntries(new URLSearchParams(href.hash.slice(1)))).toMatchObject({
@@ -1388,10 +1413,42 @@ it('opens the exact connected player from a map marker and links back to their l
     await page.goto('about:blank');
     const start = paths.length;
     await page.goto(target + fromMap);
-    await check(page.getByRole('dialog')).toBeVisible();
+    await check(page.locator('section.ow-profile')).toBeVisible();
     await check(page.getByRole('link', { name: 'Show on map' })).toHaveCount(0);
     await check(page.getByText('Solstice', { exact: true }).first()).toBeVisible();
     expect(paths.slice(start)).not.toContain('players/23');
+
+    await mapRoutes(page);
+    const processRef = 'f'.repeat(64);
+    await page.route('**/openworld/map/players?*', (r) =>
+      r.fulfill({
+        json: {
+          processRef,
+          players: [
+            {
+              id: 23,
+              name: person.name,
+              world: 'earth',
+              face: 0,
+              x: 129,
+              z: 128,
+              joinedAt: Number(fromMap.get('joinedAt')),
+            },
+          ],
+        },
+      }),
+    );
+    await page.route('**/openworld/telemetry/players', (r) =>
+      r.fulfill({
+        json: { source: 'live', observedAt: instant, processRef, data: { players: [person] } },
+      }),
+    );
+    await page.goto(`${url}telemetry-fixture?section=map#world=earth&face=0&x=128&z=128`);
+    await page.getByLabel('Show players').check();
+    const marker = page.getByRole('link', { name: 'Open player Solstice' });
+    await check(marker).toHaveAttribute('href', /\/players\/connection\/23#/);
+    await marker.click();
+    await check(page.getByRole('region', { name: 'Solstice' })).toContainText('80 / 100');
   } finally {
     await page.close();
   }
@@ -2081,6 +2138,82 @@ it('keeps reader-only space and factory positions accessible on mobile without r
     await check(page.getByRole('heading', { name: 'Earth', exact: true })).toBeVisible();
     expect(paths.some((p) => p.pathname.endsWith('/players'))).toBe(false);
     expect(paths.some((p) => p.pathname.endsWith('/creatures'))).toBe(false);
+  } finally {
+    await context.close();
+  }
+});
+
+it('shows the archived head and body on a cold visit while the game is offline', async () => {
+  const context = await browser.newContext({
+    viewport: { width: 390, height: 844 },
+    locale: 'it-IT',
+  });
+  try {
+    const page = await context.newPage();
+    const native = await serve(page, true);
+    const archived = { uuid: archiveId, name: 'Selene', savedAt: instant, skinHash: 'ac1d0042' };
+    await page.route('**/openworld/players/saved/search', (route) =>
+      route.fulfill({
+        json: {
+          players: [archived, { uuid: 'guest:sol', name: 'Sol', savedAt: instant, skinHash: null }],
+          total: 2,
+          page: 1,
+          indexedAt: instant,
+          stale: false,
+          indexing: false,
+        },
+      }),
+    );
+    await page.route(`**/players/saved/${archiveId}`, (route) =>
+      route.fulfill({
+        json: {
+          ...archived,
+          statsAt: null,
+          mode: 'survival',
+          world: 'Earth',
+          position: null,
+          inventory: null,
+          stats: null,
+        },
+      }),
+    );
+    const skinReads: string[] = [];
+    await page.route('**/players/saved/*/skin?*', (route) => {
+      const target = new URL(route.request().url());
+      skinReads.push(`${target.pathname}${target.search}`);
+      return route.fulfill({
+        contentType: 'image/png',
+        body: Buffer.from(
+          'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAOgeONsAAAAASUVORK5CYII=',
+          'base64',
+        ),
+      });
+    });
+    await page.goto(`${url}telemetry-fixture?section=players&offline`);
+    const entry = page.getByRole('link', { name: /Selene/ });
+    await check(entry.locator('img')).toBeVisible();
+    await expect
+      .poll(() => entry.locator('img').evaluate((node) => (node as HTMLImageElement).naturalWidth))
+      .toBeGreaterThan(0);
+    await entry.click();
+    const profile = page.getByRole('region', { name: 'Selene', exact: true });
+    const body = profile.locator('.ow-body-skin img');
+    await check(body).toBeVisible();
+    await expect
+      .poll(() => body.evaluate((node) => (node as HTMLImageElement).naturalWidth))
+      .toBeGreaterThan(0);
+    expect(skinReads.map((path) => new URL(path, url).searchParams.get('view'))).toEqual([
+      'head',
+      'body',
+    ]);
+    expect(
+      skinReads.every(
+        (path) =>
+          path.includes(`/${archiveId}/skin?`) &&
+          new URL(path, url).searchParams.get('h') === archived.skinHash,
+      ),
+    ).toBe(true);
+    expect(native.some((path) => path.endsWith('/skin'))).toBe(false);
   } finally {
     await context.close();
   }

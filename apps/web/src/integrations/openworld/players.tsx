@@ -1,8 +1,8 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
+import { Link, Navigate, useLocation, useNavigate, useParams } from 'react-router';
 import { useT } from '../../app/i18n.js';
 import { ErrorNotice, Loading } from '../../components/ui.js';
 import { Pagination, SearchField } from '../../components/workspace-controls.js';
-import { playerSelectionFromMap } from './map-players.js';
 import { PlayerGallery } from './player-gallery.js';
 import {
   connection,
@@ -10,10 +10,17 @@ import {
   PlayerArt,
   type Profile,
   people,
+  playerParams,
   samePlayer,
   usePlayerFormat,
   verifiedAccount,
 } from './player-identity.js';
+import {
+  playerPath,
+  playersPath,
+  profileFromRoute,
+  sessionFromFragment,
+} from './player-navigation.js';
 import { PlayerProfile } from './player-profile.js';
 import { useSavedDirectory } from './saved-players.js';
 import {
@@ -36,17 +43,25 @@ function Players(props: TelemetryViewProps) {
   const screenshots = props.permissionKeys.includes('game.openworld.players.screenshots');
   const mapAccess = props.permissionKeys.includes('game.openworld.map.read');
   const [filter, setFilter] = useState<'all' | 'online'>('all');
-  const [gallery, setGallery] = useState(false);
+  const location = useLocation();
+  const navigate = useNavigate();
+  const detailPath = useParams()['*'] ?? '';
+  const basePath = playersPath(props.serverId);
+  const viewer = JSON.stringify(props.viewerScope);
+  const foreignEntry = !!location.state?.owViewer && location.state.owViewer !== viewer;
+  const legacySession =
+    !detailPath && inspect && mapAccess ? sessionFromFragment(location.hash) : null;
+  const legacy =
+    legacySession?.processRef && legacySession.joinedAt !== null ? legacySession : null;
+  const selected = foreignEntry ? null : profileFromRoute(detailPath, location.hash);
+  const hasProfile = !!(detailPath || legacy);
+  const lastRow = useRef<string | null>(null);
   const [watchUntil, setWatchUntil] = useState(0);
   const [search, setSearch] = useState('');
   const [q, setQuery] = useState('');
   const [page, setPage] = useState(1);
-  const [selected, setSelected] = useState<Profile | null>(() => {
-    const session = inspect && mapAccess ? playerSelectionFromMap() : null;
-    return session ? { connection: session, name: session.name, account: null } : null;
-  });
-  const galleryOpen = gallery && screenshots;
-  const showHistory = inspect && filter === 'all';
+  const galleryOpen = !detailPath && location.hash === '#screenshots' && screenshots;
+  const showHistory = !hasProfile && inspect && filter === 'all';
   const roster = useTelemetry(props, 'players', 'players', !galleryOpen);
   const observation = !roster.error ? roster.data : undefined;
   const current = observation?.source === 'live' && props.runtimeState === 'running';
@@ -67,6 +82,16 @@ function Players(props: TelemetryViewProps) {
     page,
     exclude,
   );
+  useEffect(() => {
+    const id = lastRow.current;
+    if (hasProfile || !id) return;
+    const target = document.querySelector<HTMLAnchorElement>(
+      `[data-ow-player="${CSS.escape(id)}"]`,
+    );
+    if (!target && (roster.isPending || (showHistory && saved.isPending))) return;
+    lastRow.current = null;
+    target?.focus();
+  }, [hasProfile, roster.isPending, showHistory, saved.isPending]);
   const history = showHistory && !saved.error ? saved.data : undefined;
   const pages = Math.max(1, Math.ceil((history?.total ?? 0) / 40));
   useEffect(() => {
@@ -94,20 +119,62 @@ function Players(props: TelemetryViewProps) {
       if (list) list.push(p);
       else sessionsByAccount.set(account, [p]);
     }
-  const openLive = (p: Player) => {
+  const liveProfile = (p: Player): Profile => {
     const account = inspect ? verifiedAccount(p) : null;
     const multiple = account && (sessionsByAccount.get(account)?.length ?? 0) > 1;
-    setSelected({ name: p.name, account, connection: multiple ? null : sessionFor(p) });
+    return { name: p.name, account, connection: current && !multiple ? sessionFor(p) : null };
   };
+  const entryState = (p: Profile) => ({
+    owViewer: viewer,
+    owName: p.name,
+    owVisit: playerPath(props.serverId, p),
+  });
   const pinned = selected?.connection;
+  const candidate =
+    pinned && current ? live.find((p) => samePlayer(sessionFor(p), pinned)) : undefined;
+  // Some server versions verify accounts only in the individual player response.
+  // For a pinned account permalink, require that proof before exposing live controls.
+  const needsIdentity = !!(
+    inspect &&
+    selected?.account &&
+    candidate &&
+    !verifiedAccount(candidate)
+  );
+  const proof = useTelemetry(
+    props,
+    'player',
+    pinned ? `players/${pinned.id}?${playerParams(pinned)}` : 'players',
+    needsIdentity,
+  );
+  const evidence =
+    needsIdentity && !proof.error && proof.data?.source === 'live' ? proof.data : null;
+  const detail = evidence?.data;
+  const verifiedDetail =
+    detail &&
+    pinned &&
+    samePlayer(
+      pinned,
+      connection(detail, evidence?.observedAt ?? null, evidence?.processRef ?? pinned.processRef),
+    )
+      ? verifiedAccount(detail)
+      : null;
   const matching =
-    pinned && current
-      ? live.find(
-          (p) =>
-            samePlayer(sessionFor(p), pinned) &&
-            (!selected.account || !verifiedAccount(p) || verifiedAccount(p) === selected.account),
-        )
+    candidate &&
+    (!selected?.account || (verifiedAccount(candidate) ?? verifiedDetail) === selected.account)
+      ? candidate
       : undefined;
+  const profile = selected
+    ? {
+        ...selected,
+        name:
+          matching?.name ??
+          selected.connection?.name ??
+          (location.state?.owViewer === viewer && typeof location.state.owName === 'string'
+            ? location.state.owName
+            : null) ??
+          selected.name,
+      }
+    : null;
   const targets = current
     ? live.flatMap((p) => {
         const session = sessionFor(p);
@@ -147,12 +214,76 @@ function Players(props: TelemetryViewProps) {
     void roster.refetch();
     if (showHistory) void saved.refetch();
   };
+  const replaceProfile = (p: Profile) =>
+    void navigate(playerPath(props.serverId, p), {
+      replace: true,
+      state: { ...entryState(p), owVisit: location.state?.owVisit ?? detailPath },
+    });
+  if (foreignEntry && detailPath) return <Navigate replace to={basePath} />;
+  if (legacy) {
+    const target = { name: legacy.name, account: null, connection: legacy };
+    return <Navigate replace to={playerPath(props.serverId, target)} state={entryState(target)} />;
+  }
+  if (detailPath) {
+    const allowed = canOpen && (!profile?.account || inspect);
+    if (!profile || !allowed)
+      return (
+        <div className="ow-workspace">
+          <Link to={basePath}>← {t(key('players'))}</Link>
+          <p role="alert">{t(allowed ? 'web.errors.notFound' : 'errors.forbidden')}</p>
+        </div>
+      );
+    if (profile.account && !profile.connection && !location.state?.owViewer && current) {
+      const sessions = sessionsByAccount.get(profile.account);
+      const member = sessions?.length === 1 ? sessions[0] : undefined;
+      const bound = member
+        ? { ...profile, name: member.name, connection: sessionFor(member) }
+        : profile;
+      return <Navigate replace to={playerPath(props.serverId, bound)} state={entryState(bound)} />;
+    }
+    return (
+      <div className="ow-workspace ow-people">
+        <PlayerProfile
+          key={location.state?.owVisit ?? detailPath}
+          server={props}
+          selected={profile}
+          connected={matching}
+          accountSessions={
+            (inspect && profile.account ? sessionsByAccount.get(profile.account) : undefined) ?? []
+          }
+          onChooseSession={(p) =>
+            replaceProfile({ ...profile, name: p.name, connection: sessionFor(p) })
+          }
+          onIdentify={(id) => {
+            if (!profile.account && profile.connection) replaceProfile({ ...profile, account: id });
+          }}
+          version={observation?.gameVersion}
+          pendingRoster={roster.isPending || (needsIdentity && proof.isPending)}
+          rosterReason={
+            roster.error ? 'unreachable' : !current ? (observation?.reason ?? 'unavailable') : null
+          }
+          inspect={inspect}
+          moderate={moderate}
+          screenshots={screenshots}
+          mapAccess={mapAccess}
+          otherPlayers={targets}
+          watchUntil={watchUntil}
+          onRequestAccepted={(receipt) => {
+            if (receipt.kind === 'screenshot') setWatchUntil(Date.now() + 30000);
+            void roster.refetch();
+          }}
+          onServerGallery={() => void navigate(`${basePath}#screenshots`)}
+          backTo={basePath}
+        />
+      </div>
+    );
+  }
   return (
     <div className="ow-workspace ow-people">
       {galleryOpen ? (
         <>
           <div>
-            <button type="button" className="secondary" onClick={() => setGallery(false)}>
+            <button type="button" className="secondary" onClick={() => void navigate(basePath)}>
               {t('web.back')}
             </button>
           </div>
@@ -169,7 +300,11 @@ function Players(props: TelemetryViewProps) {
             <h2>{t(key('players'))}</h2>
             <div className="ow-people-commands">
               {screenshots && (
-                <button type="button" className="secondary" onClick={() => setGallery(true)}>
+                <button
+                  type="button"
+                  className="secondary"
+                  onClick={() => void navigate(`${basePath}#screenshots`)}
+                >
                   {t(people('serverGallery'))}
                 </button>
               )}
@@ -232,7 +367,8 @@ function Players(props: TelemetryViewProps) {
           <ul className="ow-roster ow-people-list">
             {rosterRows.map((p) => {
               const session = sessionFor(p);
-              const sessions = sessionsByAccount.get(verifiedAccount(p) ?? '') ?? [];
+              const account = inspect ? verifiedAccount(p) : null;
+              const sessions = sessionsByAccount.get(account ?? '') ?? [];
               const multiple = sessions.length > 1;
               const alternateNames = multiple
                 ? [...new Set(sessions.map((s) => s.name))].filter((n) => n !== p.name)
@@ -251,6 +387,7 @@ function Players(props: TelemetryViewProps) {
                     serverId={props.serverId}
                     session={current ? session : null}
                     hash={p.skinHash}
+                    savedSkin={account ? { account, hash: p.skinHash } : undefined}
                   />
                   <span className="ow-person">
                     <strong>{p.name}</strong>
@@ -274,12 +411,21 @@ function Players(props: TelemetryViewProps) {
                   </span>
                 </>
               );
+              const target = liveProfile(p);
               return (
                 <li key={`session/${p.id}/${p.name}`}>
-                  {canOpen && current ? (
-                    <button type="button" className="ow-player-link" onClick={() => openLive(p)}>
+                  {canOpen && (current || target.account) ? (
+                    <Link
+                      className="ow-player-link"
+                      to={playerPath(props.serverId, target)}
+                      state={entryState(target)}
+                      data-ow-player={`live-${p.id}`}
+                      onClick={() => {
+                        lastRow.current = `live-${p.id}`;
+                      }}
+                    >
                       {identity}
-                    </button>
+                    </Link>
                   ) : (
                     <div className="ow-player-label">{identity}</div>
                   )}
@@ -310,26 +456,26 @@ function Players(props: TelemetryViewProps) {
                 : row.savedAt
                   ? f.stamp(row.savedAt)
                   : null;
+              const target = online
+                ? liveProfile(online)
+                : { name: row.name || row.uuid, account: row.uuid, connection: null };
               return (
                 <li key={`account/${row.uuid}`}>
-                  <button
+                  <Link
                     className="ow-player-link"
-                    type="button"
-                    onClick={() =>
-                      online
-                        ? openLive(online)
-                        : setSelected({
-                            name: row.name || row.uuid,
-                            account: row.uuid,
-                            connection: null,
-                          })
-                    }
+                    to={playerPath(props.serverId, target)}
+                    state={entryState(target)}
+                    data-ow-player={`saved-${row.uuid}`}
+                    onClick={() => {
+                      lastRow.current = `saved-${row.uuid}`;
+                    }}
                   >
                     <PlayerArt
                       name={row.name ?? row.uuid}
                       serverId={props.serverId}
                       session={online ? sessionFor(online) : null}
                       hash={online?.skinHash}
+                      savedSkin={{ account: row.uuid, hash: row.skinHash }}
                     />
                     <span className="ow-person">
                       <strong>{row.name || row.uuid}</strong>
@@ -351,7 +497,7 @@ function Players(props: TelemetryViewProps) {
                         {online && row.name !== online.name && <> · {online.name}</>}
                       </small>
                     </span>
-                  </button>
+                  </Link>
                   {date && (
                     <span className="ow-directory-date">
                       {t(people(numeric(row.lastSeenMs) ? 'lastVisitAt' : 'lastSaveAt'), {
@@ -399,45 +545,6 @@ function Players(props: TelemetryViewProps) {
             />
           )}
         </section>
-      )}
-      {!galleryOpen && selected && canOpen && (inspect || selected.connection) && (
-        <PlayerProfile
-          server={props}
-          selected={selected}
-          connected={matching}
-          accountSessions={
-            (inspect && selected.account ? sessionsByAccount.get(selected.account) : undefined) ??
-            []
-          }
-          onChooseSession={(p) =>
-            setSelected({ ...selected, name: p.name, connection: sessionFor(p) })
-          }
-          onIdentify={(id) =>
-            setSelected((previous) =>
-              previous && !previous.account ? { ...previous, account: id } : previous,
-            )
-          }
-          version={observation?.gameVersion}
-          pendingRoster={roster.isPending}
-          rosterReason={
-            roster.error ? 'unreachable' : !current ? (observation?.reason ?? 'unavailable') : null
-          }
-          inspect={inspect}
-          moderate={moderate}
-          screenshots={screenshots}
-          mapAccess={mapAccess}
-          otherPlayers={targets}
-          watchUntil={watchUntil}
-          onRequestAccepted={(receipt) => {
-            if (receipt.kind === 'screenshot') setWatchUntil(Date.now() + 30000);
-            void roster.refetch();
-          }}
-          onServerGallery={() => {
-            setSelected(null);
-            setGallery(true);
-          }}
-          onClose={() => setSelected(null)}
-        />
       )}
     </div>
   );
