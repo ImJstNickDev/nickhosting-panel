@@ -121,12 +121,14 @@ when the game is stopped. Viewing saved skins requires player inspection. Openwo
 a1.2.9 player saves contain no skin image. A player whose skin has never been captured
 gets their first archived preview on a subsequent observed connection.
 
-To measure Pterodactyl Application API traffic across all servers, filter the API and
+To measure Pterodactyl API reads across all servers, filter the API and
 worker JSON logs for `event == "pterodactyl.server_reads"` at log level `info`.
 Each active one-minute window has UTC `data.from` and `data.until` boundaries,
 `data.runtime`, and counts under `data.callers`. Sum `detail` for numeric server-detail
 GETs. `externalDetail`, `list`, `batch` and `bundle` count external-ID lookups, list
-pages, UUID-filtered list pages and Gateway inventory requests separately. Shutdown
+pages, UUID-filtered list pages and Gateway inventory requests separately. For the Client API,
+`resources` and `backupList` count live resource samples and backup inventory pages.
+Other GETs are grouped under `otherApplication` or `otherClient`. Shutdown
 flushes a final partial window. Each outgoing attempt counts once for its initiating
 caller, including upstream 429s. Joined readers and local cooldown rejections add zero.
 

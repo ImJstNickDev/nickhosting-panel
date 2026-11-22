@@ -127,25 +127,14 @@ export function useFileTransfer(options: {
     ]).catch(() => {
       // Query state retains refresh failures; settlement does not assert success.
     });
-    void Promise.all([
-      directories,
-      ...(action === 'copy'
-        ? [
-            // Copy temporarily owns an ingestion claim. A poll during that
-            // claim can report copy=false until capability state is refreshed.
-            queryClient.invalidateQueries({
-              queryKey: ['file-capabilities', options.serverId],
-              exact: true,
-            }),
-            queryClient.invalidateQueries({
-              queryKey: ['transfers', options.serverId],
-              exact: true,
-            }),
-          ]
-        : []),
-    ]).catch(() => {
-      // Query state retains the refresh error for its existing UI consumer.
-    });
+    if (action === 'copy') {
+      // A refresh during the copy can observe its temporary upload claim.
+      void queryClient
+        .invalidateQueries({ queryKey: ['transfers', options.serverId], exact: true })
+        .catch(() => {
+          // Fileman reports refresh failures without delaying the completed copy.
+        });
+    }
     return directories;
   }
   async function inspect(

@@ -297,15 +297,30 @@ export async function getGatewayState(
   options: GatewayOrchestrationOptions = {},
 ) {
   const { server, state } = await rows(db, serverId);
+  return readGatewayPolicyState(db, server, state, options);
+}
+
+/** Build the checked public state from the same rows used to present the policy. */
+export async function readGatewayPolicyState(
+  db: DB,
+  server: PublicStateServer &
+    Pick<Server, 'pterodactyl_uuid' | 'connection_mode'> & { game_id: string },
+  state: State,
+  options: GatewayOrchestrationOptions,
+  inputs?: GatewayPolicyContext,
+) {
+  if (server.connection_mode === 'direct') throw new DomainError('integration_unavailable');
+  if (!server.pterodactyl_uuid) throw new DomainError('not_found');
   if (state.enabled && (server.game_id === 'minecraft' || state.protocol_id === 'minecraft-java'))
     await requireMinecraftGatewayProtocol(
       db,
-      serverId,
+      server.id,
       { handlerId: state.protocol_id, gameVersion: state.game_version },
       options.env,
       nowOf(options),
+      inputs?.values,
     );
-  return publicState(db, server, state, nowOf(options), options.env);
+  return publicState(db, server, state, nowOf(options), options.env, inputs);
 }
 
 /** Resolve one server for callers that already loaded its policy inputs. */

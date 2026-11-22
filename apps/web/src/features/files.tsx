@@ -676,19 +676,12 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
   const uploadAvailable = transfers.data?.upload.available === true;
   const selectedNames = [...selected];
   const selectedEntries = files.data?.filter((entry) => selected.has(entry.name)) ?? [];
-  const capabilities = useQuery({
-    queryKey: ['file-capabilities', serverId],
-    refetchInterval: 10000,
-    queryFn: () =>
-      api<{ extractFormats: string[]; copy: boolean; extract: boolean }>(
-        `${serverPath(serverId)}/files/capabilities`,
-      ),
-  });
+  const capabilities = transfers.data?.fileOperations;
   const transferFlow = useFileTransfer({
     serverId,
     identity: saveIdentity.current,
     canMutate,
-    canCopy: capabilities.data?.copy === true,
+    canCopy: capabilities?.copy === true,
     isBusy: () => mutationRunning.current,
     setBusy: (busy) => {
       mutationRunning.current = busy;
@@ -705,9 +698,7 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
     : transfers.isPending
       ? 'web.loading'
       : `file.uploadReason.${transfers.data?.upload.reason ?? 'configuration_invalid'}`;
-  const archiveFormats = (capabilities.data?.extractFormats ?? []).map(
-    (extension) => `.${extension}`,
-  );
+  const archiveFormats = (capabilities?.extractFormats ?? []).map((extension) => `.${extension}`);
   const isArchive = (name: string) =>
     archiveFormats.some((extension) => name.toLowerCase().endsWith(extension));
   const cancelRead = useCallback(() => {
@@ -1410,7 +1401,7 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
         !selectedNames.length ||
         !canMutate ||
         (key === 'x' && !canDelete) ||
-        (key === 'c' && capabilities.data?.copy !== true)
+        (key === 'c' && capabilities?.copy !== true)
       )
         return;
       event.preventDefault();
@@ -1425,7 +1416,7 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
       if (
         !canMutate ||
         (scopedClipboard.action === 'move' && !canDelete) ||
-        (scopedClipboard.action === 'copy' && capabilities.data?.copy !== true)
+        (scopedClipboard.action === 'copy' && capabilities?.copy !== true)
       )
         return;
       event.preventDefault();
@@ -2458,7 +2449,7 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
                     type="button"
                     className="fm-tool"
                     aria-label={t('file.copy')}
-                    disabled={!canMutate || fileActionsBusy || capabilities.data?.copy !== true}
+                    disabled={!canMutate || fileActionsBusy || capabilities?.copy !== true}
                     onClick={() => chooseMode('copy')}
                   >
                     <ToolbarIcon kind="copy" />
@@ -2485,8 +2476,8 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
         {canLoadRootGroups && rootGroups.error && (
           <ErrorNotice error={rootGroups.error} retry={() => void rootGroups.refetch()} />
         )}
-        {capabilities.error && (
-          <ErrorNotice error={capabilities.error} retry={() => void capabilities.refetch()} />
+        {transfers.error && (
+          <ErrorNotice error={transfers.error} retry={() => void transfers.refetch()} />
         )}
         {copied && (
           <span className="fm-copy-status" role="status">
@@ -2891,7 +2882,7 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
                 <button
                   type="button"
                   role="menuitem"
-                  disabled={!canMutate || capabilities.data?.copy !== true}
+                  disabled={!canMutate || capabilities?.copy !== true}
                   onClick={() => chooseMode('copy', [menu.entry.name])}
                 >
                   {t('file.copy')}
@@ -2900,7 +2891,7 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
                   <button
                     type="button"
                     role="menuitem"
-                    disabled={!canMutate || capabilities.data?.extract !== true}
+                    disabled={!canMutate || capabilities?.extract !== true}
                     onClick={() => chooseMode('extract', [menu.entry.name])}
                   >
                     {t('file.extract')}

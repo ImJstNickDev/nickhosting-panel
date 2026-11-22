@@ -79,6 +79,13 @@ describe('Pterodactyl request coordination', () => {
     await transport.json('application', 'servers/external/private-id?include=allocations', schema);
     await transport.json('application', 'servers/7', schema, 'DELETE');
     await transport.json('client', 'servers/7', schema);
+    await withProviderReadCaller('worker-reconcile', async () => {
+      await transport.json('client', 'servers/fixture/resources', schema);
+      await transport.json('client', 'servers/fixture/backups?page=1', schema);
+    });
+    await transport.json('client', 'servers/fixture/backups/private-uuid', schema);
+    await transport.json('application', 'nodes', schema);
+    await transport.json('client', 'servers/fixture/backups', schema, 'POST', {});
     stop();
     expect(
       fetcher.mock.calls.map(([, init]) => new Headers(init?.headers).get('user-agent')),
@@ -88,13 +95,28 @@ describe('Pterodactyl request coordination', () => {
       'NickPanel/worker',
       'NickPanel/worker',
       null,
+      'NickPanel/worker',
+      'NickPanel/worker-reconcile',
+      'NickPanel/worker-reconcile',
+      'NickPanel/worker',
+      'NickPanel/worker',
       null,
     ]);
     expect(logger.log).toHaveBeenCalledExactlyOnceWith('info', 'pterodactyl.server_reads', {
       runtime: 'worker',
       from: expect.any(String),
       until: expect.any(String),
-      callers: { worker: { list: 1, batch: 1, bundle: 1, externalDetail: 1 } },
+      callers: {
+        worker: {
+          list: 1,
+          batch: 1,
+          bundle: 1,
+          externalDetail: 1,
+          otherClient: 2,
+          otherApplication: 1,
+        },
+        'worker-reconcile': { resources: 1, backupList: 1 },
+      },
     });
   });
 

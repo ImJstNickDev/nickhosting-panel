@@ -22,6 +22,7 @@ import {
 } from '@nickhosting/pterodactyl-adapter';
 import {
   assertServerStorageCapacity,
+  fileExtractFormats as extractFormats,
   getPlatformTransfers,
   parse,
   reserveUploadIngestion,
@@ -37,22 +38,8 @@ import { createFileOperationTrace } from './file-operation-trace.js';
 import { inspectFilePath } from './file-path-inspection.js';
 import type { ServerRouteOptions } from './servers.js';
 
-export const extractFormats = [
-  'zip',
-  'jar',
-  'tar',
-  'tar.gz',
-  'tgz',
-  'tar.bz2',
-  'tar.xz',
-  'tar.zst',
-  '7z',
-  'rar',
-  'gz',
-  'bz2',
-  'xz',
-  'zst',
-] as const;
+export { extractFormats };
+
 const maxEntries = 20_000;
 const maxDepth = 64;
 const maxArchiveBytes = 8 * 1024 ** 3;
@@ -729,13 +716,7 @@ export function registerFileOperationRoutes(
   app.get('/v1/servers/:id/files/capabilities', async (c) => {
     const context = await principal(c);
     const transfers = await getPlatformTransfers(db, context, c.req.param('id'), env);
-    return c.json({
-      copy: transfers.upload.available,
-      extract: transfers.upload.available,
-      extractFormats,
-      zipDownload: transfers.download.available,
-      reason: transfers.upload.reason,
-    });
+    return c.json(transfers.fileOperations);
   });
   async function canWrite(serverId: string, context: Awaited<ReturnType<typeof principal>>) {
     const transfers = await getPlatformTransfers(db, context, serverId, env);

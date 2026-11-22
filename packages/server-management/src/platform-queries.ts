@@ -13,11 +13,12 @@ import { z } from 'zod';
 import { listUnifiedActivity } from './activity.js';
 import { type DB, type Environment, lockResources, validHostSnapshot } from './admission.js';
 import { hostPolicyOverrides, resolveHostOverride } from './configuration.js';
+import { dnsAssignmentDomain } from './dns.js';
 import { trustedGameModules } from './game-modules.js';
 import {
   type GatewayPolicy,
   gatewayPolicySchema,
-  getGatewayState,
+  readGatewayPolicyState,
 } from './gateway-orchestration.js';
 import { currentInteractiveContext } from './interactive-context.js';
 import { loadModpackProvisioning, modpackJobState } from './modpack-provisioning.js';
@@ -35,7 +36,7 @@ import {
   sharedServerPermissionKeys,
   snapshotServerCredentialPermissions,
 } from './registry.js';
-import { publicIdleTimeout, resolveIdleTimeout } from './sleep-policy.js';
+import { presentIdleTimeout, publicIdleTimeout, resolveIdleTimeout } from './sleep-policy.js';
 import { hasStopProcessBaseline, stopEscalation } from './stop-escalation.js';
 import { serverStorageLimitBytes } from './storage-capacity.js';
 import { effectiveUploadPolicy } from './upload-policy.js';
@@ -1548,6 +1549,7 @@ export async function getPlatformConnections(
       id,
       state,
       hostname: (plan as { connection?: { hostname?: string } }).connection?.hostname ?? null,
+      ...dnsAssignmentDomain(plan),
     })),
     ports: allocations.flatMap((allocation) =>
       allocation.protocols.map((transport) => {
@@ -1610,6 +1612,23 @@ export async function getPlatformConnections(
   };
 }
 
+export const fileExtractFormats = [
+  'zip',
+  'jar',
+  'tar',
+  'tar.gz',
+  'tgz',
+  'tar.bz2',
+  'tar.xz',
+  'tar.zst',
+  '7z',
+  'rar',
+  'gz',
+  'bz2',
+  'xz',
+  'zst',
+] as const;
+
 export async function getPlatformTransfers(
   db: DB,
   context: AuthContext,
@@ -1655,7 +1674,15 @@ export async function getPlatformTransfers(
             : !info.availableActions.files
               ? 'integration_unavailable'
               : null;
+  const downloadAvailable = configured && info.availableActions.files;
   return {
+    fileOperations: {
+      copy: reason === null,
+      extract: reason === null,
+      extractFormats: fileExtractFormats,
+      zipDownload: downloadAvailable,
+      reason,
+    },
     files: info.capabilities?.files === true,
     textEditMaxCharacters: 1048576,
     textEditMaxBytes: 1048576,
@@ -1680,7 +1707,7 @@ export async function getPlatformTransfers(
       streaming: true,
     },
     download: {
-      available: configured && info.availableActions.files,
+      available: downloadAvailable,
       streaming: true,
       totalSizeLimitBytes: null,
     },
@@ -1773,8 +1800,17 @@ export async function getPlatformSleepPolicy(
     }
     return { ...unavailable, proposedPolicy, idleTimeout };
   }
-  const idleTimeout = await publicIdleTimeout(db, serverId, state, context, env);
-  const effectiveIdle = await resolveIdleTimeout(db, serverId, state, env);
+  const [mapping, settings] = await Promise.all([
+    db
+      .selectFrom('runtime_egg_mappings')
+      .select(['game_id', 'runtime_id'])
+      .where('id', '=', server.mapping_id)
+      .executeTakeFirstOrThrow(),
+    getSettings(db, env),
+  ]);
+  const inputs = { mapping, values: settings.values };
+  const effectiveIdle = await resolveIdleTimeout(db, serverId, state, env, inputs);
+  const idleTimeout = presentIdleTimeout(effectiveIdle, context);
   return {
     policy: {
       enabled: state.enabled,
@@ -1810,7 +1846,13 @@ export async function getPlatformSleepPolicy(
       (context.role === 'owner' && context.sessionType === 'regular') ||
       effectiveIdle.ownerBaselineSeconds === -1 ||
       effectiveIdle.userAccess === 'editable',
-    state: await getGatewayState(db, serverId, { env }),
+    state: await readGatewayPolicyState(
+      db,
+      { ...server, game_id: mapping.game_id },
+      state,
+      { env },
+      inputs,
+    ),
     proposedPolicy: null,
   };
 }

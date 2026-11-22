@@ -11,22 +11,22 @@ export type ConnectionChoice = { domainId?: string; subdomain?: string; reservat
 
 /** Prefer stored domain identity; overlapping DNS suffixes must not alter the editable label. */
 export function assignmentConnectionChoice(
-  assignment: { domainId?: string; shared?: boolean; connection: { hostname: string } } | undefined,
+  assignment: { domainId?: string; shared?: boolean; hostname: string | null } | undefined,
   options: ConnectionOptions,
 ): ConnectionChoice {
   if (!assignment) return {};
-  const hostname = assignment.connection.hostname;
+  const hostname = assignment.hostname;
   const domain =
     options.domains.find((entry) => entry.id === assignment.domainId) ??
     [...options.domains]
       .sort((a, b) => b.hostname.length - a.hostname.length)
-      .find((entry) => hostname.endsWith(`.${entry.hostname}`));
+      .find((entry) => hostname?.endsWith(`.${entry.hostname}`));
   if (!domain) return {};
   if (assignment.shared || (options.mode === 'shared-host' && hostname === options.defaultHostname))
     return { domainId: domain.id };
   return {
     domainId: domain.id,
-    ...(hostname.endsWith(`.${domain.hostname}`)
+    ...(hostname?.endsWith(`.${domain.hostname}`)
       ? { subdomain: hostname.slice(0, -(domain.hostname.length + 1)) }
       : {}),
   };

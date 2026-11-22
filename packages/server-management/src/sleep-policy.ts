@@ -85,7 +85,13 @@ export async function publicIdleTimeout(
   context: AuthContext,
   env: Environment = {},
 ) {
-  const value = await resolveIdleTimeout(db, serverId, state, env);
+  return presentIdleTimeout(await resolveIdleTimeout(db, serverId, state, env), context);
+}
+
+export function presentIdleTimeout(
+  value: Awaited<ReturnType<typeof resolveIdleTimeout>>,
+  context: AuthContext,
+) {
   if (context.role === 'owner' && context.sessionType === 'regular')
     return { ...value, overrideSeconds: value.ownerOverrideSeconds };
   if (value.userAccess === 'hidden') return null;

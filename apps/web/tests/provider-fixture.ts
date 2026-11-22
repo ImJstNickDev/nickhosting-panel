@@ -354,6 +354,10 @@ export async function installBrowserFixtures(
     },
   };
   const adapter: PterodactylAdapter = {
+    supportsGatewayInventory: async () => false,
+    readGatewayInventory: async () => {
+      throw new Error('This fixture exercises the standard provider inventory endpoints');
+    },
     getAccount: async () => {
       check();
       return { id: 1, admin: true };

@@ -509,14 +509,17 @@ export async function previewServerDns(
     shared: planned.shared,
   };
 }
+export function dnsAssignmentDomain(plan: DnsRow['plan']) {
+  const intent = plan as DnsIntent;
+  return { domainId: intent.domainId ?? 'legacy', shared: Boolean(intent.sharedHostId) };
+}
 function publicDns(row: DnsRow) {
   const intent = row.plan as DnsIntent;
   return {
     id: row.id,
     serverId: row.server_id,
     state: row.state,
-    domainId: intent.domainId ?? 'legacy',
-    shared: Boolean(intent.sharedHostId),
+    ...dnsAssignmentDomain(row.plan),
     connection:
       row.state === 'active'
         ? intent.connection

@@ -27,13 +27,19 @@ export function withProviderReadCaller<T>(caller: ProviderReadCaller, operation:
 }
 
 function readKind(scope: CredentialScope, method: string, path: string, url: URL) {
-  if (scope !== 'application') return;
+  if (scope === 'client') {
+    if (method !== 'GET') return;
+    if (/^servers\/[^/?]+\/resources(?:\?|$)/.test(path)) return 'resources';
+    if (/^servers\/[^/?]+\/backups(?:\?|$)/.test(path)) return 'backupList';
+    return 'otherClient';
+  }
   if (method === 'POST' && path === 'extensions/nickhosting/gateway-inventory') return 'bundle';
   if (method !== 'GET') return;
   if (/^servers\/\d+(?:\?|$)/.test(path)) return 'detail';
   if (path.startsWith('servers/external/')) return 'externalDetail';
   if (path === 'servers' || path.startsWith('servers?'))
     return url.searchParams.has('filter[uuid]') ? 'batch' : 'list';
+  return 'otherApplication';
 }
 
 type ReadCounts = Partial<Record<NonNullable<ReturnType<typeof readKind>>, number>>;

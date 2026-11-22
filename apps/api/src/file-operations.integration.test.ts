@@ -3,7 +3,11 @@ import { rm } from 'node:fs/promises';
 import { type AuthContext, createLogger, DomainError, type LogRecord } from '@nickhosting/core';
 import { createTestDatabase } from '@nickhosting/database/testing';
 import type { ServerFile } from '@nickhosting/pterodactyl-adapter';
-import { authorizeServer, type ManagementRuntime } from '@nickhosting/server-management';
+import {
+  authorizeServer,
+  getPlatformTransfers,
+  type ManagementRuntime,
+} from '@nickhosting/server-management';
 import { Hono } from 'hono';
 import { sql } from 'kysely';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -937,6 +941,26 @@ describe('file operation handlers with isolated authoritative database', () => {
     expect(service.adapter.createDirectory).not.toHaveBeenCalled();
     expect(service.adapter.uploadFile).not.toHaveBeenCalled();
   });
+  it('keeps ZIP downloads available to a file reader while denying copy and extraction', async () => {
+    const reader = await managementFixture(f.db, { interactive: true });
+    await f.db
+      .insertInto('server_subusers')
+      .values({
+        server_id: serverId,
+        user_id: reader.context.subjectUserId,
+        permission_keys: JSON.stringify(['files.read']),
+        created_by: f.context.subjectUserId,
+      })
+      .execute();
+    const transfers = await getPlatformTransfers(f.db, reader.context, serverId, {
+      NH_OBSERVER_ID: 'isolated-observer',
+    });
+    expect(transfers).toMatchObject({
+      upload: { available: false, reason: 'forbidden' },
+      download: { available: true },
+      fileOperations: { copy: false, extract: false, zipDownload: true, reason: 'forbidden' },
+    });
+  });
   it('reports missing upload policy without exposing filesystem paths', async () => {
     await f.db
       .updateTable('physical_hosts')
@@ -944,10 +968,20 @@ describe('file operation handlers with isolated authoritative database', () => {
       .where('id', '=', f.hostId)
       .execute();
     const response = await app.request(`/v1/servers/${serverId}/files/capabilities`);
-    expect(await response.json()).toMatchObject({
-      copy: false,
-      extract: false,
-      reason: 'upload_policy_missing',
+    const transfers = await getPlatformTransfers(f.db, f.context, serverId, {
+      NH_OBSERVER_ID: 'isolated-observer',
+    });
+    expect(await response.json()).toEqual(transfers.fileOperations);
+    expect(transfers).toMatchObject({
+      upload: { available: false },
+      download: { available: true },
+      fileOperations: {
+        copy: false,
+        extract: false,
+        zipDownload: true,
+        extractFormats: expect.arrayContaining(['zip', 'tar.gz']),
+        reason: 'upload_policy_missing',
+      },
     });
     expect(
       (await post('copy', { root: '', files: ['source'], destination: 'target' })).status,

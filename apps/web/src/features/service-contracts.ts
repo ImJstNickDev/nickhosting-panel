@@ -7,7 +7,6 @@ import type {
 } from '../../../../packages/pterodactyl-adapter/src/types.js';
 import type {
   createSftpCredential,
-  listServerDns,
   listSftpCredentials,
   previewServerDns,
 } from '../../../../packages/server-management/src/external.js';
@@ -35,7 +34,6 @@ export type Schedules = Result<typeof listSchedules>;
 export type Outcomes = Result<typeof listScheduleOutcomes>;
 export type Credentials = Result<typeof listSftpCredentials>;
 export type IssuedCredential = Result<typeof createSftpCredential>;
-export type DnsAssignments = Result<typeof listServerDns>;
 export type DnsPlan = Result<typeof previewServerDns>;
 export type { Backup, Resources, ServerFile };
 export function serverPath(id: string) {

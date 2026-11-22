@@ -43,7 +43,10 @@ describe('server workspace permission and pending-navigation boundaries', () => 
     });
     await identities.peer.goto(`${base()}/console`);
     await browserExpect(identities.peer.locator('.console-terminal')).toBeVisible();
-    await browserExpect(identities.peer.locator('.console-summary-card')).toHaveCount(6);
+    await browserExpect(identities.peer.locator('.console-runtime-value')).toBeVisible();
+    await browserExpect(
+      identities.peer.locator('.console-summary-card').getByText('Address', { exact: true }),
+    ).toHaveCount(0);
     await browserExpect(identities.peer.locator('a[href$="/network"]')).toHaveCount(0);
     await browserExpect(identities.peer.locator('.console-actions button')).toHaveCount(0);
     await browserExpect(identities.peer.locator('.console-prompt')).toHaveCount(0);
