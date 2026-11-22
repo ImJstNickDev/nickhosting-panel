@@ -211,20 +211,50 @@ function projectSkin<T extends z.output<typeof playerIdentity>>(player: T) {
   return { ...rest, ...(fingerprint ? { skinHash: fingerprint.toLowerCase() } : {}) };
 }
 
-const rosterMember = playerIdentity
-  .extend({
-    account: z.unknown().optional(),
-    accountVerified: z.unknown().optional(),
-  })
-  .transform(({ account, accountVerified, ...member }) => ({
+export const openworldVitalsSchema = z.object(
+  measurements(
+    'health',
+    'maxHealth',
+    'hunger',
+    'maxHunger',
+    'saturation',
+    'maxSaturation',
+    'air',
+    'maxAir',
+  ),
+);
+
+const rosterIdentity = playerIdentity.extend({
+  account: z.unknown().optional(),
+  accountVerified: z.unknown().optional(),
+});
+function projectRosterMember<T extends z.output<typeof rosterIdentity>>({
+  account,
+  accountVerified,
+  ...member
+}: T) {
+  return {
     ...projectSkin(member),
     ...(accountVerified === true &&
     typeof account === 'string' &&
     /^[A-Za-z0-9_-]{1,128}$/.test(account)
       ? { account, accountVerified: true as const }
       : {}),
-  }));
-const players = z.object({ players: z.array(rosterMember).max(1024) });
+  };
+}
+// Only the internal collector projects vitals on a roster read.
+export const openworldCharacterRoster = z.object({
+  players: z
+    .array(
+      rosterIdentity
+        .extend({ vitals: openworldVitalsSchema.nullish().catch(undefined) })
+        .transform(projectRosterMember),
+    )
+    .max(1024),
+});
+const players = z.object({
+  players: z.array(rosterIdentity.transform(projectRosterMember)).max(1024),
+});
 const player = playerIdentity
   .extend({
     account: label.nullish(),
@@ -238,20 +268,7 @@ const player = playerIdentity
     onGround: flag,
     crouching: flag,
     role: z.object({ name: label.nullish() }).nullish(),
-    vitals: z
-      .object(
-        measurements(
-          'health',
-          'maxHealth',
-          'hunger',
-          'maxHunger',
-          'saturation',
-          'maxSaturation',
-          'air',
-          'maxAir',
-        ),
-      )
-      .nullish(),
+    vitals: openworldVitalsSchema.nullish(),
     armor: z
       .array(item.extend({ slot: label.nullish() }).nullable())
       .max(8)

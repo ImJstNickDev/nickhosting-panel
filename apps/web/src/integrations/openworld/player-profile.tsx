@@ -142,25 +142,13 @@ export function PlayerProfile({
   ) : (
     unavailable(confirmedGone ? 'playerGone' : rosterReason || 'unavailable')
   );
-  function commands() {
-    if ((!moderate && !screenshots) || !session || !live) return null;
-    if (session.joinedAt === null || !session.processRef) return unavailable('unconfirmedSession');
-    return (
-      <PlayerActions
-        key={JSON.stringify([session.processRef, session.id, session.name, session.joinedAt])}
-        server={server}
-        player={{ id: session.id, name: session.name, joinedAt: session.joinedAt }}
-        processRef={session.processRef}
-        otherPlayers={otherPlayers}
-        moderate={moderate}
-        screenshots={screenshots}
-        onAccepted={(r) => {
-          setReceipt(r);
-          onRequestAccepted(r);
-        }}
-      />
-    );
-  }
+  const actionTarget =
+    source === 'live' && live && session && session.joinedAt !== null && session.processRef
+      ? {
+          player: { id: session.id, name: session.name, joinedAt: session.joinedAt },
+          processRef: session.processRef,
+        }
+      : null;
   function content() {
     if (tab === 'gallery' && account && canShowShots)
       return <PlayerGallery server={server} account={account} watchUntil={watchUntil} />;
@@ -325,10 +313,22 @@ export function PlayerProfile({
           </div>
         )}
         <div className={resourcePane || tab === 'network' ? 'ow-detail-content' : undefined}>
-          {tab === 'character' && source === 'live' && (moderate || screenshots) ? (
+          {tab === 'character' && (moderate || screenshots) ? (
             <div className={inspect ? 'ow-character-workspace' : undefined}>
-              {inspect && <div className="ow-character-main">{content()}</div>}
-              {commands()}
+              {(inspect || !live) && <div className="ow-character-main">{content()}</div>}
+              <PlayerActions
+                key={JSON.stringify(actionTarget)}
+                server={server}
+                target={actionTarget}
+                awaitingConfirmation={source === 'live' && !actionTarget}
+                otherPlayers={otherPlayers}
+                moderate={moderate}
+                screenshots={screenshots}
+                onAccepted={(r) => {
+                  setReceipt(r);
+                  onRequestAccepted(r);
+                }}
+              />
             </div>
           ) : (
             content()
@@ -409,7 +409,12 @@ function Character({
           )}
           {map && <Link to={map}>{t('games.openworld.map.showOnMap')}</Link>}
         </div>
-        <PlayerVitals vitals={person.vitals} version={version} />
+        <PlayerVitals
+          vitals={person.vitals}
+          version={version}
+          saved={!!archive}
+          observedAt={archive?.vitalsObservedAt}
+        />
       </div>
       <PlayerEquipment player={person} version={version} />
       {(pos || account || live?.geo) && (

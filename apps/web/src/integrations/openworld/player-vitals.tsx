@@ -67,35 +67,41 @@ function Fill({
 export function PlayerVitals({
   vitals,
   version,
+  saved = false,
+  observedAt,
 }: {
   vitals?: Vitals | null;
   version?: string | null;
+  saved?: boolean;
+  observedAt?: string;
 }) {
   const t = useT(),
     f = useMetricsFormat();
-  if (!vitals) return null;
-  const maxReserve = vitals.maxSaturation ?? (version === 'a1.2.9' ? 50 : undefined);
+  const maxReserve = vitals?.maxSaturation ?? (version === 'a1.2.9' ? 50 : undefined);
   const gauges = [
-    ['health', vitals.health, vitals.maxHealth],
-    ['hunger', vitals.hunger, vitals.maxHunger],
-    ['air', vitals.air, vitals.maxAir],
+    ['health', vitals?.health, vitals?.maxHealth],
+    ['hunger', vitals?.hunger, vitals?.maxHunger],
+    ['air', vitals?.air, vitals?.maxAir],
   ] as const;
-  if (!gauges.some(([, v]) => numeric(v)) && !numeric(vitals.saturation)) return null;
+  const hasReadings = gauges.some(([, value]) => numeric(value)) || numeric(vitals?.saturation);
+  if (!hasReadings && !saved) return null;
   return (
     <section className="ow-player-hud" aria-label={t('games.openworld.people.vitalStats')}>
       {gauges.map(([kind, value, max]) => {
-        const reserve = kind === 'hunger' ? vitals.saturation : null;
-        if (!numeric(value) && !numeric(reserve)) return null;
+        const reserve = kind === 'hunger' ? vitals?.saturation : null;
+        if (!saved && !numeric(value) && !numeric(reserve)) return null;
         return (
           <div key={kind} className={`ow-hud-gauge ow-hud-${kind}`}>
             <div className="ow-hud-label">
               <span>{t(key(kind))}</span>
-              {numeric(value) && (
+              {numeric(value) ? (
                 <strong>
                   {f.metric(value)}
                   {numeric(max) && max > 0 ? ` / ${f.metric(max)}` : ''}
                   {kind === 'air' ? ' s' : ''}
                 </strong>
+              ) : (
+                <span>—</span>
               )}
             </div>
             {numeric(value) && numeric(max) && max > 0 && (
@@ -115,6 +121,14 @@ export function PlayerVitals({
           </div>
         );
       })}
+      {hasReadings && observedAt && (
+        <small className="ow-source-time">
+          {t(key('snapshot'))} · <time dateTime={observedAt}>{f.date(observedAt)}</time>
+        </small>
+      )}
+      {!hasReadings && (
+        <small className="ow-source-time">{t('games.openworld.people.noRecordedVitals')}</small>
+      )}
     </section>
   );
 }

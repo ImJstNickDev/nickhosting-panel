@@ -332,3 +332,46 @@ it('joins native guest statistics by embedded identity across save paths and cou
     code: 'not_found',
   });
 });
+
+it('returns a separately timestamped vital observation only on the matching saved profile without native vitals', async () => {
+  const { id, owner } = await server();
+  const { id: otherId, owner: otherOwner } = await server();
+  const io = fileFixture();
+  const directory = createOpenworldPlayerDirectory(fixture.db, async (_who, _id, work) =>
+    work(io.files),
+  );
+  const account = randomUUID();
+  const other = randomUUID();
+  const at = new Date('2026-11-21T19:00:00.000Z');
+  const binding = (await readOpenworldScope(fixture.db, id)).binding;
+  await fixture.db
+    .insertInto('openworld_player_vitals')
+    .values({
+      server_id: id,
+      binding,
+      account_id: account,
+      observed_at: at,
+      vitals: JSON.stringify({ health: 71, maxHealth: 100, saturation: 25 }),
+    })
+    .execute();
+  for (const uuid of [account, other])
+    io.docs.set(uuid, bytes({ format: 3, uuid, inventory: { armor: [0, 0, 5, 0] } }));
+  expect(await directory.detail(owner.context, id, account)).toMatchObject({
+    vitals: { health: 71, maxHealth: 100, saturation: 25, maxSaturation: 50 },
+    vitalsObservedAt: at.toISOString(),
+    armor: [null, null, { code: 5, slot: 'leggings' }, null],
+  });
+  expect(await directory.detail(owner.context, id, other)).not.toHaveProperty('vitals');
+  expect(await directory.detail(otherOwner.context, otherId, account)).not.toHaveProperty('vitals');
+  io.put(account, 'Ada');
+  const native = await directory.detail(owner.context, id, account);
+  expect(native.vitals?.health).toBe(58);
+  expect(native).not.toHaveProperty('vitalsObservedAt');
+  io.docs.set(account, bytes({ uuid: account, format: 3 }));
+  await fixture.db
+    .updateTable('openworld_player_vitals')
+    .set({ binding: 'previous-provider-binding' })
+    .where('server_id', '=', id)
+    .execute();
+  expect(await directory.detail(owner.context, id, account)).not.toHaveProperty('vitals');
+});

@@ -8,7 +8,7 @@ import {
 } from '@nickhosting/core';
 import type { Database } from '@nickhosting/database';
 import { PterodactylError } from '@nickhosting/pterodactyl-adapter';
-import type { Kysely } from 'kysely';
+import { type Kysely, sql } from 'kysely';
 import { z } from 'zod';
 import {
   OpenworldTokenExpired,
@@ -309,6 +309,87 @@ export function assertCurrentOpenworldScope(before: OpenworldScope, after: Openw
   if (after.reason || before.liveKey !== after.liveKey) throw new DomainError('game_not_ready');
 }
 
+const accountUuid = z.uuid();
+
+type VitalsMember = Pick<
+  OpenworldTelemetryData['player'],
+  'id' | 'admitted' | 'accountVerified' | 'account' | 'vitals'
+>;
+
+/** Archive only complete identity/value pairs from the same native response. */
+export async function archiveOpenworldVitals(
+  db: Kysely<Database>,
+  scope: OpenworldScope,
+  members: VitalsMember[],
+  at: number,
+) {
+  const connections = new Set<number>();
+  const duplicateIds = new Set<number>();
+  const byAccount = new Map<string, VitalsMember | null>();
+  for (const member of members) {
+    if (connections.has(member.id)) duplicateIds.add(member.id);
+    connections.add(member.id);
+    if (
+      !member.admitted ||
+      !member.accountVerified ||
+      !member.account ||
+      !accountUuid.safeParse(member.account).success
+    )
+      continue;
+    const account = member.account.toLowerCase();
+    byAccount.set(account, byAccount.has(account) ? null : member);
+  }
+  const observed = Array.from(byAccount).flatMap(([account, member]) => {
+    if (!member || duplicateIds.has(member.id) || !member.vitals) return [];
+    const { health, hunger, air, saturation } = member.vitals;
+    if (![health, hunger, air, saturation].some((v) => typeof v === 'number' && v >= 0)) return [];
+    const values = Object.entries(member.vitals).filter(([, v]) => typeof v === 'number' && v >= 0);
+    return [
+      {
+        server_id: scope.serverId,
+        account_id: account,
+        binding: scope.binding,
+        observed_at: new Date(at),
+        vitals: JSON.stringify(Object.fromEntries(values)),
+      },
+    ];
+  });
+  if (!observed.length) return false;
+  await db.transaction().execute(async (tx) => {
+    await tx
+      .selectFrom('managed_servers')
+      .select('id')
+      .where('id', '=', scope.serverId)
+      .forUpdate()
+      .executeTakeFirstOrThrow();
+    assertCurrentOpenworldScope(scope, await readOpenworldScope(tx, scope.serverId));
+    await tx
+      .insertInto('openworld_player_vitals')
+      .values(observed)
+      .onConflict((oc) =>
+        oc
+          .columns(['server_id', 'account_id'])
+          .doUpdateSet((eb) => ({
+            binding: eb.ref('excluded.binding'),
+            observed_at: eb.ref('excluded.observed_at'),
+            vitals: eb.ref('excluded.vitals'),
+          }))
+          .where((eb) =>
+            eb.or([
+              eb('openworld_player_vitals.binding', '!=', eb.ref('excluded.binding')),
+              eb.and([
+                eb('openworld_player_vitals.observed_at', '<', eb.ref('excluded.observed_at')),
+                // Keep the last coherent sample if a later client report omits a known gauge.
+                sql<boolean>`excluded.vitals ?& ARRAY(SELECT jsonb_object_keys(openworld_player_vitals.vitals))`,
+              ]),
+            ]),
+          ),
+      )
+      .execute();
+  });
+  return true;
+}
+
 function visibleSample<K extends Resource>(scope: OpenworldScope, resource: K, sample: Sample) {
   if (resource === 'players' && !scope.canInspectPlayers) {
     const { players } = sample.data as OpenworldTelemetryData['players'];
@@ -511,12 +592,21 @@ export function createOpenworldTelemetry(options: OpenworldNativeOptions) {
 
   async function live(scope: OpenworldScope, resource: Resource, id?: number) {
     return reads.get(sampleKey(scope, resource, id), freshness[resource], async () => {
+      const startedAt = now();
       const data = await native(scope, (origin, token, signal) =>
         readOpenworldTelemetry(origin, token, resource, signal, id, fetcher),
       );
       const sample = { data, observedAt: now() };
       if (resource !== 'player') await save(scope, resource, sample);
-      else assertCurrentOpenworldScope(scope, await readOpenworldScope(db, scope.serverId));
+      else if (
+        !(await archiveOpenworldVitals(
+          db,
+          scope,
+          [data as OpenworldTelemetryData['player']],
+          startedAt,
+        ))
+      )
+        assertCurrentOpenworldScope(scope, await readOpenworldScope(db, scope.serverId));
       return sample;
     });
   }

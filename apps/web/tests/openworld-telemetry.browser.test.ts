@@ -888,7 +888,7 @@ it('opens linked history using the verified account id and keeps screenshot perm
     await page.getByRole('link', { name: /Solstice/ }).click();
     await page.getByRole('button', { name: 'Last save', exact: true }).click();
     await check(page.locator('section.ow-profile')).toContainText('No save found for this UUID.');
-    await check(page.getByRole('button', { name: 'Send message', exact: true })).toHaveCount(0);
+    await check(page.getByRole('button', { name: 'Send message', exact: true })).toBeDisabled();
     await page.goto(`${url}telemetry-fixture?section=players&reader&screenshots`);
     const files = Array.from({ length: 9 }, (_, i) => ({
       name: `capture-${i}.png`,
@@ -1126,6 +1126,8 @@ it('keeps the verified profile and active pane when the player leaves, and fetch
       'value',
       78,
     );
+    await check(profile.getByRole('button', { name: 'Send message', exact: true })).toBeDisabled();
+    await check(profile.getByRole('button', { name: 'Request screenshot' })).toBeDisabled();
     await check(profile).toContainText('Iron pickaxe');
     await check(profile).toContainText('Iron helmet');
     await profile.getByRole('button', { name: 'Screenshots', exact: true }).click();
@@ -1372,9 +1374,13 @@ it('follows a verified account when its first connection appears on the open sav
     await page.getByRole('link', { name: /Solstice/ }).click();
     const profile = page.getByRole('region', { name: 'Solstice', exact: true });
     await check(profile).toContainText('Archive world');
+    await check(profile.getByRole('button', { name: 'Send message' })).toBeDisabled();
+    await check(profile.getByRole('button', { name: 'Request screenshot' })).toHaveCount(0);
+    await check(profile).toContainText('No vitals recorded yet.');
+    await check(profile.getByRole('meter', { name: 'Health', exact: true })).toHaveCount(0);
     connected = true;
     await page.clock.fastForward(6500);
-    await check(profile.getByRole('button', { name: 'Send message' })).toBeVisible();
+    await check(profile.getByRole('button', { name: 'Send message' })).toBeEnabled();
     await check(profile.getByRole('combobox', { name: 'Session' })).toHaveCount(0);
     await check(profile).toContainText('80 / 100');
     expect(new URLSearchParams(new URL(page.url()).hash.slice(1)).get('player')).toBe('23');
@@ -1426,7 +1432,7 @@ it('groups confirmed simultaneous connections and never retargets a prepared mod
     await check(row).toContainText('2 connections');
     await row.click();
     const profile = page.locator('section.ow-profile');
-    await check(profile.getByRole('button', { name: 'Kill character' })).toHaveCount(0);
+    await check(profile.getByRole('button', { name: 'Kill character' })).toBeDisabled();
     await profile.getByRole('combobox', { name: 'Session', exact: true }).selectOption('23');
     await profile.getByRole('button', { name: 'Kill character' }).click();
     await check(page.getByRole('dialog')).toContainText('Kill the character of Solstice?');
@@ -1466,7 +1472,8 @@ it('disables a prepared action when the same player id appears in another game p
       }),
     );
     await page.clock.fastForward(6000);
-    await check(profile.getByRole('button', { name: 'Kill character' })).toHaveCount(0);
+    await check(page.getByRole('dialog')).toHaveCount(0);
+    await check(profile.getByRole('button', { name: 'Kill character' })).toBeDisabled();
     await check(profile).toContainText('This player has left the server.');
   } finally {
     await context.close();
@@ -2258,6 +2265,17 @@ it('shows the archived head and body on a cold visit while the game is offline',
       route.fulfill({
         json: {
           ...archived,
+          vitals: {
+            health: 0,
+            maxHealth: 100,
+            hunger: 52,
+            maxHunger: 100,
+            saturation: 21,
+            maxSaturation: 50,
+            air: 14,
+            maxAir: 20,
+          },
+          vitalsObservedAt: '2026-01-20T10:30:00.000Z',
           statsAt: null,
           mode: 'survival',
           world: 'Earth',
@@ -2287,6 +2305,15 @@ it('shows the archived head and body on a cold visit while the game is offline',
       .toBeGreaterThan(0);
     await entry.click();
     const profile = page.getByRole('region', { name: 'Selene', exact: true });
+    const hud = profile.getByRole('region', { name: 'Parametri vitali' });
+    await check(hud.getByRole('meter', { name: 'Salute', exact: true })).toHaveJSProperty(
+      'value',
+      0,
+    );
+    await check(hud.getByRole('meter', { name: 'Sazietà' })).toHaveJSProperty('value', 21);
+    await check(hud.locator('time')).toHaveAttribute('datetime', '2026-01-20T10:30:00.000Z');
+    await check(hud).toContainText('Ultima osservazione');
+    await fits(page);
     const body = profile.locator('.ow-body-skin img');
     await check(body).toBeVisible();
     await expect

@@ -12,10 +12,11 @@ import { key, type ServerView } from './telemetry.js';
 
 type Kind = OpenworldPlayerAction['kind'];
 export type ActionReceipt = { kind: Kind; playerName: string };
+type ActionTarget = { player: OpenworldActionPlayer; processRef: string };
 type Props = {
   server: ServerView;
-  player: OpenworldActionPlayer;
-  processRef: string;
+  target: ActionTarget | null;
+  awaitingConfirmation: boolean;
   otherPlayers: OpenworldActionPlayer[];
   moderate: boolean;
   screenshots: boolean;
@@ -51,6 +52,7 @@ export function PlayerActions(props: Props) {
   return (
     <aside className="ow-player-commands" aria-label={t(key('actions'))}>
       <h3>{t(key('actions'))}</h3>
+      {props.awaitingConfirmation && <p className="ow-empty">{t(key('unconfirmedSession'))}</p>}
       <div className="ow-command-list">
         {allowed.map((k) => (
           <button
@@ -59,6 +61,7 @@ export function PlayerActions(props: Props) {
             className="secondary"
             data-destructive={k === 'kick' || k === 'kill' || undefined}
             aria-haspopup="dialog"
+            disabled={!props.target}
             onClick={() => setChoice(k)}
           >
             <svg
@@ -78,7 +81,7 @@ export function PlayerActions(props: Props) {
           </button>
         ))}
       </div>
-      {kind && (
+      {kind && props.target && (
         <Dialog
           open
           closeIcon
@@ -93,7 +96,9 @@ export function PlayerActions(props: Props) {
           }
         >
           <ActionEditor
-            {...props}
+            server={props.server}
+            otherPlayers={props.otherPlayers}
+            {...props.target}
             key={kind}
             kind={kind}
             onBusy={setBusy}
@@ -116,7 +121,8 @@ function ActionEditor({
   kind,
   onBusy,
   onAccepted,
-}: Props & { kind: Kind; onBusy: (value: boolean) => void }) {
+}: Pick<Props, 'server' | 'otherPlayers' | 'onAccepted'> &
+  ActionTarget & { kind: Kind; onBusy: (value: boolean) => void }) {
   const t = useT();
   const [targetType, setTargetType] = useState<'coordinates' | 'player' | 'checkpoint'>('player');
   const [target, setTarget] = useState<OpenworldActionPlayer | null>(null);

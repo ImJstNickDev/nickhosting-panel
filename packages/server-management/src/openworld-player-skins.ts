@@ -2,11 +2,12 @@ import { archiveSkinPng } from '../../../games/openworld/src/archived-skin.js';
 import type { CaptureCursor } from '../../../games/openworld/src/capture-evidence.js';
 import {
   OpenworldTokenExpired,
-  readOpenworldTelemetry,
+  readOpenworldCharacterRoster,
 } from '../../../games/openworld/src/dashboard-api.js';
 import { readOpenworldPlayerSkin } from '../../../games/openworld/src/player-skin.js';
 import type { OpenworldTelemetryData } from '../../../games/openworld/src/telemetry.js';
 import {
+  archiveOpenworldVitals,
   assertCurrentOpenworldScope,
   createOpenworldNativeConnection,
   type OpenworldNativeOptions,
@@ -63,13 +64,10 @@ export function createOpenworldSkinCollector(
     };
     cursors.set(scope.serverId, cursor);
     await native(scope, async (origin, token, signal) => {
-      const roster = async () =>
-        eligible(
-          (await readOpenworldTelemetry(origin, token, 'players', signal, undefined, fetcher))
-            .players,
-          sessions,
-        );
-      const active = await roster();
+      const roster = () => readOpenworldCharacterRoster(origin, token, signal, fetcher);
+      const members = await roster();
+      await archiveOpenworldVitals(db, scope, members, observedAt);
+      const active = eligible(members, sessions);
       if (!active.length) return;
       const known = await db
         .selectFrom('openworld_player_skins')
@@ -114,7 +112,7 @@ export function createOpenworldSkinCollector(
         return []; // A missing skin must not prevent other accounts from being archived.
       });
       if (!images.length) return;
-      const final = new Map((await roster()).map((p) => [p.account, p]));
+      const final = new Map(eligible(await roster(), sessions).map((p) => [p.account, p]));
       const stable = images.filter(({ p }) => {
         const seen = final.get(p.account);
         return seen?.id === p.id && seen.hash === p.hash;

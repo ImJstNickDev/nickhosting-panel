@@ -5,6 +5,7 @@ import { readNativeBytes } from './native-response.js';
 import {
   type OpenworldTelemetryData,
   type OpenworldTelemetryResource,
+  openworldCharacterRoster,
   openworldTelemetrySchemas,
 } from './telemetry.js';
 
@@ -127,6 +128,22 @@ export async function readOpenworldTelemetry<K extends OpenworldTelemetryResourc
       throw new DomainError('not_found');
     // The schema and output type are selected using the same resource key.
     return result as OpenworldTelemetryData[K];
+  } catch (error) {
+    if (error instanceof DomainError) throw error;
+    throw new DomainError('integration_unavailable');
+  }
+}
+
+/** Private worker projection of the same roster request already used to archive skins. */
+export async function readOpenworldCharacterRoster(
+  origin: string,
+  token: string,
+  signal: AbortSignal,
+  fetcher = fetch,
+) {
+  try {
+    const raw = await nativeClient(origin, signal, fetcher)('players', 'GET', undefined, token);
+    return openworldCharacterRoster.parse(raw).players;
   } catch (error) {
     if (error instanceof DomainError) throw error;
     throw new DomainError('integration_unavailable');

@@ -114,6 +114,7 @@ export type OpenworldSavedPlayerDetail = OpenworldSavedPlayerSummary & {
   armor?: NativePlayer['armor'];
   gear?: NativePlayer['armor'];
   vitals?: NativePlayer['vitals'];
+  vitalsObservedAt?: string;
 };
 
 type Ref = { path: string; size: number; time: string | null };

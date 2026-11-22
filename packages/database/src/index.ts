@@ -103,6 +103,13 @@ export interface Database
     indexed_at: Date;
     indexing: boolean;
   };
+  openworld_player_vitals: {
+    server_id: string;
+    account_id: string;
+    binding: string;
+    observed_at: Date;
+    vitals: ColumnType<unknown, string, string>;
+  };
   openworld_player_skins: {
     server_id: string;
     account_id: string;

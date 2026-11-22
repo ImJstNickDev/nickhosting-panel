@@ -121,8 +121,11 @@ the saved inventory. When a verified player disconnects, their open profile can 
 the most recent available save. The character page follows a single verified connection
 when that account rejoins. Accounts with multiple simultaneous connections have a
 session selector. A prepared command belongs to its original connection. Player
-saves preserve vitals, the selected hotbar item and equipped armor and gear when
-those fields are available. The inventory uses the configured release's item
+saves can contain the selected hotbar item, equipment and vitals independently.
+When a save omits vitals, the profile shows the last observed values for that
+verified account on this instance, with their observation time. A player without
+either source has no recorded values. The background collector uses the existing
+native roster read. Opening a live player profile can also record the values. The inventory uses the configured release's item
 catalog where available and retains the native code for unknown saved items.
 The catalog covers the 18 Linux releases with verified Gateway support. On a1.2.9
 it maps 927 codes. The atlas preserves 326 distinct texture tiles across releases. The
@@ -136,8 +139,9 @@ gauge uses seconds.
 
 The separate **Moderate players** permission enables private messages, kick, game
 mode changes, kill, respawn and teleport to coordinates, a connected player or a
-checkpoint. These commands are accessible directly on the character page and target
-a running session. NickPanel rechecks the connection
+checkpoint. The character page keeps each permitted command visible. Commands are
+disabled while viewing a save or waiting for an identifiable running session.
+NickPanel rechecks the connection
 and records the request before sending it. If the game stops responding after dispatch,
 the panel reports the uncertain outcome. **Request and view game screenshots** is a
 separate grant. It covers requests to the game client and the whole instance's gallery.

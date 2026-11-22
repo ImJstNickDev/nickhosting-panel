@@ -3,12 +3,14 @@ import type { Database } from '@nickhosting/database';
 import type { FilemanReadService } from '@nickhosting/game-sdk';
 import { PterodactylError } from '@nickhosting/pterodactyl-adapter';
 import { type Kysely, sql } from 'kysely';
+import { z } from 'zod';
 import {
   listSavedPlayerFiles,
   type OpenworldSavedPlayersPage,
   readSavedPlayerDocuments,
   savedAccountId,
 } from '../../../games/openworld/src/offline-players.js';
+import { openworldVitalsSchema } from '../../../games/openworld/src/telemetry.js';
 import { readOpenworldScope } from './openworld-telemetry.js';
 
 const maxBatch = 32;
@@ -284,7 +286,7 @@ export function createOpenworldPlayerDirectory(db: DB, withFiles: WithFiles, now
     },
     async detail(who: AuthContext, id: string, uuid: string) {
       if (!savedAccountId.test(uuid)) throw new DomainError('validation_failed');
-      const { binding } = await authorized(db, who, id);
+      const { binding, version } = await authorized(db, who, id);
       const detail = await withFiles(who, id, async (files) => {
         const refs = await listSavedPlayerFiles(files);
         const candidates = [
@@ -304,15 +306,45 @@ export function createOpenworldPlayerDirectory(db: DB, withFiles: WithFiles, now
           statsAt: stats?.statsAt ?? null,
         };
       });
-      const skin = await db
-        .selectFrom('openworld_player_skins')
-        .select('skin_hash')
-        .where('server_id', '=', id)
-        .where('binding', '=', binding)
-        .where('account_id', '=', uuid.toLowerCase())
+      const account = z.uuid().safeParse(uuid).data;
+      const observed = await db
+        .selectFrom('openworld_server_profiles as p')
+        .leftJoin('openworld_player_skins as skin', (join) =>
+          join
+            .onRef('skin.server_id', '=', 'p.server_id')
+            .on('skin.binding', '=', binding)
+            .on('skin.account_id', '=', uuid.toLowerCase()),
+        )
+        .leftJoin('openworld_player_vitals as v', (join) =>
+          join
+            .onRef('v.server_id', '=', 'p.server_id')
+            .on('v.binding', '=', binding)
+            .on(
+              'v.account_id',
+              '=',
+              sql<string>`${detail.vitals ? null : (account ?? null)}::uuid`,
+            ),
+        )
+        .where('p.server_id', '=', id)
+        .select(['skin.skin_hash', 'v.vitals', 'v.observed_at'])
         .executeTakeFirst();
       await checkBinding(db, who, id, binding);
-      return { ...detail, ...(skin ? { skinHash: skin.skin_hash } : {}) };
+      const vitals = detail.vitals ?? openworldVitalsSchema.safeParse(observed?.vitals).data;
+      return {
+        ...detail,
+        ...(vitals && {
+          vitals: {
+            ...vitals,
+            ...(version === 'a1.2.9' &&
+              vitals.saturation != null &&
+              vitals.maxSaturation == null && { maxSaturation: 50 }),
+          },
+        }),
+        ...(!detail.vitals &&
+          vitals &&
+          observed?.observed_at && { vitalsObservedAt: observed.observed_at.toISOString() }),
+        ...(observed?.skin_hash && { skinHash: observed.skin_hash }),
+      };
     },
   };
 }

@@ -240,7 +240,7 @@
   background: transparent;
   border: 1px solid transparent;
 }
-.ow-command-list button.secondary:hover,
+.ow-command-list button.secondary:enabled:hover,
 .ow-command-list button.secondary:focus-visible {
   background: #f1f4f2;
   border-color: var(--line);
@@ -250,6 +250,11 @@
 }
 .ow-command-list button[data-destructive] {
   color: #9a3430;
+}
+.ow-command-list button.secondary:disabled {
+  color: var(--muted);
+  cursor: not-allowed;
+  filter: none;
 }
 .ow-command-list button:not([data-destructive]) + button[data-destructive] {
   margin-top: 6px;

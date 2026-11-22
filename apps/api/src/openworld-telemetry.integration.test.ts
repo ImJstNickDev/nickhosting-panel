@@ -1090,3 +1090,66 @@ it('bounds concurrent skin requests and rotates past a timed-out batch of accoun
       .execute(),
   ).toHaveLength(4);
 });
+
+it('archives verified vitals from existing roster and detail reads, including zero, in observation order', async () => {
+  const account = randomUUID();
+  const member = { id: 7, name: 'Ada', admitted: true, accountVerified: true, account };
+  const healthy = { health: 80, maxHealth: 100, hunger: 20 };
+  let vitals: Record<string, number | null> = healthy;
+  let roster = [member];
+  const { db, id, request, target, power, fetcher, state, calls } = await fixture((url) => {
+    if (url.pathname === '/api/live/player') return Response.json({ ...member, vitals });
+    if (url.pathname === '/api/live/players')
+      return Response.json({ players: roster.map((p) => ({ ...p, vitals })) });
+  });
+  await power('running');
+  const scope = await readOpenworldScope(db, id);
+  const scan = createOpenworldSkinCollector({ db, target, fetcher, now: () => state.now });
+  const row = () =>
+    db
+      .selectFrom('openworld_player_vitals')
+      .select(['vitals', 'observed_at'])
+      .where('server_id', '=', id)
+      .where('account_id', '=', account)
+      .executeTakeFirst();
+  const start = state.now;
+  // No skin hash, open profile or one-off request per player is needed by the worker.
+  await scan(scope, [{ connection: 7, account }]);
+  expect(calls).not.toContain('player');
+  expect(await row()).toEqual({ vitals: healthy, observed_at: new Date(start) });
+  const read = async (at: number, values: typeof vitals) => {
+    state.now = start + at;
+    vitals = values;
+    expect((await request('players/7?name=Ada')).status).toBe(200);
+  };
+  await read(10000, { ...healthy, health: 0 });
+  expect((await row())?.vitals).toMatchObject({ health: 0 });
+  // A second writer observes the original HP. An older changed response arrives afterwards.
+  state.now = start + 30000;
+  vitals = healthy;
+  await scan(scope, []);
+  await scan(scope, [{ connection: 7, account }]);
+  await read(20000, { ...healthy, health: 40 });
+  expect(await row()).toEqual({ vitals: healthy, observed_at: new Date(start + 30000) });
+  // An identical newer sample advances the watermark as well.
+  await read(40000, healthy);
+  state.now = start + 35000;
+  vitals = { ...healthy, health: 30 };
+  const late = createOpenworldSkinCollector({ db, target, fetcher, now: () => state.now });
+  await late(scope, [{ connection: 7, account }]);
+  await read(50000, { health: null, hunger: 10 });
+  expect(await row()).toEqual({ vitals: healthy, observed_at: new Date(start + 40000) });
+  state.now += 61000;
+  vitals = { ...healthy, health: 1 };
+  roster = [member, { ...member, id: 8 }];
+  await scan(scope, [
+    { connection: 7, account },
+    { connection: 8, account },
+  ]);
+  state.now += 61000;
+  roster = [{ ...member, accountVerified: false }];
+  await scan(scope, [{ connection: 7, account }]);
+  expect((await row())?.vitals).toEqual(healthy);
+  const publicRoster = await (await request('players')).json();
+  expect(publicRoster.data.players[0]).not.toHaveProperty('vitals');
+});

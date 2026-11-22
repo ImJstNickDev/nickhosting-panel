@@ -25,6 +25,7 @@ const messages: Record<string, [string, string]> = {
   ],
   noPlayersYet: ['No players found.', 'Nessun giocatore trovato.'],
   vitalStats: ['Vitals', 'Parametri vitali'],
+  noRecordedVitals: ['No vitals recorded yet.', 'Nessuna rilevazione dei parametri vitali.'],
   saveDetails: ['Last save', 'Ultimo salvataggio'],
 };
 const catalog = (index: 0 | 1) =>
