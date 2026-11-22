@@ -1,5 +1,7 @@
 /** All coordinates are metres on a single planetary face. Heights use the game's vertical datum. */
 export type AtlasMode = 'plan' | 'iso' | 'fly';
+export type AtlasFlightLock = 'idle' | 'locked' | 'unavailable';
+export type AtlasPointerPosition = Pick<MouseEvent, 'clientX' | 'clientY' | 'screenX' | 'screenY'>;
 export type AtlasView = { x: number; z: number; span: number };
 export type AtlasBounds = { i0: number; j0: number; i1: number; j1: number };
 export type AtlasFrame = AtlasView & {
@@ -42,6 +44,9 @@ export type AtlasOptions = {
   ) => Promise<(ArrayBuffer | null)[]>;
   loadTexture?: (id: number, signal: AbortSignal) => Promise<Blob | null>;
   onFrame?: () => void;
+  onNavigate?: () => void;
+  onFlightLockChange?: (state: AtlasFlightLock) => void;
+  onFlightKeyboardLockChange?: (active: boolean) => void;
   onCamera?: (frame: AtlasFrame) => void;
   onPick?: (px: number, py: number, point: AtlasPoint) => void;
   onError?: (error: unknown) => void;
@@ -52,6 +57,8 @@ export interface AtlasController {
   setView(view: AtlasView): void;
   getView(): AtlasFrame;
   setMode(mode: AtlasMode): void;
+  setFlightInspection(enabled: boolean): void;
+  requestFlightLock(gesture?: AtlasPointerPosition): void;
   setCoverage(
     columns: readonly (readonly [number, number])[],
     stride?: number,

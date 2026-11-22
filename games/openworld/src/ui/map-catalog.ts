@@ -19,9 +19,31 @@ const messages: Record<string, [string, string]> = {
     'Trascina per spostarti · Rotella o due dita per ingrandire',
   ],
   'map.atlas.flyHint': [
-    'Drag to look · WASD to move · Q/E for height',
-    'Trascina per guardarti intorno · WASD per muoverti · Q/E per la quota',
+    'Click the map to fly. Press Esc to release the mouse.',
+    'Fai clic sulla mappa per volare. Premi Esc per liberare il mouse.',
   ],
+  'map.atlas.flyHintFullscreen': [
+    'Click the map to fly in full screen. Press Esc to release the mouse.',
+    'Fai clic sulla mappa per volare a schermo intero. Premi Esc per liberare il mouse.',
+  ],
+  'map.atlas.flyLocked': [
+    'Mouse to look · WASD to move · Shift to fly faster · Space to rise · Ctrl to descend · Esc to release',
+    'Mouse per guardarti intorno · WASD per muoverti · Shift per accelerare · Spazio per salire · Ctrl per scendere · Esc per liberare il mouse',
+  ],
+  'map.atlas.flyLockedWindow': [
+    'Mouse to look · WASD to move · Shift to fly faster · Space to rise · Q to descend · Esc to release',
+    'Mouse per guardarti intorno · WASD per muoverti · Shift per accelerare · Spazio per salire · Q per scendere · Esc per liberare il mouse',
+  ],
+  'map.atlas.flyDrag': [
+    'Drag to look. Use the arrows to fly and + or − to change height.',
+    'Trascina per guardarti intorno. Usa le frecce per volare e + o − per cambiare quota.',
+  ],
+  'map.atlas.inspectHint': [
+    'Select a point to inspect the terrain.',
+    'Seleziona un punto per ispezionare il terreno.',
+  ],
+  'map.atlas.capture': ['Capture mouse', 'Cattura mouse'],
+  'map.atlas.inspect': ['Inspect terrain', 'Ispeziona terreno'],
   'map.atlas.full': ['Full screen', 'Schermo intero'],
   'map.atlas.exitFull': ['Exit full screen', 'Esci da schermo intero'],
   'map.atlas.turnLeft': ['Rotate left', 'Ruota a sinistra'],

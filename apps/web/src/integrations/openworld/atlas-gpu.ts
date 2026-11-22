@@ -102,13 +102,14 @@ function grid(gl: GL, side: number) {
 }
 type ImageTile = { tex: WebGLTexture; id: number; used: number; bytes: number };
 type VoxelGroup = {
-  signature: string;
+  serials: number[];
   vbo: WebGLBuffer | null;
   vao: WebGLVertexArrayObject | null;
   count: number;
   bytes: number;
   used: number;
 };
+type Region = { x: number; z: number; opaque: VoxelGroup; blend: VoxelGroup };
 const rgb = (hex: string) =>
   /^#[a-f\d]{6}$/i.test(hex) ? Number.parseInt(hex.slice(1), 16) : 0x7d827e;
 const gpuLimit = 96 * 1024 * 1024;
@@ -121,6 +122,8 @@ export class AtlasGpu {
   private readonly biomes;
   private readonly textureIndex;
   private readonly textures;
+  private readonly imageTile;
+  private readonly imageFramebuffer;
   private readonly slots: number;
   private readonly grids = new Map<number, ReturnType<typeof grid>>();
   private readonly rasters = new Map<string, ImageTile>();
@@ -141,6 +144,13 @@ export class AtlasGpu {
   private maskStride = 1;
   private maskBytes = new Uint8Array(0);
   private maskWidth = 0;
+  private visible: Entry[] | null = null;
+  private rastersInView: Entry[] = [];
+  private meshesInView: Entry[] = [];
+  private exposedRasters: Entry[] = [];
+  private regions: Region[] = [];
+  private idsInView = new Set<number>();
+  private uploadWords = new Uint16Array(0);
   private drawn: Entry[] = [];
   private frame = 0;
   private disposed = false;
@@ -166,6 +176,15 @@ export class AtlasGpu {
     gl.texStorage3D(gl.TEXTURE_2D_ARRAY, 6, gl.RGBA8, 32, 32, this.slots);
     gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
     gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
+    // Generating mipmaps on a texture array filters *all* allocated layers,
+    // including unused ones. Build each newly arrived tile in a reusable 32px
+    // texture, then copy its mip chain into the assigned array layer on the GPU.
+    this.imageFramebuffer = gl.createFramebuffer();
+    this.imageTile = gl.createTexture();
+    if (!this.imageFramebuffer || !this.imageTile)
+      throw new Error('WebGL material texture unavailable');
+    gl.bindTexture(gl.TEXTURE_2D, this.imageTile);
+    gl.texStorage2D(gl.TEXTURE_2D, 6, gl.RGBA8, 32, 32);
     this.coverVao = gl.createVertexArray();
     this.coverBuffer = gl.createBuffer();
     gl.bindVertexArray(this.coverVao);
@@ -196,7 +215,9 @@ export class AtlasGpu {
     gl.bindTexture(gl.TEXTURE_2D, this.palette);
     gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, 256, 256, gl.RGBA, gl.UNSIGNED_BYTE, colors);
     this.voxelSize = voxel;
-    this.syncTextureIndex();
+    gl.activeTexture(gl.TEXTURE4);
+    gl.bindTexture(gl.TEXTURE_2D, this.textureIndex);
+    gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, 256, 256, gl.RG, gl.FLOAT, this.textureLut);
   }
   setBiomes(biomes: readonly { id: number; color: string }[]) {
     const colors = new Uint8Array(256 * 4);
@@ -213,11 +234,22 @@ export class AtlasGpu {
     gl.bindTexture(gl.TEXTURE_2D, this.biomes);
     gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, 256, 1, gl.RGBA, gl.UNSIGNED_BYTE, colors);
   }
-  private syncTextureIndex() {
+  private syncTextureIndex(id: number) {
     const gl = this.gl;
     gl.activeTexture(gl.TEXTURE4);
     gl.bindTexture(gl.TEXTURE_2D, this.textureIndex);
-    gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, 256, 256, gl.RG, gl.FLOAT, this.textureLut);
+    gl.texSubImage2D(
+      gl.TEXTURE_2D,
+      0,
+      id & 255,
+      id >>> 8,
+      1,
+      1,
+      gl.RG,
+      gl.FLOAT,
+      this.textureLut,
+      id * 2,
+    );
   }
   setPaused(paused: boolean) {
     this.imageBackoff.pause(paused);
@@ -268,27 +300,30 @@ export class AtlasGpu {
             slot = this.loadedImages.get(unused) ?? 0;
             this.loadedImages.delete(unused);
             this.textureLut[unused * 2] = 0;
+            this.syncTextureIndex(unused);
           }
           const gl = this.gl;
           gl.activeTexture(gl.TEXTURE5);
           gl.bindTexture(gl.TEXTURE_2D_ARRAY, this.textures);
-          gl.texSubImage3D(
-            gl.TEXTURE_2D_ARRAY,
-            0,
-            0,
-            0,
-            slot,
-            32,
-            32,
-            1,
-            gl.RGBA,
-            gl.UNSIGNED_BYTE,
-            bitmap,
-          );
-          gl.generateMipmap(gl.TEXTURE_2D_ARRAY);
+          gl.bindTexture(gl.TEXTURE_2D, this.imageTile);
+          gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, gl.RGBA, gl.UNSIGNED_BYTE, bitmap);
+          gl.generateMipmap(gl.TEXTURE_2D);
+          gl.bindFramebuffer(gl.READ_FRAMEBUFFER, this.imageFramebuffer);
+          for (let level = 0; level < 6; level++) {
+            gl.framebufferTexture2D(
+              gl.READ_FRAMEBUFFER,
+              gl.COLOR_ATTACHMENT0,
+              gl.TEXTURE_2D,
+              this.imageTile,
+              level,
+            );
+            const side = 32 >> level;
+            gl.copyTexSubImage3D(gl.TEXTURE_2D_ARRAY, level, 0, 0, slot, 0, 0, side, side);
+          }
+          gl.bindFramebuffer(gl.READ_FRAMEBUFFER, null);
           this.loadedImages.set(id, slot);
           this.textureLut[id * 2] = slot + 1;
-          this.syncTextureIndex();
+          this.syncTextureIndex(id);
         } catch (error) {
           if (!ac.signal.aborted && !this.disposed) {
             this.imageBackoff.fail(error);
@@ -356,18 +391,10 @@ export class AtlasGpu {
       zj = Math.floor(b.j0 / (16 * stride)) * 16 * stride;
     const width = Math.ceil((b.i1 + 1 - xi) / (16 * stride)) * 16,
       height = Math.ceil((b.j1 + 1 - zj) / (16 * stride)) * 16;
-    const signature = [
-      xi,
-      zj,
-      width,
-      height,
-      stride,
-      stream.generation,
-      cam.mode === 'plan',
-      rasters.map((e) => e.serial).join(','),
-      meshes.map((e) => e.serial).join(','),
-    ].join('/');
-    if (this.maskSignature === signature) return;
+    const signature = [xi, zj, width, height, stride, stream.generation, cam.mode === 'plan'].join(
+      '/',
+    );
+    if (this.maskSignature === signature) return false;
     this.maskSignature = signature;
     this.maskX = xi * 16;
     this.maskZ = zj * 16;
@@ -465,22 +492,37 @@ export class AtlasGpu {
           (e.value.opaque.length || e.value.blend.length)
         )
           mark(e.request.i, e.request.j, 15);
+    const sameSize = this.maskWidth === width && this.maskBytes.length === bytes.length;
     this.maskBytes = bytes;
     this.maskWidth = width;
     const gl = this.gl;
     gl.activeTexture(gl.TEXTURE3);
     gl.bindTexture(gl.TEXTURE_2D, this.mask);
-    gl.texImage2D(
-      gl.TEXTURE_2D,
-      0,
-      gl.R8UI,
-      width,
-      height,
-      0,
-      gl.RED_INTEGER,
-      gl.UNSIGNED_BYTE,
-      bytes,
-    );
+    if (sameSize)
+      gl.texSubImage2D(
+        gl.TEXTURE_2D,
+        0,
+        0,
+        0,
+        width,
+        height,
+        gl.RED_INTEGER,
+        gl.UNSIGNED_BYTE,
+        bytes,
+      );
+    else
+      gl.texImage2D(
+        gl.TEXTURE_2D,
+        0,
+        gl.R8UI,
+        width,
+        height,
+        0,
+        gl.RED_INTEGER,
+        gl.UNSIGNED_BYTE,
+        bytes,
+      );
+    return true;
   }
   private exposed(entry: Entry, raster: Raster) {
     const r = entry.request;
@@ -540,17 +582,19 @@ export class AtlasGpu {
   }
   private group(key: string, entries: Entry[], pass: 'opaque' | 'blend') {
     let group = this.groups.get(key);
-    const signature = entries.map((e) => e.serial).join(',');
-    if (group?.signature === signature) {
-      group.used = this.frame;
-      return group;
+    let prefix = 0;
+    let reusableBytes = 0;
+    while (group && prefix < entries.length && entries[prefix]?.serial === group.serials[prefix]) {
+      reusableBytes += ((entries[prefix] as Entry).value as QuadBatch)[pass].byteLength;
+      prefix++;
     }
+    if (group && prefix === entries.length && prefix === group.serials.length) return group;
     const gl = this.gl;
     if (!group) {
       group = {
         vao: gl.createVertexArray(),
         vbo: gl.createBuffer(),
-        signature: '',
+        serials: [],
         count: 0,
         bytes: 0,
         used: this.frame,
@@ -568,21 +612,75 @@ export class AtlasGpu {
       }
       this.groups.set(key, group);
     }
-    gl.bindBuffer(gl.ARRAY_BUFFER, group.vbo);
     const size = entries.reduce((sum, e) => sum + (e.value as QuadBatch)[pass].byteLength, 0);
-    gl.bufferData(gl.ARRAY_BUFFER, size, gl.DYNAMIC_DRAW);
-    let offset = 0;
-    for (const entry of entries) {
-      const quads = (entry.value as QuadBatch)[pass];
-      if (!quads.length) continue;
-      gl.bufferSubData(gl.ARRAY_BUFFER, offset, quads);
-      offset += quads.byteLength;
+    gl.bindBuffer(gl.ARRAY_BUFFER, group.vbo);
+    if (size > group.bytes) {
+      group.bytes = Math.max(size, Math.ceil((group.bytes * 1.5) / 16) * 16);
+      gl.bufferData(gl.ARRAY_BUFFER, group.bytes, gl.DYNAMIC_DRAW);
+      prefix = 0;
+      reusableBytes = 0;
+    }
+    // Columns usually arrive in order within each region. Only replace the changed
+    // suffix. One GPU submission also avoids a WebGL command per resident column.
+    const words = (size - reusableBytes) / Uint16Array.BYTES_PER_ELEMENT;
+    if (words) {
+      if (this.uploadWords.length < words) this.uploadWords = new Uint16Array(words);
+      let offset = 0;
+      for (let i = prefix; i < entries.length; i++) {
+        const quads = ((entries[i] as Entry).value as QuadBatch)[pass];
+        this.uploadWords.set(quads, offset);
+        offset += quads.length;
+      }
+      gl.bufferSubData(gl.ARRAY_BUFFER, reusableBytes, this.uploadWords, 0, words);
     }
     group.count = size / 16;
-    group.bytes = size;
-    group.signature = signature;
+    group.serials = entries.map((e) => e.serial);
     group.used = this.frame;
     return group;
+  }
+  private prepare(visible: Entry[]) {
+    this.visible = visible;
+    this.maskSignature = '';
+    const bestMeshes = new Map<string, Entry>();
+    const rasters: Entry[] = [];
+    for (const e of visible) {
+      const r = e.request;
+      if (r.kind === 'mesh') {
+        const key = `${r.i},${r.j}`;
+        const previous = bestMeshes.get(key);
+        if (!previous || (previous.request.kind === 'mesh' && r.lod < previous.request.lod))
+          bestMeshes.set(key, e);
+      } else if (e.value?.kind === 'raster') rasters.push(e);
+    }
+    this.rastersInView = rasters.sort((a, b) => {
+      const x = a.value as Raster,
+        y = b.value as Raster;
+      return Number(y.seed) - Number(x.seed) || y.mpp - x.mpp;
+    });
+    this.meshesInView = [];
+    this.idsInView = new Set();
+    const groups = new Map<string, Entry[]>();
+    for (const e of bestMeshes.values()) {
+      const v = e.value;
+      if (v?.kind !== 'quads' || !(v.opaque.length || v.blend.length)) continue;
+      this.meshesInView.push(e);
+      const key = `${v.regionX}:${v.regionZ}`;
+      const list = groups.get(key);
+      if (list) list.push(e);
+      else groups.set(key, [e]);
+      for (const id of v.materials) this.idsInView.add(id);
+    }
+    this.regions = [];
+    for (const [key, list] of groups) {
+      const v = list[0]?.value;
+      if (v?.kind === 'quads')
+        this.regions.push({
+          x: v.regionX * 16,
+          z: v.regionZ * 16,
+          opaque: this.group(`${key}/opaque`, list, 'opaque'),
+          blend: this.group(`${key}/blend`, list, 'blend'),
+        });
+    }
   }
   draw(cam: AtlasCamera, stream: AtlasStream) {
     const gl = this.gl;
@@ -596,22 +694,11 @@ export class AtlasGpu {
     gl.disable(gl.BLEND);
     gl.disable(gl.CULL_FACE);
     this.coverage(cam, stream);
-    const bestMeshes = new Map<string, Entry>(),
-      rasters: Entry[] = [];
-    for (const e of stream.visible) {
-      const r = e.request;
-      if (r.kind === 'mesh') {
-        const key = `${r.i},${r.j}`,
-          p = bestMeshes.get(key);
-        if (!p || (p.request.kind === 'mesh' && r.lod < p.request.lod)) bestMeshes.set(key, e);
-      } else if (e.value?.kind === 'raster') rasters.push(e);
+    if (this.visible !== stream.visible) this.prepare(stream.visible);
+    if (this.uploadMask(cam, stream, this.rastersInView, this.meshesInView)) {
+      this.exposedRasters = this.rastersInView.filter((e) => this.exposed(e, e.value as Raster));
+      this.drawn = [...this.meshesInView, ...this.exposedRasters];
     }
-    // Display the true surface even if a valid mesh has no quads at a requested LOD.
-    const meshes = [...bestMeshes.values()].filter(
-      (e) => e.value?.kind === 'quads' && (e.value.opaque.length || e.value.blend.length),
-    );
-    this.drawn = [...meshes];
-    this.uploadMask(cam, stream, rasters, meshes);
     this.view(this.terrain, cam);
     if (!plan) gl.enable(gl.DEPTH_TEST);
     else gl.disable(gl.DEPTH_TEST);
@@ -628,30 +715,9 @@ export class AtlasGpu {
     gl.uniform1i(u.uBiomes ?? null, 2);
     gl.uniform1i(u.uMask ?? null, 3);
     gl.uniform1f(u.uMaskMetres ?? null, 16 * this.maskStride);
-    rasters.sort((a, b) => {
-      const x = a.value as Raster,
-        y = b.value as Raster;
-      return Number(y.seed) - Number(x.seed) || y.mpp - x.mpp;
-    });
-    for (const e of rasters) {
-      const raster = e.value as Raster;
-      if (this.exposed(e, raster)) {
-        this.drawn.push(e);
-        this.raster(e, raster, cam);
-      }
-    }
-    if (meshes.length) {
-      const groups = new Map<string, Entry[]>(),
-        ids = new Set<number>();
-      for (const e of meshes) {
-        const v = e.value as QuadBatch,
-          key = `${v.regionX}:${v.regionZ}`;
-        const list = groups.get(key);
-        if (list) list.push(e);
-        else groups.set(key, [e]);
-        for (const id of v.materials) ids.add(id);
-      }
-      this.images(ids);
+    for (const e of this.exposedRasters) this.raster(e, e.value as Raster, cam);
+    if (this.regions.length) {
+      this.images(this.idsInView);
       this.view(this.quads, cam);
       gl.activeTexture(gl.TEXTURE4);
       gl.bindTexture(gl.TEXTURE_2D, this.textureIndex);
@@ -669,25 +735,18 @@ export class AtlasGpu {
         }
         const sorted =
           pass === 'opaque'
-            ? groups.entries()
-            : [...groups.entries()].sort(([, a], [, b]) => {
-                const d = (e: Entry | undefined) => {
-                  if (!e) return 0;
-                  const q = e.value as QuadBatch;
-                  return Math.hypot(
-                    (q.regionX + regionColumns / 2) * 16 - cam.x,
-                    (q.regionZ + regionColumns / 2) * 16 - cam.z,
-                  );
-                };
-                return d(b[0]) - d(a[0]);
+            ? this.regions
+            : [...this.regions].sort((a, b) => {
+                const distance = (r: Region) =>
+                  (r.x + regionColumns * 8 - cam.x) ** 2 + (r.z + regionColumns * 8 - cam.z) ** 2;
+                return distance(b) - distance(a);
               });
         gl.uniform2f(u.uVoxel ?? null, this.voxelSize, pass === 'blend' ? 1 : 0);
-        for (const [key, list] of sorted) {
-          const group = this.group(`${key}/${pass}`, list, pass);
+        for (const region of sorted) {
+          const group = region[pass];
+          group.used = this.frame;
           if (!group.count) continue;
-          const v = list[0]?.value;
-          if (v?.kind !== 'quads') continue;
-          gl.uniform3f(u.uOrigin ?? null, v.regionX * 16 - cam.x, -cam.y, v.regionZ * 16 - cam.z);
+          gl.uniform3f(u.uOrigin ?? null, region.x - cam.x, -cam.y, region.z - cam.z);
           gl.bindVertexArray(group.vao);
           gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, group.count);
         }
@@ -756,6 +815,8 @@ export class AtlasGpu {
       gl.deleteTexture(t);
     for (const p of [this.terrain, this.quads, this.cover]) gl.deleteProgram(p.program);
     gl.deleteVertexArray(this.coverVao);
+    gl.deleteTexture(this.imageTile);
+    gl.deleteFramebuffer(this.imageFramebuffer);
     gl.deleteBuffer(this.coverBuffer);
   }
 }

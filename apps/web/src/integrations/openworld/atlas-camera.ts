@@ -67,9 +67,22 @@ export class AtlasCamera {
   }
   move(right: number, forward: number, up: number) {
     const yaw = this.mode === 'plan' ? 0 : this.yaw;
-    this.x = clamp(this.x - Math.cos(yaw) * right + Math.sin(yaw) * forward, 0, this.edge);
-    this.z = clamp(this.z + Math.sin(yaw) * right + Math.cos(yaw) * forward, 0, this.edge);
-    if (this.mode === 'fly') this.y = clamp(this.y + up, -10000, 50000);
+    const dx = -Math.cos(yaw) * right + Math.sin(yaw) * forward;
+    const dz = Math.sin(yaw) * right + Math.cos(yaw) * forward;
+    if (this.mode !== 'fly') {
+      this.x = clamp(this.x + dx, 0, this.edge);
+      this.z = clamp(this.z + dz, 0, this.edge);
+      return;
+    }
+    // Looking can put the focal point beyond a face edge while the eye is still inside it.
+    // Constrain displacement at the eye so pressing a movement key cannot teleport it.
+    const direction = this.basis.forward;
+    const distance = this.distance;
+    const bounded = (delta: number, eye: number, min: number, max: number) =>
+      clamp(delta, Math.min(0, min - eye), Math.max(0, max - eye));
+    this.x += bounded(dx, this.x - distance * direction[0], 0, this.edge);
+    this.y += bounded(up, this.y - distance * direction[1], -10000, 50000);
+    this.z += bounded(dz, this.z - distance * direction[2], 0, this.edge);
   }
   project(x: number, z: number, y: number) {
     const b = this.basis,

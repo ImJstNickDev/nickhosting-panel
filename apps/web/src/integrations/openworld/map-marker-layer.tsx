@@ -20,8 +20,10 @@ export function MapMarkerLayer({
   markers,
   frame,
   scene,
+  stopFollowing,
 }: {
   markers: AtlasMarker[];
+  stopFollowing: () => void;
   frame?: AtlasFrame;
   scene: React.RefObject<AtlasController | null>;
 }) {
@@ -87,7 +89,10 @@ export function MapMarkerLayer({
                 g.markers.every((p) => Math.abs(p.x - first.x) + Math.abs(p.z - first.z) < 0.01)
               )
                 setExpanded(key);
-              else engine.setView({ x, z, span: Math.max(4, span / 3) });
+              else {
+                stopFollowing();
+                engine.setView({ x, z, span: Math.max(4, span / 3) });
+              }
             }}
           >
             {count}

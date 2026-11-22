@@ -165,6 +165,13 @@ when provided by the running release. The more distant landscape uses the game's
 saved surface at progressively coarser resolutions. On a device without WebGL 2
 the interactive 2D overview remains available.
 
+In free flight, click the map to capture the mouse. Look around with the mouse
+and move with WASD. Hold Shift to fly faster or Space to rise. The map opens in
+full screen on browsers that support capturing the flight keys. Hold Ctrl to
+descend there, or use Q anywhere. The on-screen hint shows the keys available
+in the current session. Esc releases the mouse. Use **Inspect terrain** to
+select a point with the cursor, or the on-screen flight controls on a touchscreen.
+
 Layers include checkpoints, live players, creatures by species and active factory
 columns with their respective permissions. With both map and Seed Inspector access,
 **Seed preview** fills unexplored areas with procedural terrain. Biome colors and

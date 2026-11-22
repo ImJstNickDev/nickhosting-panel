@@ -1,10 +1,11 @@
-import { mkdir } from 'node:fs/promises';
+import { mkdir, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { type Browser, expect as check, chromium, type Page } from '@playwright/test';
 import { createServer, type ViteDevServer } from 'vite';
 import { afterAll, beforeAll, expect, it } from 'vitest';
 import { decodeMapTile } from '../../../games/openworld/src/map-terrain.js';
 
+import { sampleIsometricDrag } from '../../../scripts/experiments/openworld-atlas/input-sample.js';
 import {
   faceEdge,
   materialPalette,
@@ -1917,6 +1918,8 @@ async function mapRoutes(
   options: {
     wide?: boolean;
     bridge?: boolean;
+    radius?: 3 | 8 | 16;
+    firstMeshGate?: Promise<void>;
     edge?: number;
     emptyWorlds?: boolean;
     failWrites?: boolean;
@@ -1933,7 +1936,7 @@ async function mapRoutes(
   ];
   const processRef = 'f'.repeat(64);
   const known = options.bridge
-    ? valleyColumns(8)
+    ? valleyColumns(options.radius ?? 8)
     : valleyColumns().filter(([x, z]) => x < 16 && z < 16);
   if (options.wide) known.push([200, 100]);
   if (options.bridge)
@@ -1973,10 +1976,10 @@ async function mapRoutes(
               ? {
                   face,
                   count: known.length,
-                  i0: options.bridge ? 8 : 0,
-                  j0: options.bridge ? 8 : 0,
-                  i1: options.wide ? 200 : options.bridge ? 23 : 15,
-                  j1: options.wide ? 100 : options.bridge ? 23 : 15,
+                  i0: options.bridge ? 16 - (options.radius ?? 8) : 0,
+                  j0: options.bridge ? 16 - (options.radius ?? 8) : 0,
+                  i1: options.wide ? 200 : options.bridge ? 15 + (options.radius ?? 8) : 15,
+                  j1: options.wide ? 100 : options.bridge ? 15 + (options.radius ?? 8) : 15,
                 }
               : { face, count: 0, i0: null, j0: null, i1: null, j1: null },
           ),
@@ -2014,6 +2017,7 @@ async function mapRoutes(
     if (path === '/texture')
       return route.fulfill({ contentType: 'image/png', body: texture(number('id')) });
     if (path === '/meshes') {
+      if (options.firstMeshGate) await options.firstMeshGate;
       const cells = (u.searchParams.get('cells') ?? '')
         .split(';')
         .map((pair) => pair.split(',').map(Number) as [number, number]);
@@ -2522,10 +2526,25 @@ it('uses a bounded sample to frame a larger map and fetches the actual overview 
   }
 });
 
+function completedMapTextures(page: Page) {
+  const materials = new Set<number>();
+  page.on('requestfinished', async (request) => {
+    const u = new URL(request.url());
+    if (
+      u.pathname.endsWith('/map/texture') &&
+      u.searchParams.has('id') &&
+      (await request.response())?.ok()
+    )
+      materials.add(Number(u.searchParams.get('id')));
+  });
+  return materials;
+}
+
 it('keeps the same bridge across the three projections', async () => {
   const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
   try {
     await page.addInitScript(() => performance.setResourceTimingBufferSize(4000));
+    const textures = completedMapTextures(page);
     const { paths } = await mapRoutes(page, { bridge: true });
     await page.goto(
       `${url}telemetry-fixture?section=map&seedAccess&cartographer#world=earth&face=0&x=256&z=258&y=35`,
@@ -2537,11 +2556,7 @@ it('keeps the same bridge across the three projections', async () => {
     expect([...reads('mesh'), ...reads('meshes')]).toHaveLength(0);
     await page.getByRole('button', { name: 'Isometric', exact: true }).click();
     await check.poll(() => reads('meshes').length).toBeGreaterThan(0);
-    await page.waitForFunction(
-      () =>
-        performance.getEntriesByType('resource').filter((e) => e.name.includes('/map/texture?'))
-          .length >= 7,
-    );
+    await check.poll(() => textures.size, { timeout: 60_000 }).toBeGreaterThanOrEqual(7);
     await page.evaluate(
       () =>
         new Promise<void>((resolve) =>
@@ -2579,6 +2594,244 @@ it('keeps the same bridge across the three projections', async () => {
     await page.close();
   }
 }, 90_000);
+it('keeps an isometric drag attached to its original plane while terrain streams', async () => {
+  const page = await browser.newPage({
+    viewport: { width: 1680, height: 1050 },
+    deviceScaleFactor: 1,
+  });
+  const gate = Promise.withResolvers<void>();
+  try {
+    await page.addInitScript(() => performance.setResourceTimingBufferSize(4000));
+    const { paths } = await mapRoutes(page, {
+      bridge: true,
+      radius: 16,
+      firstMeshGate: gate.promise,
+    });
+    await page.goto(
+      `${url}telemetry-fixture?section=map&cartographer#world=earth&face=0&x=256&z=258&y=35`,
+    );
+    // Account for the panel's surrounding server workspace on a desktop viewport.
+    await page.addStyleTag({ content: 'main { max-width: calc(100vw - 256px) !important; }' });
+    await check(page.locator('.ow-map-location')).toBeVisible();
+    await page.getByRole('button', { name: 'Isometric', exact: true }).click();
+    await check.poll(() => paths.some((p) => p.pathname.endsWith('/meshes'))).toBe(true);
+    const coldReads = await page.evaluate(
+      () =>
+        performance.getEntriesByType('resource').filter((e) => e.name.includes('/map/meshes?'))
+          .length,
+    );
+    const cold = await sampleIsometricDrag(page, 244, () => setTimeout(() => gate.resolve(), 200));
+    await page.waitForFunction(() => {
+      const reads = performance
+        .getEntriesByType('resource')
+        .filter((e) => e.name.includes('/map/meshes?'));
+      return (
+        reads.length > 0 &&
+        performance.now() - Math.max(...reads.map((e) => e.startTime + e.duration)) > 750
+      );
+    });
+    const warm = await sampleIsometricDrag(page, -244);
+    const reads = await page.evaluate(
+      () =>
+        performance.getEntriesByType('resource').filter((e) => e.name.includes('/map/meshes?'))
+          .length,
+    );
+    const report = process.env.NICKHOSTING_ATLAS_INPUT_REPORT;
+    if (report) {
+      await writeFile(report, JSON.stringify({ cold, warm, coldReads, reads }, null, 2));
+    }
+    const glError = await page
+      .locator('.ow-map-stage canvas')
+      .evaluate((el) => (el as HTMLCanvasElement).getContext('webgl2')?.getError());
+    expect(glError).toBe(0);
+    expect(cold.meshResponses).toBeGreaterThan(0);
+    expect(coldReads).toBe(0);
+    expect(reads).toBeGreaterThan(0);
+    for (const pass of [cold, warm]) {
+      expect(Math.abs(pass.dx - pass.expectedDx)).toBeLessThan(5);
+      expect(pass.orthogonalDriftPx).toBeLessThan(1.5);
+      expect(pass.backwardsPx).toBeLessThan(1.5);
+    }
+  } finally {
+    gate.resolve();
+    await page.close();
+  }
+}, 90_000);
+
+it.each([true, false])(
+  'captures and releases free flight with keyboard capture available=%s',
+  async (keyboardCapture) => {
+    const page = await browser.newPage({ viewport: { width: 1100, height: 760 } });
+    try {
+      await page.addInitScript(() => performance.setResourceTimingBufferSize(4000));
+      // Observe the camera sent to WebGL without stalling a software renderer on readback.
+      await page.addInitScript(() => {
+        const pose = { yawAxis: NaN, altitude: NaN };
+        Object.assign(window, { flightPose: pose });
+        const api = WebGL2RenderingContext.prototype;
+        const originalLocation = api.getUniformLocation,
+          matrix = api.uniformMatrix3fv,
+          vector = api.uniform3f;
+        const names = new WeakMap<WebGLUniformLocation, string>();
+        api.getUniformLocation = function (program, name) {
+          const at = originalLocation.call(this, program, name);
+          if (at) names.set(at, name);
+          return at;
+        };
+        api.uniformMatrix3fv = function (...args) {
+          const [at, , data] = args;
+          if (at && names.get(at) === 'uAxes' && '0' in data) pose.yawAxis = Number(data[0]);
+          matrix.apply(this, args);
+        };
+        api.uniform3f = function (at, x, y, z) {
+          if (at && names.get(at) === 'uOrigin' && y !== 0) pose.altitude = -y;
+          vector.call(this, at, x, y, z);
+        };
+      });
+      if (!keyboardCapture) {
+        await page.addInitScript(() =>
+          Object.defineProperty(navigator, 'keyboard', { value: undefined }),
+        );
+      }
+      // The command test only needs the bridge and its surrounding columns.
+      const textures = completedMapTextures(page);
+      await mapRoutes(page, { bridge: true, radius: 3 });
+      await page.goto(
+        `${url}telemetry-fixture?section=map&cartographer#world=earth&face=0&x=256&z=258&y=35`,
+      );
+      const stage = page.locator('.ow-map-stage canvas');
+      const marker = page.locator('.ow-map-location');
+      const locked = () =>
+        page.evaluate(
+          () => document.pointerLockElement === document.querySelector('.ow-map-stage canvas'),
+        );
+      const shader = () =>
+        page.evaluate(
+          () =>
+            (window as Window & { flightPose?: { yawAxis: number; altitude: number } })
+              .flightPose ?? { yawAxis: NaN, altitude: NaN },
+        );
+      const screenPosition = () =>
+        marker.evaluate((el) => {
+          const r = el.getBoundingClientRect();
+          return { x: r.x + r.width / 2, y: r.y + r.height / 2 };
+        });
+      await check(marker).toBeVisible();
+      await page.getByRole('button', { name: 'Free flight', exact: true }).click();
+      await check.poll(() => textures.has(4), { timeout: 60_000 }).toBe(true);
+      await page.getByRole('button', { name: 'Inspect terrain', exact: true }).click();
+      // Aim at the bridge edge, a known live surface beneath the selected position.
+      await stage.scrollIntoViewIfNeeded();
+      const anchor = await screenPosition();
+      await page.mouse.click(anchor.x + 18, anchor.y + 15);
+      expect(await locked()).toBe(false);
+      await check(page.locator('.ow-atlas-point')).toBeVisible();
+      await page.getByRole('button', { name: 'Inspect terrain', exact: true }).click();
+      const beforeCapture = await shader();
+      const clickStage = () => stage.click({ position: { x: 240, y: 190 } });
+      await clickStage();
+      await check.poll(locked).toBe(true);
+      await check(stage).toHaveAttribute('aria-description', keyboardCapture ? /Ctrl/ : /Q/);
+      expect(await page.evaluate(() => !!document.fullscreenElement)).toBe(keyboardCapture);
+      await check.poll(async () => Number.isFinite((await shader()).altitude)).toBe(true);
+      const start = await shader();
+      // Entering pointer lock can recenter the system cursor before pointerlockchange.
+      expect(start.yawAxis).toBeCloseTo(beforeCapture.yawAxis, 5);
+      // DevTools sends absolute motion while Pointer Lock reports hardware-relative motion.
+      await stage.evaluate((el) =>
+        el.dispatchEvent(
+          new MouseEvent('mousemove', { bubbles: true, movementX: 12, movementY: 1 }),
+        ),
+      );
+
+      await check
+        .poll(async () => Math.abs((await shader()).yawAxis - start.yawAxis), { timeout: 15_000 })
+        .toBeGreaterThan(0.002);
+      // Observe the actual rendered camera even if the marker has left the field of view.
+      const beforeY = (await shader()).altitude;
+      await page.keyboard.press('Space', { delay: 100 });
+      await check
+        .poll(async () => (await shader()).altitude - beforeY, { timeout: 15_000 })
+        .toBeGreaterThan(0.2);
+      const raisedY = (await shader()).altitude;
+      const descend = keyboardCapture ? 'Control' : 'KeyQ';
+      await page.keyboard.press(descend, { delay: 100 });
+      await check
+        .poll(async () => raisedY - (await shader()).altitude, { timeout: 15_000 })
+        .toBeGreaterThan(0.2);
+      await page.keyboard.down('Shift');
+      await page.keyboard.down('KeyW');
+      await page.keyboard.press('Escape');
+      await check.poll(locked).toBe(false);
+      await page.keyboard.up('KeyW');
+      await page.keyboard.up('Shift');
+      const filter = page.getByRole('searchbox');
+      await filter.fill('wasd ');
+      await check(filter).toHaveValue('wasd ');
+      expect(await locked()).toBe(false);
+      await filter.fill('');
+      // Native Escape releases may have a browser-imposed re-entry interval.
+      await check
+        .poll(
+          async () => {
+            if (!(await locked()))
+              await page.getByRole('button', { name: 'Capture mouse', exact: true }).click();
+            return locked();
+          },
+          { intervals: [200, 400, 600] },
+        )
+        .toBe(true);
+      await page.evaluate(() => document.exitPointerLock());
+      await check.poll(locked).toBe(false);
+    } finally {
+      await page.close();
+    }
+  },
+  90_000,
+);
+
+it('preserves touch look in free flight with the system pointer free', async () => {
+  const page = await browser.newPage({
+    viewport: { width: 390, height: 844 },
+    hasTouch: true,
+    isMobile: true,
+    deviceScaleFactor: 1,
+  });
+  try {
+    await mapRoutes(page, { bridge: true });
+    await page.goto(
+      `${url}telemetry-fixture?section=map&cartographer#world=earth&face=0&x=256&z=258&y=35`,
+    );
+    const marker = page.locator('.ow-map-location'),
+      canvas = page.locator('.ow-map-stage canvas');
+    await page.getByRole('button', { name: 'Free flight', exact: true }).tap();
+    await canvas.scrollIntoViewIfNeeded();
+    await check(marker).toBeVisible();
+    const before = await marker.boundingBox(),
+      box = await canvas.boundingBox();
+    if (!before || !box) throw Error('Missing touch scene');
+    const cdp = await page.context().newCDPSession(page);
+    const x = box.x + box.width * 0.3,
+      y = box.y + box.height * 0.65;
+    try {
+      await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x, y }] });
+      await cdp.send('Input.dispatchTouchEvent', {
+        type: 'touchMove',
+        touchPoints: [{ x: x + 28, y: y + 6 }],
+      });
+      await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+    } finally {
+      await cdp.detach();
+    }
+    await check
+      .poll(async () => Math.abs(((await marker.boundingBox())?.x ?? before.x) - before.x))
+      .toBeGreaterThan(2);
+    expect(await page.evaluate(() => document.pointerLockElement)).toBeNull();
+  } finally {
+    await page.close();
+  }
+}, 90_000);
+
 it('shows seed deposits and structures only on opt-in and clears predicted markers when access is withdrawn', async () => {
   const page = await browser.newPage();
   try {

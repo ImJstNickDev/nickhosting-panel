@@ -46,6 +46,10 @@ export class AtlasStream {
   private readonly worker: Worker;
   private wanted = new Map<string, Task>();
   private queue: Task[] = [];
+  // Coverage, scale and intersecting column boundaries govern the requested set.
+  // Newly decoded columns usually change visibility alone.
+  private previousPlan: { view: AtlasFrame; mode: AtlasMode } | null = null;
+  private viewedGeneration = -1;
   private serial = 0;
   private age = 0;
   private totalBytes = 0;
@@ -99,6 +103,7 @@ export class AtlasStream {
     stride: number,
     audited?: AtlasBounds | null,
   ) {
+    this.previousPlan = null;
     this.seedFootprints.clear();
     this.audited = audited ?? null;
     this.coverageReady = true;
@@ -108,6 +113,7 @@ export class AtlasStream {
     this.generation++;
   }
   setSurvey(bounds: AtlasBounds | null) {
+    this.previousPlan = null;
     this.survey = bounds;
     this.generation++;
   }
@@ -149,6 +155,7 @@ export class AtlasStream {
     this.backoff.live.pause(paused);
     this.backoff.seed.pause(paused);
     if (paused) for (const job of this.pending.values()) job.abort.abort();
+    else this.pump();
   }
   needsSeed(bounds: AtlasBounds, x: number, y: number, tileMetres: number) {
     const i0 = Math.max(bounds.i0, Math.floor((x * tileMetres) / 16));
@@ -174,6 +181,7 @@ export class AtlasStream {
     return gap;
   }
   setSeed(enabled: boolean, edge: number, zoom: number) {
+    this.previousPlan = null;
     this.seed = enabled;
     this.seedEdge = edge;
     this.maxSeedZoom = zoom;
@@ -185,6 +193,7 @@ export class AtlasStream {
     this.generation++;
   }
   invalidate(cells: readonly (readonly [number, number])[] | null) {
+    this.previousPlan = null;
     const keys = cells ? new Set(cells.map(([i, j]) => `${i},${j}`)) : null;
     const affected = (r: AtlasRequest) => {
       if (r.kind === 'seed') return false;
@@ -201,6 +210,7 @@ export class AtlasStream {
     this.generation++;
   }
   retry() {
+    this.previousPlan = null;
     this.failures.clear();
     this.backoff.live.reset();
     this.backoff.seed.reset();
@@ -212,6 +222,29 @@ export class AtlasStream {
     this.cache.delete(key);
   }
   update(view: AtlasFrame, mode: AtlasMode) {
+    const previous = this.previousPlan;
+    const viewChanged =
+      !previous ||
+      previous.mode !== mode ||
+      previous.view.span !== view.span ||
+      previous.view.width !== view.width ||
+      !sameBounds(previous.view.bounds, view.bounds) ||
+      !sameBounds(previous.view.detailBounds, view.detailBounds) ||
+      (mode === 'fly'
+        ? previous.view.x !== view.x || previous.view.z !== view.z
+        : Math.floor(previous.view.x / 16) !== Math.floor(view.x / 16) ||
+          Math.floor(previous.view.z / 16) !== Math.floor(view.z / 16));
+    if (!viewChanged && this.viewedGeneration === this.generation) return;
+    if (viewChanged) {
+      this.plan(view, mode);
+      this.previousPlan = { view, mode };
+    }
+    this.viewedGeneration = this.generation;
+    this.updateVisible(view, mode);
+    this.pump();
+  }
+
+  private plan(view: AtlasFrame, mode: AtlasMode) {
     const b = view.bounds,
       cx = view.x / 16,
       cz = view.z / 16,
@@ -358,8 +391,17 @@ export class AtlasStream {
       }
     }
     this.wanted = wanted;
-    this.queue = [...wanted.values()].sort((a, b) => a.priority - b.priority);
+    this.queue = [...wanted.values()]
+      .filter((task) => {
+        const entry = this.cache.get(task.key);
+        return !entry || entry.stale;
+      })
+      .sort((a, b) => a.priority - b.priority);
     for (const [key, job] of this.pending) if (!wanted.has(key)) job.abort.abort();
+  }
+  private updateVisible(view: AtlasFrame, mode: AtlasMode) {
+    const b = view.bounds;
+    const wanted = this.wanted;
     const age = ++this.age;
     const visible: Entry[] = [];
     for (const e of this.cache.values()) {
@@ -379,8 +421,9 @@ export class AtlasStream {
       if (wanted.has(e.key)) e.age = age;
       visible.push(e);
     }
-    this.visible = visible;
-    this.pump();
+    if (visible.length !== this.visible.length || visible.some((e, i) => e !== this.visible[i])) {
+      this.visible = visible;
+    }
   }
   private eligible(task: Task) {
     if (
@@ -470,6 +513,12 @@ export class AtlasStream {
           : value?.kind === 'quads'
             ? value.opaque.byteLength + value.blend.byteLength
             : 0;
+      if (
+        (this.stride > 1 || this.survey) &&
+        task.request.kind === 'surface' &&
+        task.request.lod === 6
+      )
+        this.previousPlan = null;
       this.totalBytes += size;
       this.cache.set(task.key, {
         ...task,
@@ -484,6 +533,7 @@ export class AtlasStream {
         for (const c of candidates) {
           if (this.cache.size <= 1600 && this.totalBytes <= cacheBudget * 0.9) break;
           this.remove(c.key);
+          this.previousPlan = null;
           // Defer eviction victims in a scene that exceeds memory capacity.
           if (this.wanted.has(c.key)) this.failures.set(c.key, Date.now() + 30000);
         }
@@ -538,6 +588,11 @@ export class AtlasStream {
     this.queue = [];
     this.failures.clear();
   }
+}
+function sameBounds(a: AtlasBounds | undefined, b: AtlasBounds | undefined) {
+  return (
+    a === b || (!!a && !!b && a.i0 === b.i0 && a.i1 === b.i1 && a.j0 === b.j0 && a.j1 === b.j1)
+  );
 }
 function intersects(e: Entry, b: AtlasBounds, view: AtlasFrame, edge: number) {
   const r = e.request;

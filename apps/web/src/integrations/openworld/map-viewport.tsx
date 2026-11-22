@@ -13,8 +13,15 @@ import { Link } from 'react-router';
 import { apiError } from '../../api/client.js';
 import { useT } from '../../app/i18n.js';
 import { ErrorNotice, Loading } from '../../components/ui.js';
+import { canCaptureFlightKeyboard } from './atlas-pointer-lock.js';
 import { AtlasScene, AtlasUnsupported } from './atlas-scene.js';
-import type { AtlasController, AtlasFrame, AtlasMode, AtlasPoint } from './atlas-types.js';
+import type {
+  AtlasController,
+  AtlasFlightLock,
+  AtlasFrame,
+  AtlasMode,
+  AtlasPoint,
+} from './atlas-types.js';
 import {
   type MapPalette,
   readAtlasMeshes,
@@ -62,6 +69,31 @@ function MapToolLabel({ name, icon }: { name: string; icon: 'center' | 'extent' 
     </>
   );
 }
+function cameraHint(
+  mode: AtlasMode,
+  lock: AtlasFlightLock,
+  {
+    mouseAvailable,
+    inspect,
+    placing,
+    keyboardCaptured,
+    canFlyFullscreen,
+  }: {
+    mouseAvailable: boolean;
+    inspect: boolean;
+    placing: boolean;
+    keyboardCaptured: boolean;
+    canFlyFullscreen: boolean;
+  },
+) {
+  if (placing) return 'placeHint';
+  if (mode !== 'fly') return 'atlas.panHint';
+  if (lock === 'locked') return keyboardCaptured ? 'atlas.flyLocked' : 'atlas.flyLockedWindow';
+  if (inspect) return 'atlas.inspectHint';
+  if (!mouseAvailable || lock === 'unavailable') return 'atlas.flyDrag';
+  return canFlyFullscreen ? 'atlas.flyHintFullscreen' : 'atlas.flyHint';
+}
+
 export type FactoryPin = { face: number; x: number; z: number; nodes?: number | null };
 type ViewProps = MapViewportProps & {
   seed: boolean;
@@ -69,6 +101,7 @@ type ViewProps = MapViewportProps & {
   legend?: SeedLegend;
   feature?: FeatureKind;
   tracking?: number;
+  stopFollowing: () => void;
   factories: FactoryPin[];
   onCheckpointOpen: () => void;
   onFallback: () => void;
@@ -128,6 +161,29 @@ function AtlasViewport(props: ViewProps & { unavailable: () => void }) {
   const scene = useRef<AtlasController | null>(null);
   const [frame, setFrame] = useState<AtlasFrame>();
   const [pick, setPick] = useState(false);
+  const [inspect, setInspect] = useState(false);
+  const [lockState, setLockState] = useState<AtlasFlightLock>('idle');
+  const [keyboardCaptured, setKeyboardCaptured] = useState(false);
+  const [canFlyFullscreen, setCanFlyFullscreen] = useState(false);
+  const [mouseAvailable, setMouseAvailable] = useState(false);
+  const locked = mode === 'fly' && lockState === 'locked';
+  const flightHint = cameraHint(mode, lockState, {
+    mouseAvailable,
+    inspect,
+    placing: pick,
+    keyboardCaptured,
+    canFlyFullscreen,
+  });
+  useEffect(() => {
+    const mouse = window.matchMedia('(any-pointer: fine)');
+    const update = () => {
+      setMouseAvailable(mouse.matches && typeof canvas.current?.requestPointerLock === 'function');
+      setCanFlyFullscreen(!!canvas.current && canCaptureFlightKeyboard(canvas.current));
+    };
+    update();
+    mouse.addEventListener('change', update);
+    return () => mouse.removeEventListener('change', update);
+  }, []);
   const [point, setPoint] = useState<(AtlasPoint & { label?: string }) | null>(null);
   const [streamError, setStreamError] = useState<unknown>(null);
   const [fullscreen, setFullscreen] = useState(false);
@@ -162,16 +218,24 @@ function AtlasViewport(props: ViewProps & { unavailable: () => void }) {
   current.current = { props, coverage, pick, core };
 
   // Projection updates do not redraw terrain or enqueue a React render while the camera moves.
-  const pins = useRef<{ el: HTMLElement; x: number; z: number; y?: number }[]>([]);
+  const pins = useRef<
+    { el: HTMLElement; x: number; z: number; y?: number; seed: boolean; px?: number; py?: number }[]
+  >([]);
   const projectPins = useCallback(() => {
     const engine = scene.current;
     if (!engine) return;
     for (const p of pins.current) {
       const at = engine.project(p.x, p.z, p.y);
-      p.el.hidden = !at.visible || (p.el.hasAttribute('data-seed') && !engine.isSeedArea(p.x, p.z));
-      if (at.visible) {
-        p.el.style.left = `${at.x}px`;
-        p.el.style.top = `${at.y}px`;
+      const visible = at.visible && (!p.seed || engine.isSeedArea(p.x, p.z));
+      if (p.el.hidden === visible) p.el.hidden = !visible;
+      if (visible) {
+        const x = Math.round(at.x * 10) / 10,
+          y = Math.round(at.y * 10) / 10;
+        if (x !== p.px || y !== p.py) {
+          p.el.style.translate = `${x}px ${y}px`;
+          p.px = x;
+          p.py = y;
+        }
       }
     }
   }, []);
@@ -183,6 +247,7 @@ function AtlasViewport(props: ViewProps & { unavailable: () => void }) {
         ) ?? [],
         (el) => ({
           el,
+          seed: el.hasAttribute('data-seed'),
           x: Number(el.dataset.x),
           z: Number(el.dataset.z),
           y: el.dataset.y == null ? undefined : Number(el.dataset.y),
@@ -257,6 +322,22 @@ function AtlasViewport(props: ViewProps & { unavailable: () => void }) {
           if (active) setFrame(view);
         },
         onFrame: projectPins,
+        onFlightKeyboardLockChange: (captured) => {
+          if (active) setKeyboardCaptured(captured);
+        },
+        onFlightLockChange: (state) => {
+          if (!active) return;
+          setLockState(state);
+          if (state === 'locked') {
+            setInspect(false);
+            setPoint(null);
+          }
+        },
+        onNavigate: () => {
+          moved.current = true;
+          const live = current.current.props;
+          if (live.tracking !== undefined) live.stopFollowing();
+        },
         onPick: (_px, _py, at) => {
           const { props: live, pick: placing } = current.current;
           if (
@@ -298,8 +379,12 @@ function AtlasViewport(props: ViewProps & { unavailable: () => void }) {
     };
   }, [edge, face, world, processRef, server.serverId, projectPins]);
 
+  useLayoutEffect(() => {
+    scene.current?.setFlightInspection(pick || (mode === 'fly' && inspect));
+  }, [pick, inspect, mode]);
   useEffect(() => {
     scene.current?.setMode(mode);
+    if (mode !== 'fly') setInspect(false);
   }, [mode]);
   useEffect(() => {
     if (palette.data) scene.current?.setPalette(palette.data.materials, palette.data.voxelSize);
@@ -337,9 +422,12 @@ function AtlasViewport(props: ViewProps & { unavailable: () => void }) {
       );
   }, [core, focus, edge]);
   const lastTracking = useRef<number>(undefined);
+  const lastFocus = useRef<typeof focus>(null);
   useEffect(() => {
     const following = props.tracking !== undefined && lastTracking.current === props.tracking;
     lastTracking.current = props.tracking;
+    if (lastFocus.current === focus) return;
+    lastFocus.current = focus;
     if (focus?.face === face) {
       scene.current?.setView({
         x: focus.x,
@@ -416,6 +504,7 @@ function AtlasViewport(props: ViewProps & { unavailable: () => void }) {
     [checkpoints, face, props.selectedId, props.onSelect, props.onCheckpointOpen],
   );
   const recenter = (all = false) => {
+    if (props.tracking !== undefined) props.stopFollowing();
     const el = canvas.current;
     if (!el) return;
     moved.current = all;
@@ -435,7 +524,7 @@ function AtlasViewport(props: ViewProps & { unavailable: () => void }) {
   const pointBiome =
     point?.source === 'seed' ? legend?.biomes.find((b) => b.id === point.biome)?.name : null;
   return (
-    <div ref={plot} className="ow-map-plot ow-atlas">
+    <div ref={plot} className="ow-map-plot ow-atlas" data-flying={locked || undefined}>
       <div className="ow-map-controls">
         <fieldset aria-label={t(k('atlas.camera'))} className="ow-atlas-modes">
           {(['plan', 'iso', 'fly'] as const).map((m) => (
@@ -516,7 +605,7 @@ function AtlasViewport(props: ViewProps & { unavailable: () => void }) {
         </div>
       </div>
       <div
-        className={`ow-map-stage${pick ? ' ow-map-picking' : ''}`}
+        className={`ow-map-stage${pick || (mode === 'fly' && inspect) ? ' ow-map-picking' : ''}`}
         onWheelCapture={() => {
           moved.current = true;
         }}
@@ -527,6 +616,7 @@ function AtlasViewport(props: ViewProps & { unavailable: () => void }) {
           moved.current = true;
           if (e.key === 'Escape') {
             setPick(false);
+            setInspect(false);
             setPoint(null);
           }
         }}
@@ -535,7 +625,7 @@ function AtlasViewport(props: ViewProps & { unavailable: () => void }) {
           ref={canvas}
           tabIndex={0}
           aria-label={t(k('stage'), { world, face })}
-          aria-description={t(k(mode === 'fly' ? 'atlas.flyHint' : 'atlas.panHint'))}
+          aria-description={t(k(flightHint))}
         />
         <div ref={overlay} className="ow-atlas-pins">
           {focus?.face === face && props.selectedId === null && (
@@ -548,7 +638,12 @@ function AtlasViewport(props: ViewProps & { unavailable: () => void }) {
               data-y={focus.y}
             />
           )}
-          <MapMarkerLayer markers={checkpointPins} frame={frame} scene={scene} />
+          <MapMarkerLayer
+            markers={checkpointPins}
+            frame={frame}
+            scene={scene}
+            stopFollowing={props.stopFollowing}
+          />
           {props.players
             .filter((p) => p.face === face && p.world === world)
             .map((p) => (
@@ -624,7 +719,8 @@ function AtlasViewport(props: ViewProps & { unavailable: () => void }) {
             {scale >= 1000 ? `${scale / 1000} km` : `${scale} m`}
           </div>
         )}
-        {mode !== 'plan' && (
+        {locked && <span className="ow-atlas-reticle" aria-hidden="true" />}
+        {mode !== 'plan' && !locked && (
           <div className="ow-atlas-motion">
             <button
               type="button"
@@ -691,12 +787,41 @@ function AtlasViewport(props: ViewProps & { unavailable: () => void }) {
         {props.seed && legend && (
           <span className="ow-atlas-seed-key">{t(k('atlas.source.seed'))}</span>
         )}
-        {props.onCreate && (
+        {mode === 'fly' && mouseAvailable && !locked && (
+          <>
+            <button
+              type="button"
+              className="secondary"
+              onClick={(event) => {
+                setInspect(false);
+                setPick(false);
+                scene.current?.setFlightInspection(false);
+                scene.current?.requestFlightLock(event.detail ? event.nativeEvent : undefined);
+              }}
+            >
+              {t(k('atlas.capture'))}
+            </button>
+            <button
+              type="button"
+              className="secondary"
+              aria-pressed={inspect}
+              onClick={() => {
+                setPick(false);
+                setInspect(!inspect);
+                canvas.current?.focus({ preventScroll: true });
+              }}
+            >
+              {t(k('atlas.inspect'))}
+            </button>
+          </>
+        )}
+        {props.onCreate && !locked && (
           <button
             type="button"
             className="secondary"
             aria-pressed={pick}
             onClick={() => {
+              setInspect(false);
               setPick(!pick);
               canvas.current?.focus({ preventScroll: true });
             }}
@@ -704,7 +829,7 @@ function AtlasViewport(props: ViewProps & { unavailable: () => void }) {
             {t(k('placePin'))}
           </button>
         )}
-        <span>{t(k(pick ? 'placeHint' : mode === 'fly' ? 'atlas.flyHint' : 'atlas.panHint'))}</span>
+        <span role="status">{t(k(flightHint))}</span>
       </div>
       {props.feature && (features.wide || features.tile.truncated) && (
         <p role="status" className="ow-map-layer-note">

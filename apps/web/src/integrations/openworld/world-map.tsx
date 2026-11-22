@@ -226,7 +226,11 @@ function MapWorld({
   useEffect(() => {
     if (tracked) {
       setFace(tracked.face);
-      setFocus({ face: tracked.face, x: tracked.x, z: tracked.z });
+      setFocus((previous) =>
+        previous?.face === tracked.face && previous.x === tracked.x && previous.z === tracked.z
+          ? previous
+          : { face: tracked.face, x: tracked.x, z: tracked.z },
+      );
     } else if (following && (playerFeed.data || playerFeed.error || !withPlayers))
       setFollowing(null);
   }, [tracked, following, playerFeed.data, playerFeed.error, withPlayers]);
@@ -495,6 +499,7 @@ function MapWorld({
               legend={withSeed && !legend.error ? legend.data : undefined}
               feature={kind}
               tracking={following?.id}
+              stopFollowing={() => setFollowing(null)}
               mode={mode}
               onModeChange={setMode}
               onFallback={() => {

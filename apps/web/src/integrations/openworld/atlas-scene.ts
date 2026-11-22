@@ -1,5 +1,6 @@
 import { AtlasCamera, clamp } from './atlas-camera.js';
 import { AtlasGpu } from './atlas-gpu.js';
+import { AtlasPointerLock } from './atlas-pointer-lock.js';
 import { AtlasStream } from './atlas-stream.js';
 import type {
   AtlasBounds,
@@ -8,6 +9,7 @@ import type {
   AtlasMode,
   AtlasOptions,
   AtlasPoint,
+  AtlasPointerPosition,
   AtlasSeedStyle,
   AtlasView,
 } from './atlas-types.js';
@@ -39,8 +41,11 @@ export class AtlasScene implements AtlasController {
   private previousTime = 0;
   private disposed = false;
   private suspended = false;
-  private groundAtTarget = true;
-  private snapGround = false;
+  private snapGround = true;
+  private readonly pointerLock: AtlasPointerLock;
+  private flightInspection = false;
+  private lookX = 0;
+  private lookY = 0;
   private materials: readonly AtlasMaterial[] = [];
   private voxelSize = 0.25;
   private biomes: readonly { id: number; color: string }[] = [];
@@ -67,6 +72,15 @@ export class AtlasScene implements AtlasController {
       this.gpu.destroy();
       throw e;
     }
+    this.pointerLock = new AtlasPointerLock(
+      canvas,
+      (state) => {
+        this.clearInputs();
+        if (state === 'locked') this.manualNavigation();
+        this.options.onFlightLockChange?.(state);
+      },
+      options.onFlightKeyboardLockChange,
+    );
     this.oldTouchAction = canvas.style.touchAction;
     canvas.style.touchAction = 'none';
     this.observer = new ResizeObserver(this.resize);
@@ -77,12 +91,20 @@ export class AtlasScene implements AtlasController {
     canvas.addEventListener('pointerup', this.release, listen);
     canvas.addEventListener('pointercancel', this.cancel, listen);
     canvas.addEventListener('lostpointercapture', this.cancel, listen);
+    canvas.addEventListener('mousemove', this.lockedLook, listen);
+    canvas.addEventListener(
+      'mousedown',
+      (e) => {
+        if (this.pointerLock.locked && e.button === 0) this.pickCentre();
+      },
+      listen,
+    );
     canvas.addEventListener('wheel', this.wheel, { ...listen, passive: false });
     canvas.addEventListener('keydown', this.keydown, listen);
     canvas.addEventListener('keyup', this.keyup, listen);
     canvas.addEventListener('contextmenu', (e) => e.preventDefault(), listen);
-    canvas.addEventListener('blur', this.clearKeys, listen);
-    window.addEventListener('blur', this.clearKeys, listen);
+    canvas.addEventListener('blur', this.loseFocus, listen);
+    window.addEventListener('blur', this.loseFocus, listen);
     canvas.addEventListener('webglcontextlost', this.contextLost, listen);
     canvas.addEventListener('webglcontextrestored', this.contextRestored, listen);
     document.addEventListener('visibilitychange', this.visibility, listen);
@@ -101,12 +123,13 @@ export class AtlasScene implements AtlasController {
     if (this.disposed || this.suspended || document.hidden) return;
     const dt = Math.min(0.06, Math.max(0, (now - this.previousTime) / 1000));
     this.previousTime = now;
-    if (this.keys.size) this.stepKeys(dt);
+    this.applyLook();
+    if (this.activeKeys) this.stepKeys(dt);
     if (this.planDirty && now - this.lastPlan >= 40) {
       this.stream.update(this.camera.getFrame(), this.camera.mode);
       this.planDirty = false;
       this.lastPlan = now;
-      if (this.groundAtTarget || this.snapGround) {
+      if (this.snapGround) {
         const sample = this.stream.sample(this.camera.x, this.camera.z, this.voxelSize);
         if (sample.y !== undefined) {
           this.camera.y = sample.y;
@@ -116,7 +139,7 @@ export class AtlasScene implements AtlasController {
     }
     this.gpu.draw(this.camera, this.stream);
     this.options.onFrame?.();
-    if (this.planDirty || this.keys.size) this.redraw();
+    if (this.planDirty || this.activeKeys) this.redraw();
   };
   private resize = () => {
     if (this.disposed) return;
@@ -126,8 +149,10 @@ export class AtlasScene implements AtlasController {
     this.camera.height = Math.max(1, bounds.height);
     const maxRB = this.gl.getParameter(this.gl.MAX_RENDERBUFFER_SIZE) as number;
     const ratio = Math.min(dpr, maxRB / this.camera.width, maxRB / this.camera.height);
-    this.canvas.width = Math.max(1, Math.round(this.camera.width * ratio));
-    this.canvas.height = Math.max(1, Math.round(this.camera.height * ratio));
+    const width = Math.max(1, Math.round(this.camera.width * ratio)),
+      height = Math.max(1, Math.round(this.camera.height * ratio));
+    if (this.canvas.width !== width) this.canvas.width = width;
+    if (this.canvas.height !== height) this.canvas.height = height;
     this.moved();
   };
   private moved() {
@@ -150,14 +175,26 @@ export class AtlasScene implements AtlasController {
   }
   setMode(mode: AtlasMode) {
     if (this.camera.mode === mode) return;
-    this.keys.clear();
-    this.pointers.clear();
+    this.loseFocus();
     const ground = this.stream.sample(this.camera.x, this.camera.z, this.voxelSize).y;
     if (ground !== undefined) this.camera.y = ground;
     this.camera.setMode(mode);
-    this.groundAtTarget = mode !== 'fly';
     this.snapGround = ground === undefined;
     this.moved();
+  }
+  setFlightInspection(enabled: boolean) {
+    this.flightInspection = enabled;
+    if (enabled) this.pointerLock.release();
+  }
+  requestFlightLock(gesture?: AtlasPointerPosition) {
+    if (this.camera.mode === 'fly' && !this.flightInspection && !this.suspended)
+      this.pointerLock.request(gesture);
+  }
+  // Terrain height is a framing aid only. Sampling the moving centre during pan
+  // would move every projected point again as a hill or a finer tile streamed in.
+  private manualNavigation() {
+    this.snapGround = false;
+    this.options.onNavigate?.();
   }
   setCoverage(
     columns: readonly (readonly [number, number])[],
@@ -200,6 +237,7 @@ export class AtlasScene implements AtlasController {
   }
   private zoomAt(factor: number, px: number, py: number) {
     if (!Number.isFinite(factor) || factor <= 0) return;
+    this.manualNavigation();
     const cam = this.camera,
       before = cam.mode === 'fly' ? null : this.surfaceAnchor(px, py);
     cam.span = clamp(cam.span / factor, 4, Math.max(128, cam.edge * 2));
@@ -213,12 +251,13 @@ export class AtlasScene implements AtlasController {
     this.moved();
   }
   rotate(quarterTurns: number) {
+    this.manualNavigation();
     this.camera.look((quarterTurns * Math.PI) / 2, 0);
     this.moved();
   }
   move(right: number, forward: number, up = 0) {
+    this.manualNavigation();
     this.camera.move(right, forward, up);
-    this.snapGround = false;
     this.moved();
   }
   mayNeedSeed(bounds: AtlasBounds, x: number, y: number, tileMetres: number) {
@@ -263,15 +302,24 @@ export class AtlasScene implements AtlasController {
     const r = this.canvas.getBoundingClientRect();
     return { x: e.clientX - r.left, y: e.clientY - r.top };
   }
+  private pickAt(x: number, y: number) {
+    const at = this.pick(x, y);
+    if (at) this.options.onPick?.(x, y, at);
+  }
+  private pickCentre() {
+    this.applyLook();
+    this.pickAt(this.camera.width / 2, this.camera.height / 2);
+  }
   private down = (e: PointerEvent) => {
     if (e.button > 2) return;
-    const p = this.point(e);
+    if (this.pointerLock.locked) return;
     this.canvas.focus({ preventScroll: true });
     this.canvas.setPointerCapture(e.pointerId);
     this.pointers.set(e.pointerId, {
-      ...p,
-      startX: p.x,
-      startY: p.y,
+      x: e.clientX,
+      y: e.clientY,
+      startX: e.clientX,
+      startY: e.clientY,
       moved: false,
       button: e.button,
     });
@@ -285,39 +333,67 @@ export class AtlasScene implements AtlasController {
   }
   private drag = (e: PointerEvent) => {
     const old = this.pointers.get(e.pointerId);
-    if (!old) return;
-    const p = this.point(e),
-      dx = p.x - old.x,
-      dy = p.y - old.y;
-    if (Math.hypot(p.x - old.startX, p.y - old.startY) > 3) old.moved = true;
-    const other = [...this.pointers.entries()].find(([id]) => id !== e.pointerId)?.[1];
+    if (!old || this.pointerLock.locked) return;
+    const x = e.clientX,
+      y = e.clientY;
+    const wasMoving = old.moved;
+    if (Math.hypot(x - old.startX, y - old.startY) > 3) old.moved = true;
+    if (!old.moved) return;
+    const dx = x - (wasMoving ? old.x : old.startX),
+      dy = y - (wasMoving ? old.y : old.startY);
+    this.manualNavigation();
+    const other =
+      this.pointers.size > 1 ? [...this.pointers.values()].find((p) => p !== old) : undefined;
     if (other) {
       const before = Math.hypot(other.x - old.x, other.y - old.y),
-        after = Math.hypot(other.x - p.x, other.y - p.y);
-      if (before > 4 && after > 4)
-        this.zoomAt(after / before, (other.x + p.x) / 2, (other.y + p.y) / 2);
+        after = Math.hypot(other.x - x, other.y - y);
+      if (before > 4 && after > 4) {
+        const r = this.canvas.getBoundingClientRect();
+        this.zoomAt(after / before, (other.x + x) / 2 - r.left, (other.y + y) / 2 - r.top);
+      }
       this.pan(dx / 2, dy / 2);
-    } else if (old.moved) {
-      if (
-        (this.camera.mode === 'fly' && !e.shiftKey) ||
-        (this.camera.mode === 'iso' && old.button === 2)
-      ) {
-        this.camera.look(-dx * 0.006, dy * 0.005);
-        this.snapGround = false;
-      } else this.pan(dx, dy);
-    }
-    old.x = p.x;
-    old.y = p.y;
+    } else if (
+      (this.camera.mode === 'fly' && !e.shiftKey) ||
+      (this.camera.mode === 'iso' && old.button === 2)
+    ) {
+      this.camera.look(-dx * 0.006, dy * 0.005);
+    } else this.pan(dx, dy);
+    old.x = x;
+    old.y = y;
     this.moved();
   };
+  private lockedLook = (e: MouseEvent) => {
+    if (!this.pointerLock.acceptsLook(e)) return;
+    this.lookX += e.movementX;
+    this.lookY += e.movementY;
+    this.redraw();
+  };
+  private applyLook() {
+    if (!this.lookX && !this.lookY) return;
+    const dx = this.lookX,
+      dy = this.lookY;
+    this.lookX = 0;
+    this.lookY = 0;
+    if (this.pointerLock.locked) {
+      this.camera.look(-dx * 0.004, dy * 0.004);
+      this.moved();
+    }
+  }
   private release = (e: PointerEvent) => {
-    const touch = this.pointers.get(e.pointerId);
-    if (!touch) return;
+    const contact = this.pointers.get(e.pointerId);
+    if (!contact) return;
     this.pointers.delete(e.pointerId);
-    if (!touch.moved && touch.button === 0) {
-      const p = this.point(e),
-        at = this.pick(p.x, p.y);
-      if (at) this.options.onPick?.(p.x, p.y, at);
+    if (contact.moved || contact.button !== 0) return;
+    if (
+      this.camera.mode === 'fly' &&
+      e.pointerType === 'mouse' &&
+      !this.flightInspection &&
+      this.pointerLock.state !== 'unavailable'
+    ) {
+      this.requestFlightLock(e);
+    } else {
+      const p = this.point(e);
+      this.pickAt(p.x, p.y);
     }
   };
   private cancel = (e: PointerEvent) => {
@@ -329,15 +405,29 @@ export class AtlasScene implements AtlasController {
     const multiplier = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? this.camera.height : 1;
     this.zoomAt(Math.exp(-clamp(e.deltaY * multiplier, -250, 250) * 0.0025), p.x, p.y);
   };
+  private get activeKeys() {
+    return this.keys.size > (this.keys.has('shift') ? 1 : 0);
+  }
+  private inputKey(e: KeyboardEvent) {
+    // Keyboard Lock captures physical keys, including on non-QWERTY layouts.
+    if (this.pointerLock.locked && e.code.startsWith('Key')) return e.code.slice(3).toLowerCase();
+    return e.key.toLowerCase();
+  }
   private keydown = (e: KeyboardEvent) => {
-    if (e.ctrlKey || e.metaKey || e.altKey) return;
-    const key = e.key.toLowerCase();
+    const key = this.inputKey(e);
+    const flying = this.camera.mode === 'fly';
+    const locked = this.pointerLock.locked;
+    if (key === 'escape' && locked) {
+      this.loseFocus();
+      return;
+    }
+    if (e.metaKey || e.altKey || (e.ctrlKey && !this.pointerLock.keyboardLocked)) return;
     if (key === 'enter') {
       e.preventDefault();
-      const x = this.camera.width / 2,
-        y = this.camera.height / 2,
-        p = this.pick(x, y);
-      if (p) this.options.onPick?.(x, y, p);
+      if (e.repeat) return;
+      if (flying && !locked && !this.flightInspection && this.pointerLock.state !== 'unavailable')
+        this.requestFlightLock();
+      else this.pickCentre();
       return;
     }
     if (['+', '=', '-', '_'].includes(key)) {
@@ -345,33 +435,47 @@ export class AtlasScene implements AtlasController {
       this.zoom(key === '+' || key === '=' ? 1.3 : 1 / 1.3);
       return;
     }
+    const vertical =
+      flying &&
+      (key === ' ' ||
+        (key === 'control' && this.pointerLock.keyboardLocked) ||
+        key === 'q' ||
+        key === 'e');
     if (
-      ![
-        'a',
-        'd',
-        'w',
-        's',
-        'q',
-        'e',
-        'arrowleft',
-        'arrowright',
-        'arrowup',
-        'arrowdown',
-        'shift',
-      ].includes(key)
+      !vertical &&
+      !['a', 'd', 'w', 's', 'arrowleft', 'arrowright', 'arrowup', 'arrowdown', 'shift'].includes(
+        key,
+      )
     )
       return;
     e.preventDefault();
+    if (this.keys.has(key)) return;
+    if (!this.activeKeys) this.previousTime = performance.now();
     this.keys.add(key);
-    if (!e.repeat && key !== 'shift') this.stepKeys(1 / 30);
-    this.redraw();
+    if (key !== 'shift') {
+      this.manualNavigation();
+      this.redraw();
+    }
   };
   private keyup = (e: KeyboardEvent) => {
-    this.keys.delete(e.key.toLowerCase());
+    const key = this.inputKey(e);
+    if (!this.keys.has(key)) return;
+    // A key may be tapped and released before the next animation frame.
+    const now = performance.now();
+    if (now > this.previousTime) this.stepKeys(Math.min(0.06, (now - this.previousTime) / 1000));
+    this.previousTime = now;
+    this.keys.delete(key);
+    if (this.pointerLock.locked) e.preventDefault();
   };
-  private clearKeys = () => {
+  private clearInputs = () => {
     this.keys.clear();
     this.pointers.clear();
+    this.lookX = 0;
+    this.lookY = 0;
+  };
+  private loseFocus = () => {
+    this.clearInputs();
+    this.pointerLock.release();
   };
   private stepKeys(dt: number) {
     const held = (key: string) => Number(this.keys.has(key));
@@ -379,22 +483,30 @@ export class AtlasScene implements AtlasController {
     const speed = Math.max(6, cam.span * 0.42) * (this.keys.has('shift') ? 3 : 1) * dt;
     let right = held('d') - held('a'),
       forward = held('w') - held('s');
+    let yaw = 0,
+      pitch = 0,
+      up = 0;
     if (cam.mode === 'fly') {
-      const yaw = held('arrowleft') - held('arrowright'),
-        pitch = held('arrowdown') - held('arrowup');
+      yaw = held('arrowleft') - held('arrowright');
+      pitch = held('arrowdown') - held('arrowup');
       if (yaw || pitch) cam.look(yaw * dt * 1.3, pitch * dt * 1.2);
+      up =
+        Number(this.keys.has('e') || this.keys.has(' ')) -
+        Number(this.keys.has('q') || this.keys.has('control'));
     } else {
       right += held('arrowright') - held('arrowleft');
       forward += held('arrowup') - held('arrowdown');
     }
-    cam.move(right * speed, forward * speed, (held('e') - held('q')) * speed);
-    this.snapGround = false;
+    if (!right && !forward && !up && !yaw && !pitch) return;
+    const length = Math.max(1, Math.hypot(right, forward, up));
+    if (right || forward || up)
+      cam.move((right * speed) / length, (forward * speed) / length, (up * speed) / length);
     this.moved();
   }
   private contextLost = (e: Event) => {
     e.preventDefault();
     this.suspended = true;
-    this.clearKeys();
+    this.loseFocus();
   };
   private contextRestored = () => {
     if (this.disposed) return;
@@ -414,13 +526,14 @@ export class AtlasScene implements AtlasController {
     this.stream.setPaused(document.hidden);
     this.gpu.setPaused(document.hidden);
     if (document.hidden) {
-      this.clearKeys();
+      this.loseFocus();
       if (this.frameRequest) cancelAnimationFrame(this.frameRequest);
       this.frameRequest = 0;
     } else this.terrainChanged();
   };
   destroy() {
     this.disposed = true;
+    this.pointerLock.destroy();
     this.events.abort();
     this.observer.disconnect();
     clearTimeout(this.notifyTimer);

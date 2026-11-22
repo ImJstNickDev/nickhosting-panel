@@ -154,6 +154,28 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 describe('Openworld atlas streaming', () => {
+  it('publishes arrivals and edits while small camera movements reuse the displayed geometry', async () => {
+    const load = vi.fn<AtlasOptions['load']>(async () => null);
+    const s = stream({ load });
+    s.setCoverage([[16, 16]], 1);
+    s.setSeed(true, 512, 4);
+    s.update(frame, 'iso');
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    s.update(frame, 'iso');
+    const recorded = s.visible;
+    // Missing surface responses still carry coverage information for the seed layer.
+    expect(recorded.some((e) => e.request.kind === 'surface')).toBe(true);
+    const count = load.mock.calls.length;
+    s.update({ ...frame, x: 256.5 }, 'iso');
+    expect(s.visible).toBe(recorded);
+    expect(load).toHaveBeenCalledTimes(count);
+    s.invalidate([[16, 16]]);
+    s.update(frame, 'iso');
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    s.update(frame, 'iso');
+    expect(s.visible).not.toBe(recorded);
+    expect(load.mock.calls.length).toBeGreaterThan(count);
+  });
   it('honors Retry-After once per family, pauses in background and stops automatic retries', async () => {
     vi.useFakeTimers();
     try {
