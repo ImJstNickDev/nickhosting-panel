@@ -2,6 +2,7 @@ import { isIP } from 'node:net';
 import { DomainError } from '@nickhosting/core';
 import type { Database } from '@nickhosting/database';
 import { dashboardHostname } from '@nickhosting/external-services';
+import { withProviderReadCaller } from '@nickhosting/pterodactyl-adapter';
 import {
   type ManagementRuntime,
   privateBackendAddress,
@@ -115,7 +116,7 @@ export function createOpenworldDashboardIngress(options: {
       'content-security-policy',
       "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; worker-src 'none'; object-src 'none'; base-uri 'none'; frame-src 'self'; frame-ancestors 'self'; form-action 'self'",
     );
-    await next();
+    await withProviderReadCaller('openworld-dashboard', next);
   });
   app.onError((error, c) => {
     if (error instanceof DomainError && error.code === 'validation_failed')

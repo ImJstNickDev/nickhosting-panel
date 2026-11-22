@@ -1,12 +1,14 @@
 import { DomainError } from '@nickhosting/core';
 import type { createDatabase } from '@nickhosting/database';
-import type { ApplicationServer } from '@nickhosting/pterodactyl-adapter';
+import type { GatewayInventoryServer } from '@nickhosting/pterodactyl-adapter';
+import { sql } from 'kysely';
 import { assertManagedIdentity } from '../../../packages/server-management/src/managed-identity.js';
+import { observationIdentityRevision } from '../../../packages/server-management/src/managed-identity-receipts.js';
 
 type DB = ReturnType<typeof createDatabase>['db'];
 
 /** All owned allocations, including those without a published Gateway route. */
-export async function readGatewayClaims(db: DB, ids: string[]) {
+export async function readGatewayClaims(db: DB, ids: string[], observeIdentity = false) {
   const rows = ids.length
     ? await db
         .selectFrom('managed_servers as s')
@@ -28,6 +30,10 @@ export async function readGatewayClaims(db: DB, ids: string[]) {
           'a.port',
           'm.nest_id',
           'm.egg_id',
+          (observeIdentity
+            ? observationIdentityRevision(sql.ref('s.id'), 'gateway')
+            : sql<null>`null`
+          ).as('identity_revision'),
         ])
         .where('s.id', 'in', ids)
         .where('s.deleted_at', 'is', null)
@@ -45,7 +51,10 @@ export async function readGatewayClaims(db: DB, ids: string[]) {
   return { indexed, claimsByServer };
 }
 
-export function indexGatewayRemotes(remotes: ApplicationServer[], expected: ReadonlySet<string>) {
+export function indexGatewayRemotes(
+  remotes: GatewayInventoryServer[],
+  expected: ReadonlySet<string>,
+) {
   const byUuid = new Map(remotes.map((remote) => [remote.uuid, remote]));
   if (
     byUuid.size !== expected.size ||
@@ -59,7 +68,7 @@ export function indexGatewayRemotes(remotes: ApplicationServer[], expected: Read
 
 export function verifyGatewayClaims(
   claimsByServer: Awaited<ReturnType<typeof readGatewayClaims>>['claimsByServer'],
-  byUuid: ReadonlyMap<string, ApplicationServer>,
+  byUuid: ReadonlyMap<string, GatewayInventoryServer>,
 ) {
   if (claimsByServer.size !== byUuid.size) throw new DomainError('provenance_mismatch');
   for (const claims of claimsByServer.values()) {

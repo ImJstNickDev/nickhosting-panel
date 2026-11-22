@@ -1,6 +1,6 @@
 # NickHosting Blueprint bridge
 
-Version **1.8.2**, targeting Pterodactyl **1.15.1** and Blueprint
+Version **1.11.0**, targeting Pterodactyl **1.15.1** and Blueprint
 **beta-2026-08**. Native PHP contracts retain compatibility with Panel **1.11.11**
 for coordinated rollback; the framework target and live deployment evidence are
 separate from that library-level compatibility. The monorepo is the source of truth; `.blueprint/dev` is optional
@@ -430,7 +430,7 @@ uses Laravel fakes. It exercises transaction rollback, idempotency, encryption,
 authorization, identity invalidation, delivery retry and configuration transforms.
 It is not a MySQL lock-concurrency or real HTTP middleware test. Packaging uses
 an explicit file allowlist, excludes secrets/tests/docs, rejects symlinks and
-existing output, and defaults to ignored `build/blueprint/1.8.2/nickhosting.blueprint`.
+existing output, and defaults to ignored `build/blueprint/1.11.0/nickhosting.blueprint`.
 
 The [extension-only update procedure](UPDATE-INSTALLED.md) supports the reviewed
 1.5.0 → 1.6.0 and 1.6.0 → 1.6.1 transitions. Its default is a read-only plan;
@@ -575,3 +575,89 @@ or checksum proof. Wings may skip members denied by its configured file denylist
 world imports trust that native behavior. Modpack publication still reads back its
 final destinations before recording applied file metadata. Unknown extraction
 outcomes use manifest reconciliation and do not infer success from archive presence.
+
+### Gateway inventory and linked server snapshots (1.9.0)
+
+Both operations return fresh Application API evidence with `Cache-Control: no-store`.
+
+- `POST /api/application/extensions/nickhosting/gateway-inventory` accepts
+  `{nodeIds, serverUuids}`. It requires Application READ on servers, nodes and
+  allocations. A single repeatable-read transaction reads the global node identity
+  catalog, complete allocation listings for the requested nodes, and the identity,
+  owner, runtime, suspension, primary allocation and all allocations of the requested
+  servers. Occupied ports remain visible even on a foreign server. No foreign
+  server details are included through an allocation listing. The response contains
+  `{schemaVersion:1,nodes,allocations,servers}`. A missing requested identity or
+  cross-node claim returns 409. An inventory that exceeds 10,000 nodes, 65,536
+  allocation rows or the 4 MiB consumer budget returns 413. Selectors must be
+  distinct and contain at most 256 node IDs and 10,000 server UUIDs.
+- `POST /api/application/extensions/nickhosting/instances/{instance}/server-snapshots`
+  accepts `{serverUuids}` with 1–100 distinct UUIDs. It requires the instance's
+  exact Application key with servers READ. It returns
+  `{schemaVersion:1,instanceId,servers}`, where each server is a normal
+  revisioned snapshot envelope. Only already linked identities belonging to this
+  instance appear. The caller checks coverage and keeps the existing explicit
+  binding path for new servers. Current provider rows and link rows are locked
+  in the same order as normal updates. Drift advances the affected revisions
+  and appends their signed-delivery events transactionally. Permanent invalidation
+  preserves the last known limits until an explicit verified relink. Health is
+  checked separately against the consumer's generation after reconciliation.
+
+Consumers request `GET /api/application/extensions/nickhosting/capabilities?inventory=1`
+to discover `gatewayInventory` and `linkedServerSnapshots`. The unqualified
+capabilities route keeps the 1.8.2 property set for legacy readers. Both routes
+report the installed extension version. Older providers ignore the requested
+query option and return their existing capabilities. Use the native
+Blueprint package installation and retain the previous reviewed artifact for
+rollback. The 1.9.0 inventory endpoints use the existing extension schema.
+
+### Scoped feed health and Gateway topology (1.10.0)
+
+The bridge keeps a refused callback in the outbox for the Owner to inspect. A
+terminal refusal must identify the exact instance and event and have the
+`binding_rejected` disposition. Transport failures, an unlinked server still
+being provisioned and ordinary conflicts are retried. New consumers can request
+health for their linked server UUIDs. A healthy result is usable only with a
+matching local revision, binding and fresh snapshot. Earlier clients continue
+to receive the instance-wide pending count.
+
+Gateway topology tracking adds a database revision for changes to nodes, servers
+and allocations. A new snapshot and its revision are captured together. An
+authenticated reader can wait for a changed revision and recover through a fresh
+snapshot. Installing the extension requires reviewing its trigger migration on
+the provider database. If the required coverage is unavailable, the Gateway uses
+its existing inventory path. During rollout, apply the NickPanel migrations
+091 through 094 before switching NickPanel readers to the new protocol.
+
+During a downgrade to the previous package, run the installed 1.10.0 private
+`gateway-topology.php remove` hook from the Panel environment first. The hook
+disables the revision and removes only triggers whose stored and installed
+definitions match. Retain both databases and the quarantined delivery history.
+Restoring the previous consumers returns them to full inventory reads. Reinstalling
+1.10.0 enables a new topology epoch.
+
+### Coordinated Gateway reads and Minecraft world scans (1.11.0)
+
+The existing Gateway topology revision endpoint accepts an optional
+`coordinated` object. A reader can request current feed health for up to 100
+linked server UUIDs, linked snapshots for the subset approaching renewal, and
+capability discovery. Each result carries its own value or error. The original
+topology wait and evidence deadline still apply. A snapshot that needs repair
+returns to the existing standalone reconciliation transaction. NickPanel workers
+also use the standalone routes when the Gateway is idle or a receipt expires.
+NickPanel migration 095 records per-server coordination tokens. Generation,
+credential binding and current server identity fence publication after a wait.
+
+Application discovery with `inventory=1&worldRead=1` supplies a credential-bound
+`worldReadPrincipal` for the scheduled Minecraft world indexer. The server-scoped
+Client routes `world-directory-list` and `world-download-urls` check the registered
+Application key and source-IP policy, the technical owner and Client credential,
+and the expected server identity, primary allocation and complete allocation set.
+A root listing can also grant a bounded download of `server.properties`.
+Directory batches and grants for selected `level.dat` files use the same guard.
+Older extensions and explicitly linked legacy owners use the existing verified
+Application detail path. A permission refusal or identity mismatch stops the scan.
+
+The native package uses the 1.10.0 topology triggers. A rollback from 1.11.0 to
+1.10.0 restores the previous NickPanel readers and package with those triggers
+in place. The additive NickPanel coordination table can remain installed.

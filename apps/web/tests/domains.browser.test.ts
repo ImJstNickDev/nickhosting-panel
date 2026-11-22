@@ -227,6 +227,13 @@ describe('Domain choices and management (isolated responses, real components)', 
             connectionMode: 'gateway',
             addressState,
             primaryDnsAssignmentId: assignments.at(-1)?.id ?? null,
+            dns: assignments.map(({ id, state, connection }) => ({
+              id,
+              state,
+              hostname: connection.displayAddress,
+              domainId: domain.id,
+              shared: false,
+            })),
             mode: options.mode,
             ports: [
               {
@@ -698,6 +705,25 @@ describe('Domain choices and management (isolated responses, real components)', 
       fullPage: true,
     });
     expect(writes).toEqual([]);
+  });
+  it('refreshes ports and DNS together once per 15 seconds while Network is open', async () => {
+    const reads: string[] = [];
+    page.on('request', (request) => {
+      const path = new URL(request.url()).pathname;
+      if (request.method() === 'GET' && (path.endsWith('/connections') || path.endsWith('/dns')))
+        reads.push(path);
+    });
+    await page.clock.install();
+    await open();
+    await check(page.getByText('192.0.2.1:28000', { exact: true }).first()).toBeVisible();
+    const connectionsPath = '/v1/platform/servers/domain-fixture/connections';
+    expect(reads).toEqual([connectionsPath]);
+    for (let i = 1; i <= 4; i++) {
+      displayAddress = `change-${i}.example.test:28000`;
+      await page.clock.runFor(15_100);
+      await check(page.getByText(displayAddress, { exact: true }).first()).toBeVisible();
+      expect(reads).toEqual(Array(i + 1).fill(connectionsPath));
+    }
   });
   it('requires explicit activation, pins automatic preview and does not claim pending DNS is ready', async () => {
     await open();

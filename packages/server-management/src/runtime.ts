@@ -48,13 +48,14 @@ import {
   trustedGameModules,
 } from './game-modules.js';
 import { gatewayConsoleOperationSchema } from './gateway-console-contract.js';
+import { prepareGatewayHeartbeat } from './gateway-provider-heartbeat.js';
 import { refreshHostObservations } from './host-observations.js';
 import { currentInteractiveContext } from './interactive-context.js';
 import {
   createLifecycleProcessor,
   type ExternalStopReceipt,
   type LifecycleOptions,
-  reconcileManagedServer,
+  reconcileManagedServers,
   verifyManagedIdentity,
 } from './lifecycle.js';
 import { minecraftContentAllowsOnline } from './minecraft-content-contracts.js';
@@ -62,6 +63,7 @@ import { assertNoModpackPublication } from './minecraft-modpack-schema.js';
 import { createMinecraftModuleRuntime } from './minecraft-module.js';
 import { runMinecraftVersionChange } from './minecraft-version-change.js';
 import { createMinecraftWorldPreparation } from './minecraft-world-preparation.js';
+import { openScheduledWorldReader, readWorldScanPrincipal } from './minecraft-world-reader.js';
 import { createOpenworldModuleRuntime } from './openworld-module.js';
 import type { OperationTiming } from './operation-timing.js';
 import { resolveProviderCredential } from './provider-accounts.js';
@@ -70,6 +72,7 @@ import {
   providerBackupEventsEnabled,
   readProviderBackupCompletion,
 } from './provider-backup-events.js';
+import { providerCapabilities, providerCredentialBinding } from './provider-capabilities.js';
 import { cachedProviderStartLimits } from './provider-change-feed.js';
 import { supportsProviderFileOperations } from './provider-file-operations.js';
 import { type InstallationTranscript, installationLogKey } from './provisioning.js';
@@ -476,7 +479,13 @@ export async function createManagementRuntime(options: ManagementOptions) {
   const rawAdapter =
     options.adapter ??
     createScopedProviderAdapter(
-      createPterodactylAdapter(adapterOptions),
+      createPterodactylAdapter({
+        ...adapterOptions,
+        async gatewayInventoryDiscovery() {
+          const { extension, checkedAt } = await providerCapabilities(db, adapterOptions);
+          return { supported: extension?.capabilities.gatewayInventory === true, checkedAt };
+        },
+      }),
       async (identifier, timing) => {
         const read = () =>
           db
@@ -743,11 +752,12 @@ export async function createManagementRuntime(options: ManagementOptions) {
     authorizeJob: (connection, jobId, serverId) =>
       authorizeQueuedEffect(connection, jobId, serverId, env, adapter),
   });
+  const openworldRuntime = createOpenworldModuleRuntime(options.codec, env);
   const gameRuntime = createGameRuntimeDispatcher(
     trustedGameModules,
     new Map<string, import('./game-modules.js').GameRuntimeHooks>([
       [minecraft.id, minecraft],
-      ['openworld', createOpenworldModuleRuntime(options.codec, env)],
+      ['openworld', openworldRuntime],
       ['satisfactory', createSatisfactoryModuleRuntime(options.codec, env)],
     ]),
   );
@@ -793,6 +803,7 @@ export async function createManagementRuntime(options: ManagementOptions) {
     await reserveInstallation(connection, serverId, jobId, env);
   }
   const lifecycle = {
+    observationProviderBinding: consoleProviderBinding,
     onInstallationAvailable: options.onInstallationAvailable,
     supportsManagedFileOperations: async (serverId: string, connection: Kysely<Database>) => {
       const server = await connection
@@ -850,7 +861,13 @@ export async function createManagementRuntime(options: ManagementOptions) {
       await (await gameRuntime(context.db, context.server.id))?.cleanupBackup?.(context, mode);
     },
     cachedStartLimits: (serverId: string, connection: Kysely<Database>) =>
-      cachedProviderStartLimits(connection, serverId, values.pterodactylBaseUrl ?? ''),
+      cachedProviderStartLimits(
+        connection,
+        serverId,
+        values.pterodactylBaseUrl ?? '',
+        new Date(),
+        providerCredentialBinding(values.pterodactylBaseUrl ?? '', applicationKey),
+      ),
     env,
     logger: options.logger,
     installationRetry: async (
@@ -994,6 +1011,7 @@ export async function createManagementRuntime(options: ManagementOptions) {
     observeExternalStop: async (
       serverId: string,
       connection: Kysely<Database>,
+      remote?: ApplicationServer,
     ): Promise<ExternalStopReceipt | null> => {
       await verifyObservationHost(serverId, connection);
       const server = await connection
@@ -1012,7 +1030,7 @@ export async function createManagementRuntime(options: ManagementOptions) {
       await verifyManagedIdentity(
         connection,
         server,
-        await adapter.getApplicationServer(server.pterodactyl_id),
+        remote ?? (await adapter.getApplicationServer(server.pterodactyl_id)),
       );
       const before = await containerObserver.terminalProcess(server.pterodactyl_uuid);
       if (!before) return null;
@@ -1087,12 +1105,18 @@ export async function createManagementRuntime(options: ManagementOptions) {
         throw new DomainError('configuration_invalid');
       return containerObserver.processStartedAt(server.pterodactyl_uuid);
     },
-    observeProcessStart: async (serverId: string, connection: Kysely<Database>) => {
+    observeProcessStart: async (
+      serverId: string,
+      connection: Kysely<Database>,
+      openworldObservation?: { verifiedUuid?: string },
+    ) => {
       const server = await connection
         .selectFrom('managed_servers')
-        .selectAll()
-        .where('id', '=', serverId)
-        .where('deleted_at', 'is', null)
+        .innerJoin('runtime_egg_mappings as mapping', 'mapping.id', 'managed_servers.mapping_id')
+        .selectAll('managed_servers')
+        .select(['mapping.nest_id', 'mapping.egg_id', 'mapping.game_id'])
+        .where('managed_servers.id', '=', serverId)
+        .where('managed_servers.deleted_at', 'is', null)
         .executeTakeFirst();
       if (
         !server?.pterodactyl_uuid ||
@@ -1105,23 +1129,34 @@ export async function createManagementRuntime(options: ManagementOptions) {
       const observerPreflight = verifyObservationHost(serverId, connection);
       const processStartedAt = containerObserver.processStartedAt.bind(containerObserver);
       const uuid = server.pterodactyl_uuid;
-      const remote = adapter.getApplicationServer(server.pterodactyl_id).then(async (value) => {
-        await verifyManagedIdentity(connection, server, value);
-        return value;
-      });
       const module = gameRuntime(connection, serverId);
+      const readRemote = async () => {
+        const value = await adapter.getApplicationServer(server.pterodactyl_id as number);
+        await verifyManagedIdentity(connection, server, value);
+        if (openworldObservation && (value.nest !== server.nest_id || value.egg !== server.egg_id))
+          throw new DomainError('provenance_mismatch');
+        return value;
+      };
+      const reusable =
+        openworldObservation?.verifiedUuid === uuid && server.game_id === 'openworld';
+      // Minecraft's epoch hook also needs the full Application server to verify its
+      // runtime image. Only Openworld's double epoch read takes an inventory receipt.
+      const direct = reusable ? undefined : readRemote();
+      const fallback = reusable
+        ? module.then((selected) => (selected === openworldRuntime ? undefined : readRemote()))
+        : undefined;
       // Bind Docker inspection to the host first, but do not serialize it behind
       // the provider round trip. The same in-flight remote proof is consumed by
       // the module; neither an image nor an epoch alone grants readiness.
       const before = observerPreflight.then(() => processStartedAt(uuid));
-      const verification = Promise.all([module, before]).then(([runtime, epoch]) =>
+      const verification = Promise.all([module, before]).then(async ([runtime, epoch]) =>
         runtime
           ? runtime.verifyProcessEpoch(
               serverId,
               connection,
               epoch,
               () => processStartedAt(uuid),
-              remote,
+              direct ?? (await fallback),
               observerPreflight,
             )
           : epoch,
@@ -1130,7 +1165,7 @@ export async function createManagementRuntime(options: ManagementOptions) {
       // no database/observer work may outlive the caller's connection lease.
       const proofs = await Promise.allSettled([
         observerPreflight,
-        remote,
+        direct ?? fallback,
         module,
         before,
         verification,
@@ -1260,23 +1295,7 @@ export async function createManagementRuntime(options: ManagementOptions) {
   const process = createLifecycleProcessor(db, lifecycle);
 
   async function reconcile() {
-    const servers = await db
-      .selectFrom('managed_servers')
-      .select(['id'])
-      .where('deleted_at', 'is', null)
-      .where('pterodactyl_id', 'is not', null)
-      .execute();
-    const failures: string[] = [];
-    const deferred: string[] = [];
-    let observed = 0;
-    for (const server of servers) {
-      try {
-        if ((await reconcileManagedServer(db, server.id, lifecycle)) === 'observed') observed++;
-        else deferred.push(server.id);
-      } catch {
-        failures.push(server.id);
-      }
-    }
+    const result = await reconcileManagedServers(db, lifecycle);
     const external = options.reconcileExternal
       ? await options.reconcileExternal(db)
       : await reconcileExternalServices(db, externalOptions);
@@ -1285,7 +1304,7 @@ export async function createManagementRuntime(options: ManagementOptions) {
       .deleteFrom('server_metrics')
       .where('observed_at', '<', new Date(Date.now() - 30 * 86400000))
       .execute();
-    return { observed, deferred, unavailable: failures, external };
+    return { ...result, external };
   }
   /** Streaming transfers must not retain a session/role snapshot. Uploads use
    * their already-pinned lock connection; downloads borrow only for each check. */
@@ -1526,6 +1545,7 @@ export async function createManagementRuntime(options: ManagementOptions) {
     directories: string[],
     signal?: AbortSignal,
     timing?: OperationTiming,
+    readChunk?: (paths: string[]) => Promise<DirectoryBatchResult[]>,
   ): Promise<DirectoryBatchResult[]> {
     signal?.throwIfAborted();
     let cache = directoryBatchSettings.get(db);
@@ -1576,12 +1596,11 @@ export async function createManagementRuntime(options: ManagementOptions) {
         );
         break;
       }
+      const paths = directories.slice(offset, offset + directoryBatchLimit);
       const chunk = await traceOperation(timing, 'batch', () =>
-        adapter.listDirectoriesBatch(
-          identifier,
-          directories.slice(offset, offset + directoryBatchLimit),
-          timing?.child('request'),
-        ),
+        readChunk
+          ? readChunk(paths)
+          : adapter.listDirectoriesBatch(identifier, paths, timing?.child('request')),
       );
       // Splitting for a lower Owner limit must not multiply the response budget.
       responseBytes += Buffer.byteLength(JSON.stringify(chunk), 'utf8');
@@ -1790,6 +1809,15 @@ export async function createManagementRuntime(options: ManagementOptions) {
   }
   return {
     adapter,
+    prepareGatewayHeartbeat: options.adapter
+      ? undefined
+      : (intervalMs?: number) =>
+          prepareGatewayHeartbeat(
+            db,
+            adapterOptions.baseURL,
+            providerCredentialBinding(adapterOptions.baseURL, adapterOptions.applicationKey),
+            intervalMs,
+          ),
     consoleProviderBinding,
     consoleBindingForServer,
     observeConsoleDisk,
@@ -1819,6 +1847,21 @@ export async function createManagementRuntime(options: ManagementOptions) {
     listDirectories,
     fileReadAccess,
     fileReadPhase,
+    async scheduledWorldReadPhase(
+      server: Parameters<typeof openScheduledWorldReader>[2],
+      signal: AbortSignal,
+    ) {
+      if (!server.pterodactyl_identifier || options.adapter) return;
+      const principal = await readWorldScanPrincipal(
+        db,
+        providerCredentialBinding(adapterOptions.baseURL, applicationKey),
+      );
+      if (!principal) return;
+      const identifier = server.pterodactyl_identifier;
+      return openScheduledWorldReader(db, adapter, server, principal, signal, (paths, readChunk) =>
+        fileDirectoryBatch(identifier, server, paths, signal, undefined, readChunk),
+      );
+    },
     fileReadScope,
     prepareFileWrites,
     fileMutationAccess,

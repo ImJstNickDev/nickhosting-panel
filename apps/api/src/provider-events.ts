@@ -8,6 +8,7 @@ import {
   applyProviderBackupEvent,
   applyProviderChange,
   applyProviderInstallationEvent,
+  providerEventBindingRejected,
 } from '@nickhosting/server-management';
 import type { Kysely } from 'kysely';
 
@@ -57,10 +58,25 @@ export async function receiveProviderEvent(options: {
     eventId: options.headers.get('x-nickhosting-event-id') ?? '',
     secret: options.codec.decrypt(secret.envelope, `blueprintWebhook:${instanceId}`),
   });
-  if (event.type === 'backup.completed' || event.type === 'backup.restore-completed')
-    await applyProviderBackupEvent(options.db, event);
-  else if (event.type === 'installation.updated')
-    await applyProviderInstallationEvent(options.db, event);
-  else await applyProviderChange(options.db, event);
-  return { received: true };
+  try {
+    if (event.type === 'backup.completed' || event.type === 'backup.restore-completed')
+      await applyProviderBackupEvent(options.db, event);
+    else if (event.type === 'installation.updated')
+      await applyProviderInstallationEvent(options.db, event);
+    else await applyProviderChange(options.db, event);
+  } catch (error) {
+    if (
+      error instanceof DomainError &&
+      error.code === 'provenance_mismatch' &&
+      (await providerEventBindingRejected(options.db, event.instanceId, event.server))
+    )
+      return {
+        received: false,
+        disposition: 'binding_rejected',
+        instanceId: event.instanceId,
+        eventId: event.eventId,
+      } as const;
+    throw error;
+  }
+  return { received: true } as const;
 }

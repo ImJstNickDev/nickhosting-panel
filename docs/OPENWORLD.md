@@ -87,6 +87,14 @@ Signing out, revoking the grant, and unpublishing the hostname deny subsequent r
 The browser uses a separate, host-only dashboard cookie. Native credentials stay on the
 private side of the proxy.
 
+The NickPanel API shares its verified private game connection across dashboard status,
+telemetry, player actions, screenshots, the Seed Inspector, rules and map views. Concurrent reads can
+use the same pending login. The API keeps the native token in memory for up to 60
+seconds and checks each viewer’s current section permissions on every request. A
+change in the observed game process, provider binding or stored credentials makes the
+next live read verify the target again. When the game rejects a token, a read can
+retry authentication once. Administrative commands are never replayed automatically.
+
 Inside NickPanel, **Overview** shows player counts, TPS, memory, current inbound and
 outbound traffic, and world generation. Its 24-hour clock plots the observed world time
 on a day/night curve. Between status reads the browser advances the clock from the
@@ -112,6 +120,26 @@ and profile can show the most recently captured skin after the player disconnect
 when the game is stopped. Viewing saved skins requires player inspection. Openworld
 a1.2.9 player saves contain no skin image. A player whose skin has never been captured
 gets their first archived preview on a subsequent observed connection.
+
+To measure Pterodactyl API reads across all servers, filter the API and
+worker JSON logs for `event == "pterodactyl.server_reads"` at log level `info`.
+Each active one-minute window has UTC `data.from` and `data.until` boundaries,
+`data.runtime`, and counts under `data.callers`. Sum `detail` for numeric server-detail
+GETs. `externalDetail`, `list`, `batch` and `bundle` count external-ID lookups, list
+pages, UUID-filtered list pages and Gateway inventory requests separately. For the Client API,
+`resources` and `backupList` count live resource samples and backup inventory pages.
+Blueprint directory batches, download URL batches and bulk server snapshots have dedicated
+`directoryList`, `downloadUrls` and `serverSnapshots` counters. Other GETs are grouped under
+`otherApplication` or `otherClient`. Shutdown
+flushes a final partial window. Each outgoing attempt counts once for its initiating
+caller, including upstream 429s. Joined readers and local cooldown rejections add zero.
+
+For a single server, filter the provider access log to its numeric server-detail GET
+path in the same time window, then group by the `NickPanel/<caller>` user agent and
+HTTP status. Labels distinguish Gateway, worker reconciliation and capture scans,
+and Openworld API route families such as `openworld-players` or `openworld-map`.
+`openworld-telemetry` includes overview and performance requests. Labels identify
+the initiating endpoint or worker loop. Multiple browser tabs can use the same endpoint.
 
 With inspection permission the same directory also searches saved profiles, including
 while the server is stopped. NickPanel joins live and saved records by verified account

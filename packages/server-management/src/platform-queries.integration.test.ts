@@ -138,7 +138,16 @@ describe('initial sleep policy proposal', () => {
         .executeTakeFirstOrThrow(),
     ).toEqual(before);
     await setGatewayPolicy(f.db, f.context, id, proposal.proposedPolicy, { initializeOnly: true });
-    const saved = await getPlatformSleepPolicy(f.db, f.context, id);
+    let queries = 0;
+    const measured = f.db.withPlugin({
+      transformQuery: ({ node }) => node,
+      async transformResult({ result }) {
+        queries++;
+        return result;
+      },
+    });
+    const saved = await getPlatformSleepPolicy(measured, f.context, id);
+    expect(queries).toBeLessThanOrEqual(8);
     expect(saved.proposedPolicy).toBeNull();
     expect(saved.policy).toEqual(proposal.proposedPolicy);
     expect(saved.state).toMatchObject({ enabled: false, state: 'manually_stopped' });
@@ -1428,6 +1437,15 @@ describe('M5 platform browser queries and metadata', () => {
     let result = await getPlatformConnections(f.db, f.context, id);
     expect(result.addressState).toBe('uncertain');
     expect(result.primaryDnsAssignmentId).toBe(assignmentId);
+    expect(result.dns).toEqual([
+      {
+        id: assignmentId,
+        state: 'uncertain',
+        hostname: 'new.example.test',
+        domainId: 'legacy',
+        shared: false,
+      },
+    ]);
     expect(result.ports.every((p) => p.displayAddress === null)).toBe(true);
     for (const state of ['pending', 'uncertain'] as const) {
       await f.db
@@ -1437,12 +1455,17 @@ describe('M5 platform browser queries and metadata', () => {
           plan: JSON.stringify({
             connection: { ...confirmed, hostname: 'new.example.test' },
             confirmedConnection: confirmed,
+            domainId: 'games',
+            sharedHostId: 'shared-host',
           }),
         })
         .where('id', '=', assignmentId)
         .execute();
       result = await getPlatformConnections(f.db, f.context, id);
       expect(result.hostname).toBe('old.example.test');
+      expect(result.dns).toEqual([
+        { id: assignmentId, state, hostname: 'new.example.test', domainId: 'games', shared: true },
+      ]);
       expect(result.ports.find((p) => p.transport === 'tcp')?.displayAddress).toBe(
         'old.example.test',
       );

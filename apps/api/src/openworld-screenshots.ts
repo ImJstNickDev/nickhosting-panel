@@ -9,22 +9,14 @@ import {
   screenshotRevisionExists,
 } from '../../../games/openworld/src/screenshots.js';
 import { attributedOpenworldScreenshots } from '../../../packages/server-management/src/openworld-capture-index.js';
-import { resolveOpenworldDashboardTarget } from '../../../packages/server-management/src/openworld-dashboard.js';
-import { createOpenworldPlayerChannel } from '../../../packages/server-management/src/openworld-player-channel.js';
+import type { createOpenworldPlayerChannel } from '../../../packages/server-management/src/openworld-player-channel.js';
 import type { Variables } from './app.js';
 import type { ServerRouteOptions } from './servers.js';
 
 export function registerOpenworldScreenshotRoutes(
   app: Hono<{ Variables: Variables }>,
-  options: Pick<ServerRouteOptions, 'db' | 'principal'> &
-    Partial<Pick<ServerRouteOptions, 'management'>>,
-  channel = createOpenworldPlayerChannel({
-    db: options.db,
-    target: async (id) => {
-      if (!options.management) throw new DomainError('integration_unavailable');
-      return resolveOpenworldDashboardTarget(options.db, (await options.management()).adapter, id);
-    },
-  }),
+  options: Pick<ServerRouteOptions, 'db' | 'principal'>,
+  channel: ReturnType<typeof createOpenworldPlayerChannel>,
   fetcher = fetch,
 ) {
   const base = '/v1/servers/:id/openworld/screenshots';

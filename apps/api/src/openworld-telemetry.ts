@@ -1,8 +1,7 @@
 import { DomainError } from '@nickhosting/core';
 import type { Hono } from 'hono';
 import { z } from 'zod';
-import { resolveOpenworldDashboardTarget } from '../../../packages/server-management/src/openworld-dashboard.js';
-import { createOpenworldTelemetry } from '../../../packages/server-management/src/openworld-telemetry.js';
+import type { createOpenworldTelemetry } from '../../../packages/server-management/src/openworld-telemetry.js';
 import type { Variables } from './app.js';
 import type { ServerRouteOptions } from './servers.js';
 
@@ -22,15 +21,8 @@ const playerQuery = z.object({
 
 export function registerOpenworldTelemetryRoutes(
   app: Hono<{ Variables: Variables }>,
-  options: Pick<ServerRouteOptions, 'db' | 'principal'> &
-    Partial<Pick<ServerRouteOptions, 'management'>>,
-  service = createOpenworldTelemetry({
-    db: options.db,
-    target: async (id) => {
-      if (!options.management) throw new DomainError('integration_unavailable');
-      return resolveOpenworldDashboardTarget(options.db, (await options.management()).adapter, id);
-    },
-  }),
+  options: Pick<ServerRouteOptions, 'db' | 'principal'>,
+  service: ReturnType<typeof createOpenworldTelemetry>,
 ) {
   const base = '/v1/servers/:id/openworld/telemetry';
   app.use(`${base}/*`, async (c, next) => {

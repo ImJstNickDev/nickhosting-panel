@@ -5,6 +5,7 @@ import { createTestDatabase } from '@nickhosting/database/testing';
 import { Hono } from 'hono';
 import { sql } from 'kysely';
 import { afterAll, beforeAll, beforeEach, expect, it, vi } from 'vitest';
+import { OpenworldTokenExpired } from '../../../games/openworld/src/dashboard-api.js';
 import { openworldManifest } from '../../../games/openworld/src/manifest.js';
 import {
   performOpenworldRule,
@@ -198,10 +199,13 @@ it('preserves uncertain requests and rejects a replaced process without sending 
   };
   vi.mocked(performOpenworldRule).mockImplementationOnce(async (_n, _v, _a, beforeDispatch) => {
     await beforeDispatch();
-    throw new DomainError('operation_uncertain');
+    throw new OpenworldTokenExpired('operation_uncertain');
   });
   for (const send of [f.request, f.router()])
     expect(await (await send(input)).json()).toEqual({ error: 'operation_uncertain' });
+  expect(f.target).toHaveBeenCalledOnce();
+  expect((await f.request()).status).toBe(200);
+  expect(f.target).toHaveBeenCalledTimes(2);
   const audit = await database.db
     .selectFrom('audit_events')
     .select('metadata')

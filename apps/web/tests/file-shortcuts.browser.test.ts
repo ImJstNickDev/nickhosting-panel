@@ -1,6 +1,11 @@
 import { randomUUID } from 'node:crypto';
 import { rm } from 'node:fs/promises';
-import { expect as browserExpect, type ConsoleMessage, type Page } from '@playwright/test';
+import {
+  expect as browserExpect,
+  type ConsoleMessage,
+  type Page,
+  type Request,
+} from '@playwright/test';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { browserHarness } from './harness.js';
 import {
@@ -85,6 +90,38 @@ describe('M5 file explorer selection and clipboard shortcuts', () => {
     await showRootFixtureFiles(user);
     await browserExpect(nameButton('sel-a.txt')).toBeVisible();
   }
+
+  it('refreshes transfers and file operation availability together on the ten-second poll', async () => {
+    const transfersPath = `/v1/platform/servers/${provider.ids.serverId}/transfers`;
+    const periodicReads: string[] = [];
+    const record = (request: Request) => {
+      const { pathname } = new URL(request.url());
+      if (
+        request.method() === 'GET' &&
+        [transfersPath, `${endpoint}/capabilities`].includes(pathname)
+      )
+        periodicReads.push(pathname);
+    };
+    user.on('request', record);
+    try {
+      await open();
+      const refreshed = await user.waitForResponse(
+        (response) => new URL(response.url()).pathname === transfersPath,
+        { timeout: 15000 },
+      );
+      expect(await refreshed.json()).toMatchObject({
+        upload: { available: true },
+        fileOperations: {
+          copy: true,
+          extract: true,
+          extractFormats: expect.arrayContaining(['zip']),
+        },
+      });
+      expect(periodicReads).toEqual([transfersPath, transfersPath]);
+    } finally {
+      user.off('request', record);
+    }
+  });
 
   it('toggles names and folders with Ctrl/Cmd and supports replacement and additive ranges', async () => {
     await open();
@@ -414,23 +451,35 @@ describe('M5 file explorer selection and clipboard shortcuts', () => {
       pending = false;
       return route.fulfill({ response });
     });
-    await user.route(`**${endpoint}/capabilities`, async (route) => {
+    await user.route(`**/v1/platform/servers/${provider.ids.serverId}/transfers`, async (route) => {
       if (!pending) return route.continue();
       // An upload ingestion claim makes the real capability temporarily false.
       // Hold that response deterministically instead of waiting for a timer poll.
+      const response = await route.fetch();
+      const transfers = await response.json();
       return route.fulfill({
-        json: { copy: false, extract: false, extractFormats: [], zipDownload: true },
+        response,
+        json: {
+          ...transfers,
+          upload: { ...transfers.upload, available: false, reason: 'conflict' },
+          fileOperations: {
+            ...transfers.fileOperations,
+            copy: false,
+            extract: false,
+            reason: 'conflict',
+          },
+        },
       });
     });
     const readCopy = () =>
       user.evaluate(
-        `import('/src/api/client.ts').then(({queryClient}) => queryClient.getQueryData(['file-capabilities', ${JSON.stringify(provider.ids.serverId)}])?.copy)`,
+        `import('/src/api/client.ts').then(({queryClient}) => queryClient.getQueryData(['transfers', ${JSON.stringify(provider.ids.serverId)}])?.fileOperations.copy)`,
       );
     try {
       await user.keyboard.press('Control+v');
       await browserExpect.poll(() => pending).toBe(true);
       await user.evaluate(
-        `import('/src/api/client.ts').then(({queryClient}) => queryClient.invalidateQueries({queryKey:['file-capabilities', ${JSON.stringify(provider.ids.serverId)}], exact:true}))`,
+        `import('/src/api/client.ts').then(({queryClient}) => queryClient.invalidateQueries({queryKey:['transfers', ${JSON.stringify(provider.ids.serverId)}], exact:true}))`,
       );
       expect(await readCopy()).toBe(false);
     } finally {

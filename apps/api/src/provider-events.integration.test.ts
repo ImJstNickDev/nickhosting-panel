@@ -150,13 +150,44 @@ describe('real Hono provider event receiver', () => {
     }
   });
   it('rejects an unknown link and cannot import another server', async () => {
-    const response = await send(
-      change({ server: { ...event.server, providerUuid: randomUUID() } }),
-    );
-    expect(response.status).toBeGreaterThanOrEqual(400);
+    const value = change({
+      server: { ...event.server, providerUuid: randomUUID(), externalId: randomUUID() },
+    });
+    const response = await send(value);
+    expect(response.status).toBe(410);
+    expect(await response.json()).toEqual({
+      received: false,
+      disposition: 'binding_rejected',
+      instanceId: value.instanceId,
+      eventId: value.eventId,
+    });
+    expect((await send(value, { 'x-nickhosting-signature': '' })).status).toBe(403);
     expect(
       await database.db.selectFrom('provider_server_projections').select('server_id').execute(),
     ).toHaveLength(1);
+  });
+  it('keeps a pre-projection delivery for retry and applies it only after explicit linking', async () => {
+    await database.db
+      .deleteFrom('provider_server_projections')
+      .where('server_id', '=', serverId)
+      .execute();
+    const pending = change({ revision: 3 });
+    expect((await send(pending)).status).toBe(409);
+    await linkProviderFeedServer(database.db, event.instanceId, serverId, {
+      ...event,
+      revision: 2,
+    });
+    expect((await send(pending)).status).toBe(200);
+  });
+  it('rejects even an old duplicate when its full identity differs', async () => {
+    const value = change({ revision: 1, server: { ...event.server, identifier: 'foreign' } });
+    expect((await send(value)).status).toBe(410);
+    const kept = await database.db
+      .selectFrom('provider_server_projections')
+      .select(['payload', 'revision'])
+      .where('server_id', '=', serverId)
+      .executeTakeFirstOrThrow();
+    expect((kept.payload as ProviderChange).server).toEqual(event.server);
   });
   it('rejects missing JSON type and excessive bodies before processing', async () => {
     expect(

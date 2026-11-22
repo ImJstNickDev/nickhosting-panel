@@ -146,7 +146,7 @@ routes and their audit rules.
 
 | Path suffix under `/v1/platform/servers/:id` | Contract |
 | --- | --- |
-| `/transfers` | `files`, bounded text-editor capacity, upload availability/reason/provider byte ceiling/server disk allowance, streaming download support, public SFTP endpoint/configuration/issuance hints and backup permissions. Download total-size limit is `null`; real provider/storage limits still apply. |
+| `/transfers` | `files`, `fileOperations` (copy, extraction, supported formats, ZIP download and upload availability reason), bounded text-editor capacity, upload availability/reason/provider byte ceiling/server disk allowance, streaming download support, public SFTP endpoint/configuration/issuance hints and backup permissions. Download total-size limit is `null`; real provider/storage limits still apply. |
 | `/connections` | Domain `mode` plus frozen `connectionMode: gateway/direct`, configured hostname/SRV metadata, DNS states and every allocation role/transport. Gateway ports report `unconfigured`, `disabled`, `unavailable` or `configured`. An issued snapshot lease is configuration delivery, not proof that live collision/reachability checks and listener binding succeeded. Direct ports use only frozen `direct_endpoint` and report `configured`/`unconfigured`, with `reachability: unverified`. Configuration never claims an externally tested connection. |
 | `/metrics` | `limit` 1–500 (default 100), `from`, `to`, `before` ISO timestamps; `{items,nextBefore}` in descending observation order. Missing intervals remain gaps. |
 | `/sleep-policy` | `{policy,state,proposedPolicy,idleTimeout,policyControlsEditable}`; policy/state remain null when unconfigured or direct. A trusted installed integration may supply a validated initial proposal for Gateway-mode servers. GET never saves it. Permission-aware enabled/protocol/version, idle/readiness/estimate/wake-retry fields and intent-derived mode; hidden timeout fields are omitted for ordinary users; state reuses M3 readiness and startup estimates. |
@@ -855,7 +855,7 @@ targets the folder prefix so all scoped variants become stale.
 | `GET /editor?path=...` | Bounded strict UTF-8 text and SHA-256 `revision`; known binary extensions rejected before reading, actual bytes validated afterward. Reuses the directory identity proof with fresh local authorization; a private one-use signed Wings URL (prepared from the listing when available), no ancestor listings. Wings contains the path and rejects final symlinks. |
 | `PUT /editor` | `{path, content, expectedRevision}`. Existing file requires its revision; new file requires `null` and absence. Changed content returns409 without intentionally overwriting it. Read-back verifies the result. |
 | `POST /archive` (preferred); `GET /archive?root=...&files=...` (compatible) | POST uses URL-encoded `root` and `files` (JSON array of selected basenames), avoiding long URLs. Actual streamed ZIP, including folders/empty directories; 10,000 enumerated entries including selected roots, 64 directory levels. File bodies open lazily, one at a time; cancellation closes upstream. No whole-download browser buffer or fixed aggregate byte cap. |
-| `GET /capabilities` | `{copy,extract,extractFormats,zipDownload,reason}` gated by permissions and configured upload admission. Supported extraction formats: ZIP,TAR,TAR.GZ,TGZ. |
+| `GET /capabilities` | Returns the same `fileOperations` object as the platform transfer descriptor. Copy and extraction follow upload availability. ZIP download follows download availability. |
 | `POST /copy` | `{root,files,destination,overwrite?}`; copies selections recursively into an existing directory, preserving originals. Limits apply to actual work: 20,000 total entries (including roots), 16 GiB copied bytes, depth 64. Optional `overwrite: string[]` authorizes exact server-root-relative regular-file destinations; omission rejects collisions. Links, directory replacement/merging, ambiguous casing, overlapping paths and protected targets remain rejected. |
 | `POST /extract` | `{root,file,destination,confirm:true}`; destination is one new child directory. Validate/stage the entire archive before remote writes, then use existing upload admission and adapter streams. |
 
@@ -1294,7 +1294,9 @@ primary address explicitly through the DNS endpoint. Background reconciliation
 uses server-scoped service authority, not a fabricated Owner browser session.
 
 `GET /v1/platform/servers/:id/connections` supplies per-port `displayAddress`, plus `addressState` and
-`primaryDnsAssignmentId` for authoritative primary selection.
+`primaryDnsAssignmentId` for authoritative primary selection. Its `dns` summaries
+include the stored `domainId` and `shared` flag for the address editor. Network
+refreshes ports and assignments together every 15 seconds and after DNS changes.
 Consumers must not reconstruct hostname/port strings: SRV applies only to the
 matching primary role and transport. Direct endpoints retain their explicit
 configuration and unverified external-reachability status. Gateway DNS uses the

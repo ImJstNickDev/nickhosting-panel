@@ -1,37 +1,25 @@
 import { DomainError } from '@nickhosting/core';
-import { type PterodactylAdapter, PterodactylError } from '@nickhosting/pterodactyl-adapter';
-import type { Context, Hono } from 'hono';
+import { PterodactylError } from '@nickhosting/pterodactyl-adapter';
+import type { Hono } from 'hono';
 import { z } from 'zod';
 import {
   readOpenworldDashboard,
   readOpenworldDashboardStatus,
   updateOpenworldDashboard,
 } from '../../../packages/server-management/src/openworld-dashboard.js';
+import {
+  type OpenworldNativeConnection,
+  openworldRetryAfterMs,
+} from '../../../packages/server-management/src/openworld-telemetry.js';
 import type { Variables } from './app.js';
 import type { ServerRouteOptions } from './servers.js';
 
 export function registerOpenworldDashboardRoutes(
   app: Hono<{ Variables: Variables }>,
-  {
-    db,
-    principal,
-    management,
-  }: Pick<ServerRouteOptions, 'db' | 'principal'> & Partial<Pick<ServerRouteOptions, 'management'>>,
+  { db, principal }: Pick<ServerRouteOptions, 'db' | 'principal'>,
+  native: OpenworldNativeConnection,
 ) {
   const base = '/v1/servers/:id/openworld/dashboard';
-  async function withProvider<T>(
-    c: Context<{ Variables: Variables }>,
-    work: (adapter: PterodactylAdapter) => Promise<T>,
-  ) {
-    if (!management) throw new DomainError('integration_unavailable');
-    try {
-      return await work((await management()).adapter);
-    } catch (error) {
-      if (!(error instanceof PterodactylError) || error.reason !== 'rate_limited') throw error;
-      c.header('Retry-After', String(Math.ceil((error.retryAfterMs ?? 60_000) / 1000)));
-      throw new DomainError('rate_limited');
-    }
-  }
   app.use(`${base}*`, async (c, next) => {
     c.header('cache-control', 'no-store');
     await next();
@@ -50,10 +38,14 @@ export function registerOpenworldDashboardRoutes(
   });
   app.get(`${base}/status`, async (c) => {
     const who = await principal(c);
-    return c.json(
-      await withProvider(c, (adapter) =>
-        readOpenworldDashboardStatus(db, adapter, who, c.req.param('id'), c.req.raw.signal),
-      ),
-    );
+    try {
+      return c.json(
+        await readOpenworldDashboardStatus(db, native, who, c.req.param('id'), c.req.raw.signal),
+      );
+    } catch (error) {
+      if (!(error instanceof PterodactylError) || error.reason !== 'rate_limited') throw error;
+      c.header('Retry-After', String(Math.max(1, Math.ceil(openworldRetryAfterMs(error) / 1000))));
+      throw new DomainError('rate_limited');
+    }
   });
 }

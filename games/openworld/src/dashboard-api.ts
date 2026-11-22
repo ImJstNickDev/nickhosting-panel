@@ -13,8 +13,8 @@ const authSchema = z.object({ required: z.boolean(), loopback: z.boolean(), canA
 const loginSchema = z.object({ token: z.string().regex(/^[\x21-\x7e]{1,4096}$/) });
 
 export class OpenworldTokenExpired extends DomainError {
-  constructor() {
-    super('integration_unavailable');
+  constructor(code: 'integration_unavailable' | 'operation_uncertain' = 'integration_unavailable') {
+    super(code);
   }
 }
 
@@ -94,15 +94,15 @@ export async function openworldDashboardToken(
   }
 }
 
-export async function openworldDashboardStatus(
+export async function readOpenworldDashboardStatusWithToken(
   origin: string,
-  password: string,
+  token: string,
   signal: AbortSignal,
   fetcher = fetch,
 ) {
   try {
     const request = nativeClient(origin, signal, fetcher);
-    const token = await authenticate(request, password);
+    if (!token) throw new DomainError('integration_unavailable');
     return dashboardStatusSchema.parse(await request('status', 'GET', undefined, token));
   } catch (error) {
     if (error instanceof DomainError) throw error;

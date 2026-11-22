@@ -8,6 +8,10 @@ export const nickHostingExtensionSchema = z
   .object({
     schemaVersion: z.literal(1),
     extension: z.literal('nickhosting'),
+    worldReadPrincipal: z
+      .string()
+      .regex(/^[a-f0-9]{64}$/)
+      .optional(),
     extensionVersion: z.string().min(1).max(64),
     target: z
       .object({ panel: z.string().min(1).max(64), blueprint: z.string().min(1).max(64) })
@@ -16,6 +20,8 @@ export const nickHostingExtensionSchema = z
       .object({
         clientKeyManagement: z.boolean(),
         serverChangeEvents: z.boolean(),
+        linkedServerSnapshots: z.boolean().optional(),
+        gatewayInventory: z.boolean().optional(),
         technicalAccounts: z.boolean().optional(),
         bulkUploadUrls: z.boolean().optional(),
         bulkDownloadUrls: z.boolean().optional(),
@@ -38,7 +44,7 @@ export async function discoverNickHostingExtension(
   try {
     return await transport.json(
       'application',
-      'extensions/nickhosting/capabilities',
+      'extensions/nickhosting/capabilities?inventory=1&worldRead=1',
       nickHostingExtensionSchema,
     );
   } catch (error) {
@@ -135,6 +141,7 @@ export const providerHealthSchema = z
     checkedAt: z.string().datetime({ offset: true }),
   })
   .strict();
+export const PROVIDER_SNAPSHOT_BATCH_SIZE = 100;
 const uuid = z.string().uuid();
 const linkedUserSchema = z
   .object({
@@ -150,6 +157,44 @@ const issuedKeySchema = z
     operationId: uuid,
   })
   .strict();
+
+export function linkedSnapshotsSchema(instanceId: string, requested: Set<string>) {
+  return z
+    .object({
+      schemaVersion: z.literal(1),
+      instanceId: z.literal(instanceId),
+      servers: z.array(providerChangeSchema).max(requested.size),
+    })
+    .strict()
+    .refine(
+      ({ servers }) =>
+        servers.every(
+          (entry) =>
+            entry.instanceId === instanceId &&
+            entry.type !== 'limits.updated' &&
+            requested.has(entry.server.providerUuid),
+        ) && new Set(servers.map((entry) => entry.server.providerUuid)).size === servers.length,
+    );
+}
+
+export function scopedProofs(requested: Set<string>) {
+  return z
+    .array(
+      z.strictObject({
+        providerUuid: uuid,
+        ownerId: z.number().int().positive(),
+        revision: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+        valid: z.boolean(),
+        pending: z.boolean(),
+      }),
+    )
+    .max(requested.size)
+    .refine(
+      (scopes) =>
+        scopes.every((scope) => requested.has(scope.providerUuid)) &&
+        new Set(scopes.map((scope) => scope.providerUuid)).size === scopes.length,
+    );
+}
 
 /** Administrative extension operations. Callers must establish NickHosting ownership first. */
 export function createNickHostingBridge(options: TransportOptions) {
@@ -198,14 +243,36 @@ export function createNickHostingBridge(options: TransportOptions) {
       return transport.json(
         'application',
         `${instancePath(instanceId)}/servers/${uuid.parse(serverUuid)}`,
-        providerChangeSchema,
+        providerChangeSchema.refine(
+          (event) =>
+            event.instanceId === instanceId &&
+            event.server.providerUuid === serverUuid &&
+            event.type !== 'limits.updated',
+        ),
       );
     },
-    health(instanceId: string) {
+    getLinkedServerSnapshots(instanceId: string, serverUuids: string[]) {
+      const path = `${instancePath(instanceId)}/server-snapshots`;
+      const ids = z.array(uuid).min(1).max(PROVIDER_SNAPSHOT_BATCH_SIZE).parse(serverUuids);
+      const requested = new Set(ids);
+      if (requested.size !== ids.length) throw new DomainError('validation_failed');
+      const response = linkedSnapshotsSchema(instanceId, requested);
+      return transport.json('application', path, response, 'POST', { serverUuids: ids }, false, {
+        readOnly: true,
+      });
+    },
+    health(instanceId: string, serverUuids: string[] = []) {
+      const ids = z.array(uuid).max(PROVIDER_SNAPSHOT_BATCH_SIZE).parse(serverUuids);
+      const requested = new Set(ids);
+      if (requested.size !== ids.length) throw new DomainError('validation_failed');
+      const response = providerHealthSchema.extend({
+        instanceId: z.literal(instanceId),
+        scopes: scopedProofs(requested).optional(),
+      });
       return transport.json(
         'application',
-        `${instancePath(instanceId)}/health`,
-        providerHealthSchema,
+        `${instancePath(instanceId)}/health${ids.length ? `?scopes=${ids.join(',')}` : ''}`,
+        response,
       );
     },
     provisionUser(instanceId: string, userId: string) {

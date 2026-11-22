@@ -154,3 +154,19 @@ describe('durable sleep receipt', () => {
     expect(sleepReceipt(f.current, f.receipt, f.serverId, f.fence, now, 100)).toBeUndefined();
   });
 });
+
+it('accepts the completion that clears a pending stop indicator on an otherwise exact fence', () => {
+  const { current, receipt, fence, serverId } = fixture();
+  const before = required(current.routes[0]),
+    after = required(receipt.routes[0]),
+    atFence = required(fence.routes[0]);
+  const presentation = { serverName: 'Fixture', messages: {} };
+  atFence.presentation = presentation;
+  before.presentation = { ...presentation, stopping: true };
+  after.presentation = presentation;
+  expect(sleepReceipt(current, receipt, serverId, fence, now, 1000)).toBeDefined();
+  after.presentation = { ...presentation, stopping: true };
+  expect(sleepReceipt(current, receipt, serverId, fence, now, 1000)).toBeUndefined();
+  after.presentation = { ...presentation, serverName: 'changed' };
+  expect(sleepReceipt(current, receipt, serverId, fence, now, 1000)).toBeUndefined();
+});

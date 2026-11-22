@@ -1,5 +1,6 @@
 import { DomainError } from '@nickhosting/core';
 import { z } from 'zod';
+import { OpenworldTokenExpired } from './dashboard-api.js';
 import type { OpenworldNativeConnection } from './native-diagnostics.js';
 import {
   type OpenworldDifficulty,
@@ -306,6 +307,8 @@ export async function performOpenworldRule(
   } catch (error) {
     if (!dispatched || (error instanceof DomainError && error.code === 'game_request_rejected'))
       throw error;
+    if (error instanceof OpenworldTokenExpired)
+      throw new OpenworldTokenExpired('operation_uncertain');
     throw new DomainError('operation_uncertain');
   }
 }

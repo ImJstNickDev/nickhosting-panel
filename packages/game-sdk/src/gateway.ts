@@ -302,6 +302,8 @@ export interface GatewayControl {
     request: { routeId: string; generation: string; quiescenceUntil: string },
     signal: AbortSignal,
   ): Promise<GatewaySnapshot | undefined>;
+  /** Coalesced control change hint only. The ordinary snapshot validates every change. */
+  waitForRouteChange?(signal: AbortSignal): Promise<boolean>;
   fetchSnapshot(): Promise<GatewaySnapshot>;
   requestWake(request: GatewayWakeRequest): Promise<GatewayWakeResult>;
   // A receipt can advance an unchanged waking route within its ORIGINAL lease.
@@ -419,6 +421,8 @@ export interface GatewayProtocolAdapter {
   /** Authenticated provider events may deliver durable readiness receipts for opted-in integrations. */
   readonly startupHint?: 'provider_running';
   readonly readinessSource?: 'provider_running';
+  /** observe only sends a read-only status probe, without application/control effects. */
+  readonly readOnlyStatusProbe?: true;
   supports(route: Readonly<GatewayRoute>): boolean;
   classify(input: Uint8Array, context: GatewayProtocolContext): GatewayIntent;
   /** Hydrate presentation data without changing route authority, before a bounded status reply. */
@@ -442,6 +446,8 @@ export interface GatewaySafetyRenewal {
   close(): void;
 }
 export interface GatewaySafety {
+  /** A provider running receipt needs the exact still-fresh active Docker binding. */
+  hasFreshBackendBinding?(route: GatewayRoute): boolean;
   prepareRenewal?(routes: readonly GatewayRoute[]): GatewaySafetyRenewal;
   /** One snapshot application may share provider reads across its routes. Each
    * validation still checks current context, host bindings and proof. Pre-bind

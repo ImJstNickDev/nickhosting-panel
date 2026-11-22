@@ -25,6 +25,32 @@ const resultSchema = z.union([
 const responseSchema = z.strictObject({ results: z.array(resultSchema).min(1).max(64) });
 export type DirectoryBatchSettings = z.infer<typeof settingsSchema>;
 export type DirectoryBatchResult = z.infer<typeof resultSchema>;
+export interface WorldScanGuard {
+  clientKeyIdentifier: string;
+  principal: string;
+  instanceId: string;
+  nickUserId: string;
+  ownerUuid: string;
+  ownerExternalId: string;
+  server: {
+    providerId: number;
+    providerUuid: string;
+    identifier: string;
+    externalId: string;
+    nodeId: number;
+  };
+  placement: [number, number, number, number];
+  allocations: [number, string, number][];
+}
+const worldResponseSchema = responseSchema.extend({
+  schemaVersion: z.literal(1),
+  propertiesGrant: z
+    .strictObject({
+      expiresAt: z.iso.datetime({ offset: true }),
+      urls: z.tuple([z.string().min(1).max(8192)]),
+    })
+    .optional(),
+});
 const endpoint = (identifier: string, operation: string) =>
   `extensions/nickhosting/servers/${segment(identifier)}/${operation}`;
 
@@ -39,6 +65,18 @@ export async function listDirectoriesBatch(
   identifier: string,
   directories: string[],
 ): Promise<DirectoryBatchResult[]> {
+  return (await requestDirectories(transport, identifier, directories)).results;
+}
+
+export async function requestDirectories(
+  transport: Transport,
+  identifier: string,
+  directories: string[],
+  worldScan?: WorldScanGuard,
+): Promise<{
+  results: DirectoryBatchResult[];
+  propertiesGrant?: { expiresAt: string; urls: [string] };
+}> {
   const paths = parseInput(z.array(z.string()).min(1).max(64), directories);
   if (new Set(paths).size !== paths.length) throw new DomainError('validation_failed');
   for (const path of paths) {
@@ -49,9 +87,17 @@ export async function listDirectoriesBatch(
   }
   let response: Response;
   try {
-    response = await transport.request('client', endpoint(identifier, 'directory-list'), 'POST', {
-      directories: paths,
-    });
+    response = await transport.request(
+      'client',
+      endpoint(identifier, worldScan ? 'world-directory-list' : 'directory-list'),
+      'POST',
+      {
+        directories: paths,
+        ...(worldScan && { worldScan }),
+      },
+      false,
+      worldScan ? { readOnly: true } : undefined,
+    );
   } catch (error) {
     // POST carries a query, not a filesystem mutation: a lost response has no uncertain effect.
     if (error instanceof PterodactylError && error.outcome === 'unknown')
@@ -69,13 +115,14 @@ export async function listDirectoriesBatch(
     const payload: unknown = JSON.parse(
       Buffer.from(await readBounded(response, 8 * 1024 * 1024)).toString('utf8'),
     );
-    const { results } = responseSchema.parse(payload);
+    const decoded = worldScan ? worldResponseSchema.parse(payload) : responseSchema.parse(payload);
+    const { results } = decoded;
     if (
       results.length !== paths.length ||
       results.some((result, index) => result.directory !== paths[index])
     )
       throw new Error('Directory batch does not match the request');
-    return results;
+    return decoded;
   } catch {
     throw new PterodactylError('invalid_response', 'client', 'rejected');
   }

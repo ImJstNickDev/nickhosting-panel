@@ -24,7 +24,7 @@ final class DeliverChanges implements ShouldQueue
         // Claim each event transactionally before I/O; expired claims are retried by scheduler.
         for ($i = 0; $i < $settings['webhookBatchLimit']; $i++) {
             $row = DB::transaction(function () {
-                $row = DB::table('nickhosting_outbox')->whereNull('delivered_at')
+                $row = DB::table('nickhosting_outbox')->whereNull('delivered_at')->whereNull('quarantined_at')
                     ->where('available_at', '<=', now())->orderBy('created_at')->lockForUpdate()->first();
                 if ($row) {
                     DB::table('nickhosting_outbox')->where('id', $row->id)->update([
@@ -45,8 +45,17 @@ final class DeliverChanges implements ShouldQueue
                     'X-NickHosting-Event-Id' => $row->id,
                     'X-NickHosting-Signature' => Protocol::signature(decrypt($instance->secret), $timestamp, $row->payload),
                 ])->withBody($row->payload, 'application/json')->post($instance->callback_url);
+                // A proxy/generic 4xx, a missing first projection or auth failure must retry.
+                // Only our authenticated callback can reject this exact event/binding permanently.
+                if ($response->status() === 410 && $response->json('received') === false
+                    && $response->json('disposition') === 'binding_rejected'
+                    && $response->json('eventId') === $row->id && $response->json('instanceId') === $row->instance_id) {
+                    DB::table('nickhosting_outbox')->where('id', $row->id)->whereNull('delivered_at')
+                        ->update(['quarantined_at' => now(), 'updated_at' => now()]);
+                    continue;
+                }
                 if (!$response->successful()) { throw new \RuntimeException('Delivery not acknowledged'); }
-                DB::table('nickhosting_outbox')->where('id', $row->id)->update(['delivered_at' => now(), 'updated_at' => now()]);
+                DB::table('nickhosting_outbox')->where('id', $row->id)->whereNull('quarantined_at')->update(['delivered_at' => now(), 'updated_at' => now()]);
             } catch (\Throwable $error) {
                 // Never persist or log exception details: HTTP exceptions can contain URLs/secrets.
                 DB::table('nickhosting_outbox')->where('id', $row->id)->update([

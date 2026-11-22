@@ -4,6 +4,7 @@ import { createServer } from 'node:http';
 import { describe, expect, it, vi } from 'vitest';
 import {
   createGatewayControlClient,
+  GatewayEvidenceRejectedError,
   GatewayProviderRateLimitedError,
   GatewayRouteRevisionStaleError,
 } from './control-client.js';
@@ -26,6 +27,21 @@ const snapshot = {
 };
 
 describe('authenticated bounded Gateway control client', () => {
+  it.each([
+    [409, 'provenance_mismatch'],
+    [401, 'unauthenticated'],
+  ] as const)('withdraws explicitly rejected evidence (%i)', async (status, code) => {
+    const client = createGatewayControlClient({
+      ...settings,
+      fetcher: async () => Response.json({ error: { code } }, { status }),
+    });
+    await expect(client.requestJson('evidence')).rejects.toBeInstanceOf(
+      GatewayEvidenceRejectedError,
+    );
+    await expect(client.requestJson('configuration')).rejects.not.toBeInstanceOf(
+      GatewayEvidenceRejectedError,
+    );
+  });
   it('cancels an individual evidence read without closing the control client', async () => {
     const controller = new AbortController();
     const started = Promise.withResolvers<void>();
@@ -677,4 +693,27 @@ describe('authenticated bounded Gateway control client', () => {
     expect(aborted).toBe(true);
     await expect(client.requestJson('snapshot')).rejects.toThrow('integration_unavailable');
   });
+});
+
+it('accepts only the authenticated route-change hint and idle timeout', async () => {
+  const fetcher = vi
+    .fn<typeof fetch>()
+    .mockResolvedValueOnce(Response.json({ changed: true }))
+    .mockResolvedValueOnce(new Response(null, { status: 204 }))
+    .mockResolvedValueOnce(Response.json({ changed: false }))
+    .mockResolvedValueOnce(Response.json({ changed: true }, { status: 503 }));
+  const c = createGatewayControlClient({ ...settings, fetcher });
+  const signal = new AbortController().signal;
+  try {
+    await expect(c.waitForRouteChange?.(signal)).resolves.toBe(true);
+    await expect(c.waitForRouteChange?.(signal)).resolves.toBe(false);
+    await expect(c.waitForRouteChange?.(signal)).rejects.toThrow();
+    await expect(c.waitForRouteChange?.(signal)).rejects.toThrow();
+    expect(new URL(String(fetcher.mock.calls[0]?.[0])).pathname).toBe(
+      `/internal/gateway/${gatewayId}/changes`,
+    );
+    expect(fetcher.mock.calls[0]?.[1]).toMatchObject({ method: 'GET', redirect: 'error' });
+  } finally {
+    c.close();
+  }
 });

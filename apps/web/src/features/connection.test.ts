@@ -52,12 +52,12 @@ describe('Connection edit label', () => {
     ).toBe(false);
   });
   it('uses stored identity and longest suffix for legacy overlapping domains', () => {
-    const connection = { hostname: 'blue.games.example.test' };
-    expect(assignmentConnectionChoice({ domainId: 'games', connection }, options)).toEqual({
+    const hostname = 'blue.games.example.test';
+    expect(assignmentConnectionChoice({ domainId: 'games', hostname }, options)).toEqual({
       domainId: 'games',
       subdomain: 'blue',
     });
-    expect(assignmentConnectionChoice({ connection }, options)).toEqual({
+    expect(assignmentConnectionChoice({ hostname }, options)).toEqual({
       domainId: 'games',
       subdomain: 'blue',
     });
@@ -65,7 +65,7 @@ describe('Connection edit label', () => {
   it('preserves shared semantics even when that assignment is on another domain', () => {
     expect(
       assignmentConnectionChoice(
-        { domainId: 'games', shared: true, connection: { hostname: 'fixture.games.example.test' } },
+        { domainId: 'games', shared: true, hostname: 'fixture.games.example.test' },
         { ...options, mode: 'shared-host', defaultHostname: 'fixture.example.test' },
       ),
     ).toEqual({ domainId: 'games' });

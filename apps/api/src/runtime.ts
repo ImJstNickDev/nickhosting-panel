@@ -14,7 +14,7 @@ import {
   saveBootstrapConfiguration,
 } from '@nickhosting/database';
 import { renderMail } from '@nickhosting/i18n';
-import { createPrivateTransferCache } from '@nickhosting/jobs';
+import { createPrivateTransferCache, createProviderRequestBudget } from '@nickhosting/jobs';
 import { createTransportCoordinator, validateConnection } from '@nickhosting/pterodactyl-adapter';
 import {
   createDirectoryIdentityCache,
@@ -29,7 +29,11 @@ import { createOpenworldDashboardIngress } from './openworld-dashboard-ingress.j
 export async function createRuntime(env: Readonly<Record<string, string | undefined>>) {
   if (!env.DATABASE_URL) throw new DomainError('configuration_invalid');
   const database = createDatabase(env.DATABASE_URL);
-  const transportCoordinator = createTransportCoordinator();
+  const budget =
+    env.REDIS_URL && env.NH_JOB_PREFIX
+      ? createProviderRequestBudget(env.REDIS_URL, env.NH_JOB_PREFIX)
+      : undefined;
+  const transportCoordinator = createTransportCoordinator('api', budget);
   let directoryIdentityCache: ReturnType<typeof createDirectoryIdentityCache> | undefined;
   let transferCache: ReturnType<typeof createPrivateTransferCache> | undefined;
   try {
@@ -172,6 +176,7 @@ export async function createRuntime(env: Readonly<Record<string, string | undefi
       },
       log: (data) => logger.log('warn', 'api.request_failed', data),
     });
+    const stopReadReporting = transportCoordinator.startReadReporting(logger);
     return {
       app,
       createDashboardIngress,
@@ -183,10 +188,13 @@ export async function createRuntime(env: Readonly<Record<string, string | undefi
         await closeViewerArchives(database.db);
         await closeFileViewers(database.db);
         await transferCache?.close();
+        stopReadReporting();
+        budget?.close();
         return database.db.destroy();
       },
     };
   } catch (error) {
+    budget?.close();
     directoryIdentityCache?.close();
     await transferCache?.close();
     await database.db.destroy();

@@ -71,6 +71,40 @@ export function registerGatewaySleepRoutes(
     };
   };
 
+  // This long poll only delivers a hint. No inventory, lease or backend address
+  // is read here. The regular evidence cycle covers reconnects and missed hints.
+  app.get('/internal/gateway/:gatewayId/changes', async (c) => {
+    if (!c.get('gatewayAuthenticated')) throw new DomainError('unauthenticated');
+    const signal = c.req.raw.signal;
+    if (signal.aborted) return c.body(null, 204);
+    let resolve!: (changed: boolean) => void;
+    let reject!: (reason: unknown) => void;
+    const result = new Promise<boolean>((ok, fail) => {
+      resolve = ok;
+      reject = fail;
+    });
+    const subscription = subscribe({
+      changed: () => resolve(true),
+      lost: () => reject(new DomainError('integration_unavailable')),
+    });
+    const abort = () => resolve(false);
+    const timer = setTimeout(abort, 20_000);
+    timer.unref();
+    signal.addEventListener('abort', abort, { once: true });
+    try {
+      if (signal.aborted) abort();
+      const changed = await result;
+      c.header('Cache-Control', 'no-store');
+      if (!changed) return c.body(null, 204);
+      await options.authenticate(c);
+      return c.json({ changed: true });
+    } finally {
+      clearTimeout(timer);
+      signal.removeEventListener('abort', abort);
+      subscription.close();
+    }
+  });
+
   app.post('/internal/gateway/:gatewayId/sleep-completion', async (c) => {
     if (!c.get('gatewayAuthenticated')) throw new DomainError('unauthenticated');
     const parsed = requestSchema.safeParse(await options.body(c));

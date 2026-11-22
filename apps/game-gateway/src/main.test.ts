@@ -58,6 +58,7 @@ function fixture() {
     expect(new Headers(init?.headers).get('authorization')).toBe(`Bearer ${token}`);
     expect(init?.redirect).toBe('error');
     const url = new URL(String(input));
+    if (url.pathname.endsWith('/changes')) return new Response(null, { status: 204 });
     if (url.pathname.endsWith('/configuration')) return Response.json(current);
     if (url.pathname.endsWith('/evidence'))
       return Response.json({
@@ -97,7 +98,7 @@ describe('separate permanent Gateway runtime composition', () => {
     expect(f.fetcher).toHaveBeenCalled();
     expect(
       f.fetcher.mock.calls.map(([url]) => new URL(String(url)).pathname.split('/').at(-1)),
-    ).toEqual(['configuration', 'evidence']);
+    ).toEqual(['configuration', 'evidence', 'changes']);
   });
   it('detects Owner policy changes and stops renewing the old runtime', async () => {
     const f = fixture();

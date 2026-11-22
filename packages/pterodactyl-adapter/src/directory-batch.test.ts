@@ -309,3 +309,141 @@ describe('experimental Blueprint directory batches', () => {
     expect(fetcher).toHaveBeenCalledTimes(1);
   });
 });
+
+describe('guarded scheduled world transport', () => {
+  const guard = {
+    principal: 'a'.repeat(64),
+    instanceId: 'instance',
+    nickUserId: 'owner',
+    ownerUuid: 'owner-uuid',
+    ownerExternalId: 'technical',
+    clientKeyIdentifier: 'key-id',
+    server: {
+      providerId: 1,
+      providerUuid: 'uuid',
+      identifier: 'fixture',
+      externalId: 'managed',
+      nodeId: 2,
+    },
+    placement: [3, 4, 5, 6] as [number, number, number, number],
+    allocations: [[6, '::1', 25565]] as [number, string, number][],
+  };
+  it.each(['progress', 'stalled', 'cancelled', 'oversized'] as const)(
+    'retains bounded streaming behavior for guarded level.dat (%s)',
+    async (scenario) => {
+      vi.useFakeTimers();
+      try {
+        let stream: ReadableStreamDefaultController<Uint8Array> | undefined;
+        const started = Promise.withResolvers<void>();
+        const cancelled = vi.fn();
+        const adapter = createPterodactylAdapter({
+          ...options,
+          fetcher: async (input, init) => {
+            const url = new URL(String(input));
+            if (url.pathname.endsWith('/transfer-settings'))
+              return Response.json({
+                downloadBatchLimit: 1,
+                uploadBatchLimit: 1,
+                signedUrlTtlSeconds: 60,
+              });
+            if (url.pathname.endsWith('/world-download-urls')) {
+              expect(JSON.parse(String(init?.body))).toEqual({
+                paths: [' world/level.dat'],
+                worldScan: guard,
+              });
+              return Response.json({
+                expiresAt: new Date(Date.now() + 60000).toISOString(),
+                urls: ['https://panel.example.test/download/file?token=level'],
+              });
+            }
+            expect(url.pathname).toBe('/download/file');
+            return new Response(
+              new ReadableStream({
+                start(controller) {
+                  stream = controller;
+                  started.resolve();
+                },
+                cancel: cancelled,
+              }),
+            );
+          },
+        });
+        const [read] = await adapter.prepareWorldFiles('fixture', [' world/level.dat'], guard);
+        if (!read) throw new Error('missing test grant');
+        const stop = new AbortController();
+        const result = read(2, stop.signal);
+        const checked =
+          scenario === 'progress'
+            ? expect(result).resolves.toEqual(Buffer.from([1, 2]))
+            : expect(result).rejects.toThrow();
+        await started.promise;
+        await vi.advanceTimersByTimeAsync(0);
+        if (scenario === 'progress') {
+          await vi.advanceTimersByTimeAsync(20000);
+          stream?.enqueue(Uint8Array.of(1));
+          await vi.advanceTimersByTimeAsync(20000);
+          stream?.enqueue(Uint8Array.of(2));
+          stream?.close();
+        } else if (scenario === 'stalled') await vi.advanceTimersByTimeAsync(30001);
+        else if (scenario === 'cancelled') stop.abort();
+        else stream?.enqueue(Uint8Array.of(1, 2, 3));
+        await checked;
+        if (scenario !== 'progress') expect(cancelled).toHaveBeenCalledOnce();
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+  it.each([
+    'ok',
+    'denial',
+    'identity',
+    'malformed',
+    'properties-denial',
+    'missing-properties',
+  ] as const)(
+    'reads properties through only a validated authenticated root response (%s)',
+    async (scenario) => {
+      const calls: string[] = [];
+      const fetcher: typeof fetch = async (input, init) => {
+        const url = new URL(String(input));
+        calls.push(url.pathname);
+        if (url.pathname.endsWith('/world-directory-list')) {
+          expect(init?.body).toBe(JSON.stringify({ directories: [''], worldScan: guard }));
+          expect(new Headers(init?.headers).get('authorization')).toBe(
+            'Bearer fixture-managed-client',
+          );
+          if (scenario === 'denial' || scenario === 'identity')
+            return new Response(null, { status: scenario === 'denial' ? 403 : 409 });
+          return Response.json({
+            schemaVersion: 1,
+            results: [{ directory: '', files: [] }],
+            ...(scenario === 'malformed'
+              ? {}
+              : {
+                  propertiesGrant: {
+                    expiresAt: new Date(Date.now() + 60000).toISOString(),
+                    urls: ['https://panel.example.test/download/file?token=private'],
+                  },
+                }),
+          });
+        }
+        expect(url.pathname).toBe('/download/file');
+        expect(new Headers(init?.headers).has('authorization')).toBe(false);
+        return new Response('level-name=survival', {
+          status:
+            scenario === 'properties-denial' ? 403 : scenario === 'missing-properties' ? 404 : 200,
+        });
+      };
+      const adapter = createPterodactylAdapter({ ...options, fetcher });
+      const result = adapter.readWorldDirectories('fixture', [''], guard);
+      if (scenario === 'ok')
+        expect(new TextDecoder().decode((await result).properties)).toBe('level-name=survival');
+      else if (scenario === 'missing-properties') expect((await result).properties).toBeUndefined();
+      else await expect(result).rejects.toThrow();
+      expect(calls.length).toBe(
+        ['ok', 'properties-denial', 'missing-properties'].includes(scenario) ? 2 : 1,
+      );
+    },
+  );
+});

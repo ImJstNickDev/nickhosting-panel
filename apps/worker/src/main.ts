@@ -3,7 +3,12 @@ import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createLogger, DomainError, encryptionKeyFromBase64, SecretCodec } from '@nickhosting/core';
 import { createDatabase, getSecret, getSettings } from '@nickhosting/database';
-import { createPrivateTransferCache, processJob, startJobWorker } from '@nickhosting/jobs';
+import {
+  createPrivateTransferCache,
+  createProviderRequestBudget,
+  processJob,
+  startJobWorker,
+} from '@nickhosting/jobs';
 import {
   createDirectoryIdentityCache,
   createInstallationCollector,
@@ -15,6 +20,7 @@ import {
   recordWorkerHeartbeat,
   refreshHostObservations,
   wakeInstallationOperation,
+  withProviderReadCaller,
 } from '@nickhosting/server-management';
 import { nginxProxyManager } from '../../../packages/external-services/src/nginx-proxy-manager.js';
 import { minecraftModpackSchemaAvailable } from '../../../packages/server-management/src/minecraft-modpack-schema.js';
@@ -34,7 +40,8 @@ export async function main(env: NodeJS.ProcessEnv = process.env) {
   if (!env.DATABASE_URL || !env.REDIS_URL || !env.NH_JOB_PREFIX)
     throw new DomainError('configuration_invalid');
   const { db, pool } = createDatabase(env.DATABASE_URL);
-  const transportCoordinator = createManagementTransportCoordinator();
+  const budget = createProviderRequestBudget(env.REDIS_URL, env.NH_JOB_PREFIX);
+  const transportCoordinator = createManagementTransportCoordinator('worker', budget);
   let directoryIdentityCache: ReturnType<typeof createDirectoryIdentityCache> | undefined;
   let transferCache: ReturnType<typeof createPrivateTransferCache> | undefined;
   try {
@@ -209,18 +216,21 @@ export async function main(env: NodeJS.ProcessEnv = process.env) {
           activeKeyId: keyId,
           keys: { [keyId]: encryptionKeyFromBase64(env.NH_SECRETS_MASTER_KEY) },
         });
-        await refreshProviderFeeds(db, codec, env, transportCoordinator);
+        await withProviderReadCaller('worker-feed', () =>
+          refreshProviderFeeds(db, codec, env, transportCoordinator),
+        );
       },
       () => logger.log('warn', 'provider.feed_unavailable'),
     );
-    const captures = startOpenworldScreenshotLoop(
-      db,
-      management,
-      Boolean(env.NH_SECRETS_MASTER_KEY),
-      (serverId) => logger.log('warn', 'openworld.capture_index_unavailable', { serverId }),
+    const captures = withProviderReadCaller('worker-openworld-captures', () =>
+      startOpenworldScreenshotLoop(db, management, Boolean(env.NH_SECRETS_MASTER_KEY), (serverId) =>
+        logger.log('warn', 'openworld.capture_index_unavailable', { serverId }),
+      ),
     );
-    const worldIndexes = startMinecraftWorldIndexLoop(db, management, env, (serverId) =>
-      logger.log('warn', 'minecraft.world_index_unavailable', { serverId }),
+    const worldIndexes = withProviderReadCaller('worker-minecraft-worlds', () =>
+      startMinecraftWorldIndexLoop(db, management, env, (serverId) =>
+        logger.log('warn', 'minecraft.world_index_unavailable', { serverId }),
+      ),
     );
     const modpacks = startMinecraftModpackLoop({
       notificationPool: pool,
@@ -256,7 +266,9 @@ export async function main(env: NodeJS.ProcessEnv = process.env) {
       let successful = false;
       try {
         await recoverInstallations();
-        await reconcileServers(db, management, logger, env);
+        await withProviderReadCaller('worker-reconcile', () =>
+          reconcileServers(db, management, logger, env, pool),
+        );
         successful =
           schedulesHealthy &&
           runtime.worker.isRunning() &&
@@ -284,6 +296,7 @@ export async function main(env: NodeJS.ProcessEnv = process.env) {
     schedulePoll = pollAutomation();
     const catalogs = startMinecraftMetadataLoop(db, pool, env, logger);
     reconciliation = poll();
+    const stopReadReporting = transportCoordinator.startReadReporting(logger);
     logger.log('info', 'worker.started');
     let closed: Promise<void> | undefined;
     const close = () => {
@@ -310,6 +323,8 @@ export async function main(env: NodeJS.ProcessEnv = process.env) {
           directoryIdentityCache?.close();
           await transferCache?.close();
           await heartbeat('stopped');
+          stopReadReporting();
+          budget.close();
           await db.destroy();
         }
         logger.log('info', 'worker.stopped');
@@ -332,6 +347,7 @@ export async function main(env: NodeJS.ProcessEnv = process.env) {
       },
     };
   } catch (error) {
+    budget.close();
     directoryIdentityCache?.close();
     await transferCache?.close();
     await db.destroy();

@@ -6,6 +6,7 @@ import { PterodactylError } from '@nickhosting/pterodactyl-adapter';
 import { type Kysely, sql } from 'kysely';
 import type { Environment } from './admission.js';
 import { verifyManagedIdentity } from './lifecycle.js';
+import { freshWorldIdentity, observationIdentityRevision } from './managed-identity-receipts.js';
 import {
   inspectMinecraftWorlds,
   type MinecraftWorldFileStamp,
@@ -23,7 +24,8 @@ type Runtime = Pick<
   | 'consoleProviderBinding'
   | 'worldPreparation'
   | 'worldNotificationPool'
->;
+> &
+  Partial<Pick<ManagementRuntime, 'scheduledWorldReadPhase'>>;
 export interface MinecraftWorldIndex {
   current: boolean;
   snapshot: MinecraftWorldSnapshot;
@@ -147,11 +149,23 @@ async function reconcile(
   let denied: 'forbidden' | 'provenance_mismatch' | 'not_found' | null = null;
   try {
     if (!token.localBinding) throw new DomainError('provenance_mismatch');
+    const receipt = scheduled
+      ? freshWorldIdentity(db, serverId, runtime.consoleProviderBinding)
+      : undefined;
     const server = await db
       .selectFrom('managed_servers')
       .innerJoin('minecraft_server_profiles as profile', 'profile.server_id', 'managed_servers.id')
+      .innerJoin('runtime_egg_mappings as mapping', 'mapping.id', 'managed_servers.mapping_id')
       .selectAll('managed_servers')
-      .select(['profile.installed', 'profile.combination_id'])
+      .select([
+        'profile.installed',
+        'profile.combination_id',
+        'mapping.egg_id',
+        'mapping.nest_id',
+        (scheduled ? observationIdentityRevision(serverId, 'minecraft') : sql<null>`null`).as(
+          'identity_revision',
+        ),
+      ])
       .where('managed_servers.id', '=', serverId)
       .where('managed_servers.deleted_at', 'is', null)
       .executeTakeFirst();
@@ -165,18 +179,32 @@ async function reconcile(
       );
       if (!row.rows[0]?.valid) throw new DomainError('provenance_mismatch');
     };
-    await check();
-    if (server.installed) {
+    const readProvider = async () => {
       if (!server.pterodactyl_id || !server.pterodactyl_identifier)
         throw new DomainError('conflict');
       try {
         const remote = await runtime.adapter.getApplicationServer(server.pterodactyl_id);
         await verifyManagedIdentity(db, server, remote);
+        if (scheduled && (remote.egg !== server.egg_id || remote.nest !== server.nest_id))
+          throw new DomainError('provenance_mismatch');
       } catch (failure) {
         if (failure instanceof PterodactylError && failure.upstreamStatus === 404)
           denied = 'not_found';
         throw failure;
       }
+    };
+    await check();
+    const guarded =
+      scheduled && server.installed && server.identity_revision
+        ? await runtime.scheduledWorldReadPhase?.(server, signal)
+        : undefined;
+    const reused =
+      !guarded &&
+      receipt &&
+      receipt.revision === server.identity_revision &&
+      freshWorldIdentity(db, serverId, runtime.consoleProviderBinding) === receipt;
+    if (server.installed && !reused && !guarded) {
+      await readProvider();
       await check();
     }
     const cached = await boundRow(db, serverId, runtime.consoleProviderBinding, token.id);
@@ -213,9 +241,10 @@ async function reconcile(
       check,
       env,
       signal,
-      server.pterodactyl_identifier
-        ? runtime.fileReadPhase(server.pterodactyl_identifier, server, signal)
-        : undefined,
+      guarded ??
+        (server.pterodactyl_identifier
+          ? runtime.fileReadPhase(server.pterodactyl_identifier, server, signal)
+          : undefined),
       scheduled ? undefined : runtime.worldPreparation,
       {
         indexInspection: inspection,
@@ -299,7 +328,8 @@ async function reconcile(
             scanAfter: inspection.scanAfter,
             negativeUntil: Object.fromEntries(negativeUntil),
           };
-    const update = await sql<{ observed_at: Date }>`UPDATE minecraft_world_indexes
+    const publish = async (connection: DB, deadline?: Date) => {
+      const update = await sql<{ observed_at: Date }>`UPDATE minecraft_world_indexes
       SET snapshot=${JSON.stringify(storedSnapshot)}::jsonb, level_stamps=${JSON.stringify(stamps)}::jsonb, non_world_directories=${nonWorldDirectories}::text[],
         observed_at=clock_timestamp(), successful_generation=generation, finished_id=${token.id}, denied_reason=NULL,
         local_binding=${token.localBinding}, binding=${runtime.consoleProviderBinding}, lease_id=NULL, lease_until=NULL,
@@ -308,8 +338,57 @@ async function reconcile(
         AND operation_generation=${token.operationGeneration}
         AND EXISTS(SELECT 1 FROM managed_servers s WHERE s.id=server_id AND s.active_operation_id IS NULL)
         AND minecraft_world_local_binding(server_id)=${token.localBinding}
-      RETURNING observed_at`.execute(db);
-    const observedAt = update.rows[0]?.observed_at;
+        ${
+          guarded || (reused && receipt)
+            ? sql`AND ${observationIdentityRevision(serverId, 'minecraft')}=${server.identity_revision}`
+            : sql``
+        }
+        ${deadline ? sql`AND clock_timestamp()<${deadline}` : sql``}
+      RETURNING observed_at`.execute(connection);
+      return update.rows[0]?.observed_at;
+    };
+    let observedAt: Date | undefined;
+    if (reused && receipt) {
+      // SQL checks the scope and deadline at publication, including time spent
+      // waiting on a row lock. An expired or withdrawn proof needs a full GET.
+      const retry = new Error('world identity receipt expired during publication');
+      observedAt = await db
+        .transaction()
+        .execute(async (tx) => {
+          const owned = await tx
+            .selectFrom('minecraft_world_indexes')
+            .select('server_id')
+            .where('server_id', '=', serverId)
+            .where('lease_id', '=', token.id)
+            .forUpdate()
+            .executeTakeFirst();
+          if (
+            !owned ||
+            freshWorldIdentity(db, serverId, runtime.consoleProviderBinding) !== receipt
+          )
+            return undefined;
+          const deadline = new Date(
+            Date.now() + Math.max(0, receipt.expiresAt - performance.now()),
+          );
+          const published = await publish(tx, deadline);
+          if (
+            published &&
+            freshWorldIdentity(db, serverId, runtime.consoleProviderBinding) !== receipt
+          )
+            throw retry;
+          return published;
+        })
+        .catch((error) => {
+          if (error !== retry) throw error;
+          return undefined;
+        });
+      if (!observedAt) {
+        await check();
+        await readProvider();
+        await check();
+        observedAt = await publish(db);
+      }
+    } else observedAt = await publish(db);
     if (observedAt) {
       // Publication retires the old revision even if its cache entry cannot be deleted.
       if (
@@ -329,7 +408,13 @@ async function reconcile(
     await sql`UPDATE minecraft_world_indexes SET lease_id=NULL,lease_until=NULL
       WHERE server_id=${serverId} AND lease_id=${token.id}`.execute(db);
   } catch (failure) {
-    if (failure instanceof DomainError && failure.code === 'provenance_mismatch')
+    if (
+      (failure instanceof DomainError && failure.code === 'provenance_mismatch') ||
+      (scheduled &&
+        failure instanceof PterodactylError &&
+        failure.scope === 'client' &&
+        failure.upstreamStatus === 409)
+    )
       denied = 'provenance_mismatch';
     else if (
       (failure instanceof DomainError && ['unauthorized', 'forbidden'].includes(failure.code)) ||

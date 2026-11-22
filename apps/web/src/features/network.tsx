@@ -24,7 +24,6 @@ import {
 } from './connection-fields.js';
 import {
   type Connections,
-  type DnsAssignments,
   type DnsPlan,
   platformPath,
   serverPath,
@@ -40,16 +39,11 @@ export function NetworkPage({ serverId }: { serverId: string }) {
     queryFn: () => api<Connections>(`${platformPath(serverId)}/connections`),
     refetchInterval: 15000,
   });
-  const dns = useQuery({
-    queryKey: ['dns', serverId],
-    queryFn: () => api<DnsAssignments>(`${serverPath(serverId)}/dns`),
-    refetchInterval: 15000,
-  });
   const options = useQuery({
     queryKey: ['connection-options', 'server', serverId],
     queryFn: () => api<ConnectionOptions>(`${serverPath(serverId)}/connection-options`),
   });
-  const [remove, setRemove] = useState<DnsAssignments[number]>();
+  const [remove, setRemove] = useState<Connections['dns'][number]>();
   const [editing, setEditing] = useState(false),
     [choice, setChoice] = useState<ConnectionChoice>({});
   const [editingBusy, setEditingBusy] = useState(false);
@@ -73,8 +67,8 @@ export function NetworkPage({ serverId }: { serverId: string }) {
     server.data?.permissionKeys.includes('network.write') &&
     session.data?.context.sessionType === 'regular';
   const assignment = connection.data?.primaryDnsAssignmentId
-    ? dns.data?.find((item) => item.id === connection.data?.primaryDnsAssignmentId)
-    : (dns.data?.find((item) => item.state === 'active') ?? dns.data?.[0]);
+    ? connection.data.dns.find((item) => item.id === connection.data?.primaryDnsAssignmentId)
+    : (connection.data?.dns.find((item) => item.state === 'active') ?? connection.data?.dns[0]);
   const primary = connection.data?.ports.find((port) => port.primary && port.displayAddress);
   const address = primary?.displayAddress;
   const addressState = connection.data?.addressState;
@@ -84,15 +78,12 @@ export function NetworkPage({ serverId }: { serverId: string }) {
       : addressState === 'uncertain' || addressState === 'deleting'
         ? 'connection.addressUnavailable'
         : 'service.noConnection';
-  async function refresh() {
-    await Promise.all([connection.refetch(), dns.refetch()]);
-  }
   async function save() {
     await api(`${serverPath(serverId)}/dns${assignment ? `/${assignment.id}` : ''}`, {
       method: assignment ? 'PUT' : 'POST',
       body: choice,
     });
-    await refresh();
+    await connection.refetch();
     closeEditor();
   }
   return (
@@ -207,7 +198,7 @@ export function NetworkPage({ serverId }: { serverId: string }) {
                   success={false}
                   onSubmit={async () => {
                     await api(`${serverPath(serverId)}/dns`, { body: {} });
-                    await refresh();
+                    await connection.refetch();
                   }}
                 >
                   {null}
@@ -223,7 +214,6 @@ export function NetworkPage({ serverId }: { serverId: string }) {
               <Notice>{t('service.directReachability')}</Notice>
             )}
             {Boolean(error) && <ErrorNotice error={error} />}
-            {dns.error && <ErrorNotice error={dns.error} />}
             {options.error && <ErrorNotice error={options.error} />}
           </>
         )}
@@ -274,7 +264,7 @@ export function NetworkPage({ serverId }: { serverId: string }) {
             body: { confirm: true },
           });
           setRemove(undefined);
-          await refresh();
+          await connection.refetch();
         }}
       >
         <p>{t('connection.removeHelp')}</p>

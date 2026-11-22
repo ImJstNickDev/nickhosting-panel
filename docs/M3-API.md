@@ -139,6 +139,7 @@ and managed wake authority; keep its service and configuration protected.
 | Method and suffix | Response / behavior |
 |---|---|
 | `GET configuration` | Resolved `gateway*` settings only; no secrets. |
+| `GET changes` | Authenticated, bounded long poll. A committed Gateway change returns `{"changed":true}`; an idle 20-second wait returns 204. The caller requests current evidence before changing routes. |
 | `GET snapshot` | Complete leased route snapshot with durable content revisions. |
 | `POST wake` | `{routeId,routeRevision,requestId}`; fresh managed route, current consent and M2 atomic admission. Returns mode, optional operation UUID and error message key. |
 | `POST observations` | Complete per-server role evidence below; Core independently corroborates process identity and rechecks membership under the resource lock. |
@@ -480,10 +481,10 @@ The Pterodactyl adapter uses the standard Application server list, filtered by
 complete UUIDs in batches of 48 with `include=allocations`. Pagination remains
 bounded; missing, duplicate or unexpected results reject rather than falling back
 to a burst of individual requests. Several roles for one server share its record.
-No Blueprint endpoint, provider rate-limit increase or cross-snapshot TTL cache is
-required. Four servers on one node require three provider list operations per
-snapshot instead of twelve, before pagination; pagination/chunking still adds
-requests, so this is not an unlimited-capacity guarantee.
+Blueprint 1.9.0 offers the same complete inventory in one call per cycle. The
+stock fallback uses a node catalogue, server identity batches and one allocation
+inventory per policy node (three calls for four servers on one node before
+pagination). Both paths read fresh inventory.
 
 Every validation still resolves current managed context, observes current host
 bindings and checks the durable reachability proof. The batch retains its original

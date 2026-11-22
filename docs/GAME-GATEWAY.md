@@ -53,6 +53,38 @@ listeners, Docker bindings and actual backend reachability before opening a list
 and requires game readiness before forwarding. Route configuration and a snapshot
 lease are not evidence of successful listener binding or external connectivity.
 
+## Provider topology confirmation
+
+Core binds each Blueprint inventory to the current Application credential, policy
+nodes and managed server UUIDs. The bootstrap reads the node catalog, all
+allocations on those nodes and every allocation of the selected servers in one
+repeatable-read transaction. Its receipt contains the installation epoch, the
+transactional change counter and a SHA-256 digest of the ordered source rows.
+
+One bounded long poll per API process serves the active Gateway. It checks a
+single revision row every 350 ms, and a committed topology change wakes the
+ordinary evidence cycle. Each unchanged heartbeat rechecks actual scoped rows,
+trigger coverage and current key permissions before confirming the digest. This
+also detects a missed hint, database restore or DDL such as TRUNCATE. The
+confirmation interval is at most half the configured lease, 7.5 seconds, or
+85% of the maximum observation age, whichever is shortest. Registered Openworld
+routes with a managed identity receipt use a four-second ceiling. An active API
+also reacquires a complete inventory at least every five minutes. Limits on the
+response size and inventory cardinality still apply.
+
+Only a verified source read advances observation time. Reusing it preserves its
+original deadline, including during retries and provider cooldowns. Changing a route,
+endpoint, ownership, allocation membership or mapping requires a new provider
+inventory for that admission. A pending provider denial survives a change of
+port and a temporary failure of the next inventory read. Rejected
+ownership or service credentials withdraw listeners immediately. Local topology
+edits notify the Gateway after commit. An empty candidate membership skips the
+provider read and Core verifies the final route set under its resource lock.
+Installations with missing topology endpoints or incomplete trigger coverage
+use the existing full-inventory path. Already-admitted single-role Minecraft
+servers can overlap read-only status probes across four distinct nodes while
+reports and sleep decisions follow snapshot order.
+
 ## Bind/forward model
 
 - Gateway takes a configured **public game endpoint** (bound interface/IP + port + TCP/UDP role).
@@ -148,6 +180,18 @@ See [ADR 0016](decisions/0016-provider-readiness.md).
 
 ## Snapshot renewal and worker recovery
 
+With Blueprint 1.9.0, each evidence cycle reads the node catalogue, every allocation
+on policy nodes and every allocation owned by the selected servers in one consistent
+provider inventory. Only capability discovery is cached. An older extension uses
+the stock inventory APIs. An explicit size-limit response also uses the complete
+stock read. Other provider failures do not produce new evidence.
+
+The Gateway holds one authenticated change request open. Committed changes to
+power, intent, readiness state or process identity prompt a fresh evidence cycle.
+Routine metric and readiness timestamps do not trigger it. A missed notification
+is covered by the configured renewal interval. A hint itself carries no route or
+authority to forward.
+
 Core reads eligible routes, policy, Minecraft combinations and startup samples in batches.
 Each valid route renews its lease on every full snapshot. Route revisions advance when
 their published content changes. Scoped inventory validates the requested routes and
@@ -195,7 +239,10 @@ validated listeners as local protocol responders within their original lease.
 A new waking generation may change only the response text when server, node,
 allocation, endpoints, protocol and locale remain identical; it does not adopt
 the candidate route or extend authority. Forwarding, wake effects and readiness receipts are suppressed until fresh
-validation succeeds. Existing local status connections remain open; backend streams
+validation succeeds. A transition from waking to online for the same wake job and
+generation can retain that local waking responder within its original lease. A
+provider-running receipt needs a fresh validated Docker backend binding before it
+can promote a listener. Existing local status connections remain open; backend streams
 and UDP forwarding sessions close. New/changed routes, real collisions, unknown
 safety errors and expired leases still fail closed. One immediate validation retry
 is bounded; no indefinite retry or lease extension is introduced.

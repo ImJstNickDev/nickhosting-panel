@@ -23,6 +23,10 @@ Route::get('/servers/{server}/transfer-settings', TransferSettingsController::cl
 
 Route::post('/servers/{server}/directory-list', DirectoryListController::class)
     ->middleware(AuthenticateServerAccess::class);
+Route::post('/servers/{server}/world-directory-list', [DirectoryListController::class, 'worlds'])
+    ->middleware(AuthenticateServerAccess::class);
+Route::post('/servers/{server}/world-download-urls', [DownloadUrlsController::class, 'worlds'])
+    ->middleware(AuthenticateServerAccess::class);
 Route::get('/servers/{server}/directory-settings', DirectorySettingsController::class)
     ->middleware(AuthenticateServerAccess::class);
 

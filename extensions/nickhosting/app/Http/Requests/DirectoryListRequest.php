@@ -16,7 +16,7 @@ final class DirectoryListRequest extends ListFilesRequest
         try { $body = json_decode($this->getContent(), true, 32, JSON_THROW_ON_ERROR); }
         catch (\JsonException $error) { abort(422); }
         // Global TrimStrings/ConvertEmptyStringsToNull must not change filesystem names or root ''.
-        $this->replace(['directories' => is_array($body) ? ($body['directories'] ?? null) : null]);
+        $this->replace(['directories' => $body['directories'] ?? null, 'worldScan' => $body['worldScan'] ?? null]);
     }
 
     public function rules(): array

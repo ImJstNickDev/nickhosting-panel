@@ -1546,7 +1546,15 @@ describe('durable Gateway sleep/wake using M2 admission and lifecycle', () => {
     expect(pending.sleepJobId).not.toBeNull();
     fixture.lifecycle.now = () => new Date();
     fixture.lifecycle.env = env;
-    const changed = vi.fn();
+    const terminalHint = vi.fn();
+    const changed = async () => {
+      const current = await f.db
+        .selectFrom('gateway_server_states')
+        .select('state')
+        .where('server_id', '=', serverId)
+        .executeTakeFirst();
+      if (current?.state === 'sleeping') terminalHint();
+    };
     const subscription = await listenForGatewayChanges(database.pool, changed, vi.fn());
     try {
       expect(await fixture.process(pending.sleepJobId ?? '')).toBe('succeeded');
@@ -1567,12 +1575,49 @@ describe('durable Gateway sleep/wake using M2 admission and lifecycle', () => {
           quiescenceUntil,
         },
       });
-      await vi.waitFor(() => expect(changed).toHaveBeenCalledOnce());
+      await vi.waitFor(() => expect(terminalHint).toHaveBeenCalled());
       expect(fixture.stop).toHaveBeenCalledOnce();
     } finally {
       subscription.close();
     }
   });
+  it('signals committed power transitions while routine observations remain quiet', async () => {
+    await configure();
+    const changed = vi.fn(),
+      barrier = vi.fn();
+    const updates = await listenForGatewayChanges(database.pool, changed, vi.fn());
+    const jobs = await listenForJobOutbox(database.pool, barrier, vi.fn());
+    try {
+      await f.db
+        .updateTable('managed_servers')
+        .set({ last_observed_at: new Date() })
+        .where('id', '=', serverId)
+        .execute();
+      await expect(
+        f.db.transaction().execute(async (tx) => {
+          await tx
+            .updateTable('managed_servers')
+            .set({ runtime_state: 'running' })
+            .where('id', '=', serverId)
+            .execute();
+          throw new Error('rollback');
+        }),
+      ).rejects.toThrow('rollback');
+      await notifyJobOutbox(f.db);
+      await vi.waitFor(() => expect(barrier).toHaveBeenCalledOnce());
+      expect(changed).not.toHaveBeenCalled();
+      await f.db
+        .updateTable('managed_servers')
+        .set({ runtime_state: 'running' })
+        .where('id', '=', serverId)
+        .execute();
+      await vi.waitFor(() => expect(changed).toHaveBeenCalledOnce());
+    } finally {
+      updates.close();
+      jobs.close();
+    }
+  });
+
   it('delivers only committed schema-scoped Gateway hints, independently from job notifications', async () => {
     const changed = vi.fn(),
       jobChanged = vi.fn();

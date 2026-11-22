@@ -9,7 +9,7 @@ import {
 } from '@nickhosting/server-management';
 import { afterAll, beforeAll, expect, it, vi } from 'vitest';
 import { managementFixture } from '../../../packages/server-management/src/test-fixtures.js';
-import { reconcileServers } from './reconcile.js';
+import { pollFleet, reconcileServers } from './reconcile.js';
 
 let database: Awaited<ReturnType<typeof createTestDatabase>>;
 beforeAll(async () => {
@@ -439,6 +439,49 @@ it('finishes a committed sleep only after job success, confirmed offline state a
     await poll();
     expect(await state()).toEqual({ state: 'sleeping', sleep_job_id: null });
     expect(warnings).toEqual([]);
+  } finally {
+    await isolated.destroy();
+  }
+});
+
+it('admits one fleet sweep per cadence across staggered replicas and retries failed sweeps', async () => {
+  const isolated = await createTestDatabase();
+  try {
+    const started = Promise.withResolvers<void>();
+    const finished = Promise.withResolvers<void>();
+    const sweep = vi.fn(async () => {
+      started.resolve();
+      await finished.promise;
+    });
+    const first = pollFleet(isolated.pool, sweep);
+    await started.promise;
+    try {
+      await pollFleet(isolated.pool, sweep);
+    } finally {
+      finished.resolve();
+      await first;
+    }
+    await pollFleet(isolated.pool, sweep);
+    expect(sweep).toHaveBeenCalledOnce();
+    await isolated.pool.query("update fleet_reconciliation_clock set next_poll_at = '-infinity'");
+    await expect(
+      pollFleet(isolated.pool, async () => {
+        throw new Error('interrupted');
+      }),
+    ).rejects.toThrow('interrupted');
+    const crashed = await isolated.pool.connect();
+    try {
+      await crashed.query(
+        "select pg_advisory_lock(hashtextextended(current_schema() || ':fleet-reconciliation',0))",
+      );
+      await pollFleet(isolated.pool, sweep);
+      expect(sweep).toHaveBeenCalledOnce();
+    } finally {
+      // Destroy only this test's connection without releasing its session lock.
+      crashed.release(true);
+    }
+    await pollFleet(isolated.pool, sweep);
+    expect(sweep).toHaveBeenCalledTimes(2);
   } finally {
     await isolated.destroy();
   }

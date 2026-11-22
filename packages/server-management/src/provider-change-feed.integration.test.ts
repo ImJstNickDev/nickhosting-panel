@@ -17,7 +17,7 @@ describe('authenticated provider change projection', () => {
   let fixture: Awaited<ReturnType<typeof managementFixture>>;
   let serverId: string;
   let event: ProviderChange;
-  const providerUrl = 'https://panel.example.test';
+  const providerUrl = 'https://change-feed.example.test';
   let now: Date;
   beforeEach(async () => {
     database = await createTestDatabase();
@@ -131,6 +131,8 @@ describe('authenticated provider change projection', () => {
       { ...event, revision: 4 },
       now,
     );
+    expect(await cached()).toBeNull();
+    await health();
     expect(await cached()).toEqual(event.limits);
   });
   it('rejects foreign instance, unknown identity and mismatched snapshot', async () => {
@@ -166,7 +168,9 @@ describe('authenticated provider change projection', () => {
     await applyProviderChange(database.db, updated({ type: 'identity.invalidated' }), now);
     await health();
     expect(await cached()).toBeNull();
-    await applyProviderChange(database.db, updated({ revision: 3 }), now);
+    await expect(applyProviderChange(database.db, updated({ revision: 3 }), now)).rejects.toThrow(
+      'provenance_mismatch',
+    );
     for (const revision of [2, 3, 4])
       await expect(
         linkProviderFeedServer(
@@ -221,9 +225,16 @@ describe('authenticated provider change projection', () => {
         now,
       ),
     ).rejects.toThrow();
-    expect(await applyProviderChange(database.db, updated({ server: identity }), now)).toBe(
-      'invalidated',
-    );
+    await expect(
+      applyProviderChange(database.db, updated({ server: identity }), now),
+    ).rejects.toThrow('provenance_mismatch');
+    const kept = await database.db
+      .selectFrom('provider_server_projections')
+      .select(['payload', 'revision'])
+      .where('server_id', '=', serverId)
+      .executeTakeFirstOrThrow();
+    expect(kept.revision).toBe('1');
+    expect(kept.payload).toEqual(event);
     await health();
     expect(await cached()).toBeNull();
   });

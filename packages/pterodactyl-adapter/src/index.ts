@@ -56,7 +56,11 @@ export { backupIgnoredSchema } from './backup-limits.js';
 export * from './blueprint.js';
 export type { ConsoleEvent, ConsoleRelay, ConsoleRelayOptions, ConsoleStats } from './console.js';
 export { type ContainerObserver, createContainerObserver } from './container-observer.js';
-export type { DirectoryBatchResult, DirectoryBatchSettings } from './directory-batch.js';
+export type {
+  DirectoryBatchResult,
+  DirectoryBatchSettings,
+  WorldScanGuard,
+} from './directory-batch.js';
 export type { DownloadProxyOptions, ProxiedDownload } from './downloads.js';
 export type {
   FileArchiveCommit,
@@ -65,8 +69,15 @@ export type {
   FileOperationReceipt,
   GuardedDirectoryDelete,
 } from './file-operations.js';
+export type { GatewayHeartbeatRequest, GatewayHeartbeatSections } from './gateway-heartbeat.js';
+export type { GatewayInventoryServer } from './gateway-inventory.js';
 export * from './network-observer.js';
 export { supportsStopConfirmation } from './power.js';
+export {
+  assertProviderReadActive,
+  type ProviderReadCaller,
+  withProviderReadCaller,
+} from './provider-read-attribution.js';
 export type { TransferOptions } from './transfer-guard.js';
 export type { CredentialScope, RemoteOutcome } from './transport.js';
 export { createTransportCoordinator, PterodactylError, relativePath } from './transport.js';

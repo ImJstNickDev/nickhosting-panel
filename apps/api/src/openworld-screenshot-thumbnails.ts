@@ -7,8 +7,7 @@ import {
   screenshotRevision,
   screenshotRevisionExists,
 } from '../../../games/openworld/src/screenshots.js';
-import { resolveOpenworldDashboardTarget } from '../../../packages/server-management/src/openworld-dashboard.js';
-import { createOpenworldPlayerChannel } from '../../../packages/server-management/src/openworld-player-channel.js';
+import type { createOpenworldPlayerChannel } from '../../../packages/server-management/src/openworld-player-channel.js';
 import { sharedReads } from '../../../packages/server-management/src/openworld-telemetry.js';
 import type { Variables } from './app.js';
 import type { ServerRouteOptions } from './servers.js';
@@ -42,15 +41,8 @@ export function resizeOpenworldScreenshot(
 
 export function registerOpenworldThumbnailRoute(
   app: Hono<{ Variables: Variables }>,
-  options: Pick<ServerRouteOptions, 'db' | 'principal'> &
-    Partial<Pick<ServerRouteOptions, 'management'>>,
-  channel = createOpenworldPlayerChannel({
-    db: options.db,
-    target: async (id) => {
-      if (!options.management) throw new DomainError('integration_unavailable');
-      return resolveOpenworldDashboardTarget(options.db, (await options.management()).adapter, id);
-    },
-  }),
+  options: Pick<ServerRouteOptions, 'db' | 'principal'>,
+  channel: ReturnType<typeof createOpenworldPlayerChannel>,
   fetcher = fetch,
 ) {
   const indexes = sharedReads<Awaited<ReturnType<typeof openworldScreenshots>>>(32, Date.now, 0);

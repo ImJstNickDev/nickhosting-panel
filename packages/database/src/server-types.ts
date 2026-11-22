@@ -75,6 +75,12 @@ export interface HostSnapshot {
   observedAt: string;
 }
 export interface ServerTables {
+  fleet_reconciliation_retries: {
+    server_id: string;
+    batch_size: number;
+    read_detail: Generated<boolean>;
+    retry_at: Date;
+  };
   physical_hosts: {
     id: string;
     name: string;
@@ -150,6 +156,7 @@ export interface ServerTables {
   project_members: { project_id: string; user_id: string; role: 'manager' | 'operator' | 'viewer' };
   managed_servers: {
     id: string;
+    provider_identity_revision: Generated<string>;
     provider_user_id: Generated<number | null>;
     owner_id: string;
     project_id: string | null;

@@ -1,11 +1,13 @@
 import { randomBytes, randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import { createLogger, DomainError, type LogRecord, SecretCodec } from '@nickhosting/core';
+import { listenForGatewayChanges } from '@nickhosting/database';
 import { createTestDatabase } from '@nickhosting/database/testing';
 import type { GatewayRoute } from '@nickhosting/game-sdk';
 import { safetyProviderServerSchema } from '@nickhosting/gateway-safety';
 import { PterodactylError } from '@nickhosting/pterodactyl-adapter';
 import {
+  createManagementRuntime,
   ensureSatisfactoryTlsIdentity,
   getGatewaySnapshot,
   getGatewayState,
@@ -42,6 +44,7 @@ const policy = {
 };
 let database: Awaited<ReturnType<typeof createTestDatabase>>;
 let f: Awaited<ReturnType<typeof managementFixture>>;
+let observationRuntime: ManagementRuntime | undefined;
 let refreshHost: ReturnType<typeof vi.fn>;
 let app: ReturnType<typeof createApp>,
   env: Record<string, string>,
@@ -88,6 +91,7 @@ afterAll(async () => {
   await database?.destroy();
 });
 beforeEach(async () => {
+  observationRuntime = undefined;
   timingLogs.length = 0;
   throwTimingSink = false;
   f = await managementFixture(database.db, { interactive: true });
@@ -170,6 +174,7 @@ beforeEach(async () => {
     updated_at: new Date().toISOString(),
   };
   Object.assign(f.adapter, {
+    supportsGatewayInventory: vi.fn(async () => false),
     listNodes: vi.fn(async () => [{ id: f.providerNodeId, uuid: f.nodeId, fqdn: secret }]),
     getApplicationServer: vi.fn(async () => remote),
     getApplicationServers: vi.fn(async () => [remote]),
@@ -198,6 +203,7 @@ beforeEach(async () => {
       throw new DomainError('unauthenticated');
     },
     management: async () =>
+      observationRuntime ??
       ({
         adapter: f.adapter,
         refreshObservations: refreshHost,
@@ -205,7 +211,7 @@ beforeEach(async () => {
           observeProcessStart: processStart,
           confirmInitialInstallationStopped: async () => true,
         },
-      }) as unknown as ManagementRuntime,
+      } as unknown as ManagementRuntime),
   });
 });
 describe('M3 Core service authentication and managed control plane', () => {
@@ -1384,6 +1390,168 @@ describe('M3 Core service authentication and managed control plane', () => {
     expect(f.adapter.getApplicationServer).not.toHaveBeenCalled();
   });
 
+  it('wakes on committed topology writes and ignores ordinary lease renewals or rolled-back edits', async () => {
+    const changed = vi.fn();
+    const listener = await listenForGatewayChanges(database.pool, changed, vi.fn());
+    try {
+      await getGatewaySnapshot(f.db, env);
+      await expect(
+        f.db.transaction().execute(async (tx) => {
+          await tx
+            .updateTable('managed_nodes')
+            .set({ enabled: false })
+            .where('id', '=', f.nodeId)
+            .execute();
+          throw new Error('fixture rollback');
+        }),
+      ).rejects.toThrow('fixture rollback');
+      await f.db
+        .updateTable('gateway_routes')
+        .set({ enabled: false })
+        .where('id', '=', route.id)
+        .execute();
+      await vi.waitFor(() => expect(changed).toHaveBeenCalledOnce());
+      await f.db
+        .updateTable('managed_nodes')
+        .set({ enabled: false })
+        .where('id', '=', f.nodeId)
+        .execute();
+      await vi.waitFor(() => expect(changed).toHaveBeenCalledTimes(2));
+    } finally {
+      listener.close();
+    }
+  });
+
+  it('skips provider reads for an empty Gateway and rejects a route enabled during that read', async () => {
+    await f.db
+      .updateTable('gateway_routes')
+      .set({ enabled: false })
+      .where('id', '=', route.id)
+      .execute();
+    const empty = await request(`${prefix()}/evidence`);
+    expect(empty.status).toBe(200);
+    expect(await empty.json()).toMatchObject({
+      snapshot: { routes: [] },
+      nodes: [],
+      allocations: [],
+      servers: [],
+    });
+    expect(f.adapter.supportsGatewayInventory).not.toHaveBeenCalled();
+    expect(f.adapter.listNodes).not.toHaveBeenCalled();
+    const { createGatewayInventoryReader, gatewayEvidence } = await import('./gateway-evidence.js');
+    const reader = createGatewayInventoryReader();
+    await expect(
+      gatewayEvidence(
+        f.db,
+        env,
+        { adapter: f.adapter } as ManagementRuntime,
+        (value) => value,
+        async (...args) => {
+          const inventory = await reader(...args);
+          await f.db
+            .updateTable('gateway_routes')
+            .set({ enabled: true })
+            .where('id', '=', route.id)
+            .execute();
+          return inventory;
+        },
+        () => {},
+      ),
+    ).rejects.toMatchObject({ status: 412 });
+    expect(f.adapter.supportsGatewayInventory).not.toHaveBeenCalled();
+  });
+
+  it('renews Blueprint evidence on every cycle and only caches discovery', async () => {
+    vi.mocked(f.adapter.supportsGatewayInventory).mockResolvedValue(true);
+    const allocations = (remote.relationships?.allocations?.data ?? []).map(
+      ({ attributes: a }) => ({
+        id: a.id,
+        ip: a.ip,
+        port: a.port,
+        assigned: a.assigned,
+      }),
+    );
+    f.adapter.readGatewayInventory = vi.fn(async () => ({
+      schemaVersion: 1 as const,
+      nodes: [{ id: f.providerNodeId, uuid: f.nodeId }],
+      allocations: [{ nodeId: f.providerNodeId, allocations }],
+      servers: [
+        {
+          ...remote,
+          relationships: {
+            allocations: {
+              object: 'list' as const,
+              data: allocations.map((attributes) => ({ attributes })),
+            },
+          },
+        },
+      ],
+    }));
+    for (let cycle = 0; cycle < 2; cycle++) {
+      const result = await request(`${prefix()}/evidence`);
+      expect(result.status).toBe(200);
+      expect(await result.text()).not.toContain(secret);
+    }
+    expect(f.adapter.supportsGatewayInventory).toHaveBeenCalledOnce();
+    expect(f.adapter.readGatewayInventory).toHaveBeenCalledTimes(2);
+    expect(f.adapter.listNodes).not.toHaveBeenCalled();
+    vi.mocked(f.adapter.readGatewayInventory).mockRejectedValueOnce(
+      new PterodactylError('rate_limited', 'application', 'rejected', 429),
+    );
+    expect((await request(`${prefix()}/evidence`)).status).toBeGreaterThanOrEqual(400);
+    expect(f.adapter.listNodes).not.toHaveBeenCalled();
+    vi.mocked(f.adapter.readGatewayInventory).mockRejectedValueOnce(
+      new PterodactylError('invalid_request', 'application', 'rejected', 413),
+    );
+    expect((await request(`${prefix()}/evidence`)).status).toBe(200);
+    expect(f.adapter.listNodes).toHaveBeenCalledOnce();
+  });
+
+  it('refreshes the provider inventory before admitting a second public port on an existing server', async () => {
+    vi.mocked(f.adapter.supportsGatewayInventory).mockResolvedValue(true);
+    const allocations = (remote.relationships?.allocations?.data ?? []).map(
+      ({ attributes: a }) => ({
+        id: a.id,
+        ip: a.ip,
+        port: a.port,
+        assigned: a.assigned,
+      }),
+    );
+    const foreign = { id: 98765, ip: '203.0.113.10', port: 30123, assigned: false };
+    let current = allocations;
+    const snapshot = vi.fn(async () => ({
+      schemaVersion: 1 as const,
+      receipt: { epoch: randomUUID(), revision: '1', digest: 'a'.repeat(64) },
+      nodes: [{ id: f.providerNodeId, uuid: f.nodeId }],
+      allocations: [{ nodeId: f.providerNodeId, allocations: current }],
+      servers: [
+        {
+          ...remote,
+          relationships: {
+            allocations: {
+              object: 'list' as const,
+              data: allocations.map((attributes) => ({ attributes })),
+            },
+          },
+        },
+      ],
+    }));
+    Object.assign(f.adapter, {
+      gatewayTopology: { snapshot, revision: () => new Promise(() => {}) },
+    });
+    expect((await request(`${prefix()}/evidence`)).status).toBe(200);
+    current = [...allocations, foreign];
+    await f.db
+      .updateTable('gateway_routes')
+      .set({ public_port: foreign.port })
+      .where('id', '=', route.id)
+      .execute();
+    const response = await request(`${prefix()}/evidence`);
+    expect(response.status).toBe(200);
+    expect((await response.json()).allocations[0].allocations).toContainEqual(foreign);
+    expect(snapshot).toHaveBeenCalledTimes(2);
+  });
+
   it('collects evidence for more than one provider batch and rejects incomplete inventory', async () => {
     const prefixId = 20_000_000;
     const rows = await sql<{
@@ -1905,6 +2073,130 @@ describe('M3 Core service authentication and managed control plane', () => {
         .execute(),
     ).toHaveLength(1);
   });
+  it.each([
+    'fresh',
+    'telemetry',
+    'expired',
+    'credential',
+    'owner-aba',
+    'membership-aba',
+    'allocation-aba',
+    'revision-during-probe',
+    'missing-member',
+  ] as const)(
+    'binds Openworld process verification to the inventory receipt (%s)',
+    async (scenario) => {
+      await f.db
+        .insertInto('game_integrations')
+        .values({ id: 'openworld', version: '1', manifest: {} })
+        .onConflict((c) => c.column('id').doNothing())
+        .execute();
+      await f.db
+        .updateTable('runtime_egg_mappings')
+        .set({ game_id: 'openworld', runtime_id: 'dedicated' })
+        .where('id', '=', f.mappingId)
+        .execute();
+      const observer = {
+        preflight: vi.fn(async () => {}),
+        stopped: vi.fn(async () => true),
+        processStartedAt: vi.fn(async () => null),
+      };
+      const runtime = () =>
+        createManagementRuntime({
+          db: f.db,
+          codec,
+          adapter: f.adapter,
+          containerObserver: observer,
+          env: { ...env, NH_OBSERVER_ID: 'isolated-observer' },
+        });
+      observationRuntime = await runtime();
+      const selected = (await getGatewaySnapshot(f.db, env)).routes[0];
+      if (!selected) throw new Error('Missing Openworld fixture route');
+      route = selected;
+      const evidence = await request(`${prefix()}/evidence`);
+      expect(evidence.status).toBe(200);
+      const body = await evidence.json();
+      expect(JSON.stringify(body)).not.toContain('identity_revision');
+      expect(JSON.stringify(body)).not.toContain(secret);
+      if (scenario === 'telemetry') {
+        await sql`UPDATE managed_servers SET last_observed_at=now() WHERE id=${serverId}`.execute(
+          f.db,
+        );
+      }
+      if (scenario === 'allocation-aba') {
+        await f.db.transaction().execute(async (tx) => {
+          await sql`UPDATE server_allocations SET is_primary=false WHERE id=${route.allocationId}`.execute(
+            tx,
+          );
+          await sql`UPDATE server_allocations SET is_primary=true WHERE id=${route.allocationId}`.execute(
+            tx,
+          );
+        });
+      }
+      if (scenario === 'membership-aba') {
+        await f.db.transaction().execute(async (tx) => {
+          await sql`UPDATE gateway_routes SET enabled=false WHERE id=${route.id}`.execute(tx);
+          await sql`UPDATE gateway_routes SET enabled=true WHERE id=${route.id}`.execute(tx);
+        });
+      }
+      if (scenario === 'owner-aba') {
+        const version = async () =>
+          (
+            await f.db
+              .selectFrom('managed_servers')
+              .select('provider_identity_revision')
+              .where('id', '=', serverId)
+              .executeTakeFirstOrThrow()
+          ).provider_identity_revision;
+        const initial = BigInt(await version());
+        await f.db.transaction().execute(async (tx) => {
+          await sql`UPDATE managed_servers SET owner_id=${f.owner.actorUserId} WHERE id=${serverId}`.execute(
+            tx,
+          );
+          await sql`UPDATE managed_servers SET owner_id=${f.context.subjectUserId} WHERE id=${serverId}`.execute(
+            tx,
+          );
+        });
+        expect(BigInt(await version())).toBe(initial + 2n);
+      }
+      if (scenario === 'credential') {
+        observationRuntime = await createManagementRuntime({
+          db: f.db,
+          codec,
+          adapter: { ...f.adapter },
+          containerObserver: observer,
+          env: { ...env, NH_OBSERVER_ID: 'isolated-observer' },
+        });
+      }
+      if (scenario === 'missing-member') {
+        vi.mocked(f.adapter.getApplicationServers).mockResolvedValueOnce([]);
+        expect((await request(`${prefix()}/evidence`)).status).toBe(409);
+      }
+      if (scenario === 'revision-during-probe') {
+        observer.processStartedAt.mockImplementationOnce(async () => {
+          await sql`UPDATE runtime_egg_mappings SET egg_id=egg_id WHERE id=${f.mappingId}`.execute(
+            f.db,
+          );
+          return null;
+        });
+      }
+      const clock =
+        scenario === 'expired'
+          ? vi.spyOn(Date, 'now').mockReturnValue(body.observedAt + 5001)
+          : undefined;
+      try {
+        expect((await request(`${prefix()}/observations`, observation())).status).toBe(204);
+      } finally {
+        clock?.mockRestore();
+      }
+      expect(f.adapter.getApplicationServer).toHaveBeenCalledTimes(
+        scenario === 'fresh' || scenario === 'telemetry' ? 0 : 1,
+      );
+      expect(observer.processStartedAt).toHaveBeenCalledTimes(
+        scenario === 'revision-during-probe' ? 4 : 2,
+      );
+    },
+  );
   it('refuses omitted, extra, stale and client-supplied process evidence', async () => {
     expect((await request(`${prefix()}/observations`, observation({ routes: [] }))).status).toBe(
       400,

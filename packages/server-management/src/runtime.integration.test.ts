@@ -2137,6 +2137,7 @@ describe('management runtime execution-time authorization', () => {
     const entered = Promise.withResolvers<void>();
     const release = Promise.withResolvers<void>();
     Object.assign(f.adapter, {
+      getApplicationServers: vi.fn(async () => [remote]),
       getApplicationServer: vi.fn(async () => remote),
       getResources: vi.fn(async () => {
         entered.resolve();
@@ -2189,7 +2190,7 @@ describe('management runtime execution-time authorization', () => {
     const serverId = await f.server();
     const remote = { ...(await providerIdentity(serverId)), container: { installed: true } };
     Object.assign(f.adapter, {
-      getApplicationServer: vi.fn(async () => remote),
+      getApplicationServers: vi.fn(async () => [remote]),
       getResources: vi.fn(async () => ({
         current_state: 'offline',
         is_suspended: false,
