@@ -71,8 +71,29 @@ async function tcpFixture(host = '127.0.0.2', handler?: (socket: Socket) => void
     if (handler) handler(socket);
     else socket.pipe(socket);
   });
-  server.listen(0, host);
-  await once(server, 'listening');
+  // Production routes use one port on two addresses. Asking the kernel for
+  // a port on the backend alone can select an occupied frontend port.
+  if (host === '127.0.0.2') {
+    for (let attempt = 0; attempt < 8; attempt++) {
+      const reservation = createServer();
+      reservation.listen(0, '127.0.0.1');
+      await once(reservation, 'listening');
+      try {
+        const address = reservation.address();
+        if (!address || typeof address === 'string') throw new Error('fixture port missing');
+        server.listen(address.port, host);
+        await once(server, 'listening');
+        break;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'EADDRINUSE' || attempt === 7) throw error;
+      } finally {
+        await new Promise<void>((resolve) => reservation.close(() => resolve()));
+      }
+    }
+  } else {
+    server.listen(0, host);
+    await once(server, 'listening');
+  }
   const address = server.address();
   if (!address || typeof address === 'string') throw new Error('fixture listener missing');
   cleanups.push(async () => {
@@ -183,6 +204,10 @@ async function exchange(
   const socket = connect({ host, port });
   const chunks: Buffer[] = [];
   socket.on('data', (bytes: Buffer) => chunks.push(bytes));
+  let streamError: Error | undefined;
+  socket.on('error', (error) => {
+    streamError = error;
+  });
   const closed = new Promise<void>((resolve) => socket.once('close', () => resolve()));
   await once(socket, 'connect');
   if (fragments) {
@@ -191,6 +216,7 @@ async function exchange(
     socket.end(Buffer.from(data).subarray(2));
   } else socket.end(data);
   await closed;
+  if (streamError) throw streamError;
   return Buffer.concat(chunks);
 }
 async function datagram(port: number, data: string | Buffer, client?: DatagramSocket) {
@@ -204,7 +230,8 @@ async function datagram(port: number, data: string | Buffer, client?: DatagramSo
 async function refuses(port: number) {
   await expect(
     new Promise<void>((resolve, reject) => {
-      const socket = connect(port, '127.0.0.1');
+      // A distinct source address excludes an ephemeral loopback TCP self-connect.
+      const socket = connect({ port, host: '127.0.0.1', localAddress: '127.0.0.3' });
       socket.once('connect', () => {
         socket.destroy();
         resolve();
@@ -3927,6 +3954,9 @@ describe('lease, reconciliation and shutdown safety', () => {
       await f.gateway.start();
       const socket = connect(backend.port, '127.0.0.1');
       await once(socket, 'connect');
+      const echoed = once(socket, 'data');
+      socket.write('established');
+      expect((await echoed)[0].toString()).toBe('established');
       const closed = once(socket, 'close');
       vi.mocked(f.control.fetchSnapshot)
         .mockReset()
@@ -4302,6 +4332,7 @@ describe('event-driven within-lease readiness', () => {
     let receive: Parameters<NonNullable<GatewayControl['watchStartup']>>[1] | undefined;
     const probe = vi.fn(async () => ({ ready: false }));
     const p = plane([r], {
+      safety: { hasFreshBackendBinding: () => true },
       control: {
         watchStartup: async (_request, cb, abort) => {
           receive = cb;
@@ -4587,4 +4618,247 @@ it('a receipt arriving after route replacement cannot enable the replacement', a
   await observation;
   expect(p.gateway.health().revision).toBe(3);
   expect((await exchange(backend.port, 'STATUS\n')).toString()).toBe('waking\n');
+});
+
+describe('continuous listener handoff', () => {
+  it('forwards a split waking handshake from byte zero after readiness, exactly once', async () => {
+    const backend = await tcpFixture();
+    const presentation = { serverName: 'Fixture', messages: {} };
+    const r = {
+      ...route(backend.port, 'tcp', 'waking'),
+      wakeJobId: randomUUID(),
+      presentation: {
+        ...presentation,
+        startupBeganAt: new Date().toISOString(),
+        estimatedStartupSeconds: 4,
+      },
+    };
+    const classified = Promise.withResolvers<void>();
+    const p = plane([r], {
+      protocols: [
+        fixtureProtocol({
+          createSession: () => ({
+            classify(bytes) {
+              classified.resolve();
+              return { kind: 'continue', consumedBytes: bytes.length };
+            },
+            response: () => ({ close: true }),
+          }),
+        }),
+      ],
+    });
+    await p.gateway.start();
+    const client = connect(backend.port, '127.0.0.1');
+    const received: Buffer[] = [];
+    client.on('data', (bytes) => received.push(bytes));
+    const closed = once(client, 'close');
+    client.write('handshake');
+    await classified.promise;
+    await p.gateway.applySnapshot(
+      p.snapshot([{ ...r, revision: 2, mode: 'online', presentation }], 2),
+    );
+    client.end(' and login');
+    await closed;
+    expect(Buffer.concat(received).toString()).toBe('handshake and login');
+    expect(p.gateway.metrics().tcpBytesToBackend).toBe('handshake and login'.length);
+    expect(p.control.requestWake).not.toHaveBeenCalled();
+  });
+
+  it('finishes a locally answered status conversation on the same TCP stream through readiness', async () => {
+    const backend = await tcpFixture();
+    const r = { ...route(backend.port, 'tcp', 'waking'), wakeJobId: randomUUID() };
+    const p = plane([r], {
+      protocols: [
+        fixtureProtocol({
+          createSession: () => {
+            let step = 0;
+            return {
+              classify: (bytes) => ({ kind: 'status', consumedBytes: bytes.length }),
+              response: () => ({
+                bytes: Buffer.from(++step === 1 ? 'status' : 'pong'),
+                close: step === 2,
+              }),
+            };
+          },
+        }),
+      ],
+    });
+    await p.gateway.start();
+    const client = connect(backend.port, '127.0.0.1');
+    const first = once(client, 'data');
+    client.write('list');
+    expect((await first)[0].toString()).toBe('status');
+    await p.gateway.applySnapshot(p.snapshot([{ ...r, revision: 2, mode: 'online' }], 2));
+    const second = once(client, 'data');
+    client.end('ping');
+    expect((await second)[0].toString()).toBe('pong');
+    expect(p.gateway.metrics().tcpBytesToBackend).toBe(0);
+  });
+
+  it('returns a protocol reply if the first real TCP connect is refused before bytes are forwarded', async () => {
+    const backend = await tcpFixture();
+    await new Promise<void>((resolve) => backend.server.close(() => resolve()));
+    const r = { ...route(backend.port), wakeJobId: randomUUID() };
+    const p = plane([r], {
+      protocols: [
+        fixtureProtocol({
+          createSession: () => ({
+            classify: (bytes) => ({ kind: 'join', consumedBytes: bytes.length }),
+            response: (mode) => ({ bytes: Buffer.from(mode), close: true }),
+          }),
+        }),
+      ],
+    });
+    await p.gateway.start();
+    expect((await exchange(backend.port, 'join')).toString()).toBe('waking');
+    expect(p.gateway.metrics().tcpBytesToBackend).toBe(0);
+    expect(p.control.requestWake).not.toHaveBeenCalled();
+    backend.server.listen(backend.port, '127.0.0.2');
+    await once(backend.server, 'listening');
+    expect((await exchange(backend.port, 'already available')).toString()).toBe(
+      'already available',
+    );
+    expect(p.safety.validate).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(['renewed', 'ready'] as const)(
+    'finishes pending local UDP status replies after a %s lease',
+    async (change) => {
+      const backend = await udpFixture();
+      const r = { ...route(backend.port, 'udp', 'waking'), wakeJobId: randomUUID() };
+      const started = Promise.withResolvers<void>();
+      const ready = Promise.withResolvers<void>();
+      const p = plane([r], {
+        protocols: [
+          fixtureProtocol({
+            async prepareResponse() {
+              started.resolve();
+              await ready.promise;
+            },
+          }),
+        ],
+      });
+      await p.gateway.start();
+      const reply = datagram(backend.port, 'STATUS\n');
+      await started.promise;
+      const next = change === 'ready' ? { ...r, revision: 2, mode: 'online' as const } : r;
+      await p.gateway.applySnapshot(p.snapshot([next], next.revision));
+      ready.resolve();
+      expect((await reply).toString()).toBe(change === 'ready' ? 'online\n' : 'waking\n');
+      if (change === 'ready')
+        expect((await datagram(backend.port, 'forwarded')).toString()).toBe('forwarded');
+      expect(p.control.requestWake).not.toHaveBeenCalled();
+    },
+  );
+
+  it('keeps only the waking responder during Docker churn at the exact ready transition', async () => {
+    const backend = await tcpFixture();
+    const r = { ...route(backend.port, 'tcp', 'waking'), wakeJobId: randomUUID() };
+    const p = plane([r]);
+    await p.gateway.start();
+    const lease = p.gateway.health().expiresAt;
+    const next = p.snapshot([{ ...r, revision: 2, mode: 'online' }], 2);
+    vi.mocked(p.control.fetchSnapshot).mockResolvedValue(next);
+    vi.mocked(p.safety.validate).mockRejectedValue(new NetworkObservationError('container_churn'));
+    await expect(p.gateway.refresh()).rejects.toThrow();
+    expect((await exchange(backend.port, 'STATUS\n')).toString()).toBe('waking\n');
+    expect(p.gateway.health()).toMatchObject({ expiresAt: lease, revision: 1, routes: 1 });
+    expect(p.gateway.metrics().tcpBytesToBackend).toBe(0);
+    vi.mocked(p.safety.validate).mockResolvedValue(undefined);
+    await p.gateway.refresh();
+    expect((await exchange(backend.port, 'forwarded')).toString()).toBe('forwarded');
+  });
+
+  it('issues one post-change refresh even when a stale fetch had already started', async () => {
+    const backend = await tcpFixture();
+    const r = route(backend.port, 'tcp', 'online');
+    const changed = Promise.withResolvers<boolean>();
+    const waitForRouteChange = vi.fn(() => changed.promise);
+    const p = plane([r], { control: { waitForRouteChange } });
+    await p.gateway.start();
+    const stale = Promise.withResolvers<GatewaySnapshot>();
+    vi.mocked(p.control.fetchSnapshot)
+      .mockImplementationOnce(() => stale.promise)
+      .mockImplementationOnce(async () =>
+        p.snapshot([{ ...r, revision: 2, mode: 'manually_stopped' }], 2),
+      );
+    const fetching = p.gateway.refresh();
+    changed.resolve(true);
+    await Promise.resolve();
+    stale.resolve(p.snapshot());
+    await fetching;
+    await vi.waitFor(() => expect(p.gateway.health().revision).toBe(2));
+    expect((await exchange(backend.port, 'STATUS\n')).toString()).toBe('manually_stopped\n');
+    expect(p.control.fetchSnapshot).toHaveBeenCalledTimes(3);
+    expect(waitForRouteChange).toHaveBeenCalledOnce();
+    await p.gateway.stop();
+  });
+});
+
+it.each([true, false, undefined])(
+  'applies provider receipts only with a fresh binding on the target (%s), independently of a withheld server',
+  async (fresh) => {
+    const backend = await tcpFixture();
+    const waking = { ...route(backend.port, 'tcp', 'waking'), wakeJobId: randomUUID() };
+    const withheld = route((await tcpFixture()).port, 'tcp', 'sleeping');
+    const online = { ...waking, revision: 2, mode: 'online' as const };
+    let hint: Parameters<NonNullable<GatewayControl['watchStartup']>>[1] | undefined;
+    const p = plane([waking, withheld], {
+      protocols: [
+        fixtureProtocol({ startupHint: 'provider_running', readinessSource: 'provider_running' }),
+      ],
+      safety: {
+        ...(fresh === undefined ? {} : { hasFreshBackendBinding: () => fresh }),
+        validate: async (route) => {
+          if (route.id === withheld.id) throw new GatewaySafetyError('backend_active_binding');
+          return { backendReady: false };
+        },
+      },
+      control: {
+        watchStartup: async (_request, onHint, signal) => {
+          hint = onHint;
+          await new Promise<void>((resolve) =>
+            signal.addEventListener('abort', () => resolve(), { once: true }),
+          );
+        },
+      },
+    });
+    await p.gateway.start();
+    expect(p.gateway.health().withheldRoutes).toBe(1);
+    vi.mocked(p.control.fetchSnapshot).mockImplementation(async () =>
+      p.snapshot([online, withheld], 2),
+    );
+    await hint?.({
+      snapshot: p.snapshot([online, withheld], 2),
+      observedAt: new Date().toISOString(),
+    });
+    expect(p.control.fetchSnapshot).toHaveBeenCalledTimes(fresh ? 1 : 2);
+    expect(p.gateway.health()).toMatchObject({ routes: 1, withheldRoutes: 1, revision: 2 });
+    expect((await exchange(backend.port, 'STATUS\n')).toString()).toBe(
+      fresh ? 'STATUS\n' : 'blocked\n',
+    );
+  },
+);
+
+it('re-arms an early expiry callback and closes the stream before the regular sweep', async () => {
+  const backend = await tcpFixture();
+  const start = Date.now();
+  let current = start;
+  const p = plane([route(backend.port)], {
+    now: () => current,
+    lease: 60,
+    policy: { udpIdleTimeoutMs: 1000 },
+  });
+  await p.gateway.start();
+  const client = connect(backend.port, '127.0.0.1');
+  const echo = once(client, 'data');
+  client.write('open');
+  await echo;
+  current = start + 40;
+  await delay(70);
+  expect(client.destroyed).toBe(false);
+  const closed = once(client, 'close', { signal: AbortSignal.timeout(300) });
+  current = start + 61;
+  await closed;
+  expect(p.gateway.health().routes).toBe(0);
 });

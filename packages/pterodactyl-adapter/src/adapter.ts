@@ -4,7 +4,7 @@ import { DomainError } from '@nickhosting/core';
 import { z } from 'zod';
 import { allocationInventory } from './allocations.js';
 import { backupIgnoredSchema } from './backup-limits.js';
-import { providerIdentitySchema } from './blueprint.js';
+import { discoverNickHostingExtension, providerIdentitySchema } from './blueprint.js';
 import { type ConsoleRelayOptions, createConsoleRelay } from './console.js';
 import { getDirectoryBatchSettings, listDirectoriesBatch } from './directory-batch.js';
 import { createDownloadPool } from './download-pool.js';
@@ -24,6 +24,7 @@ import {
   inspectFileOperation,
   publishStagedUpload,
 } from './file-operations.js';
+import { readGatewayInventory } from './gateway-inventory.js';
 import { confirmInstallation, type InstallationConfirmationOptions } from './installation.js';
 import { type StopConfirmationOptions, stopWithConfirmation } from './power.js';
 import { createPreparedFileWrites } from './prepared-file-writes.js';
@@ -395,6 +396,10 @@ export function createPterodactylAdapter(options: PterodactylOptions) {
     }
   }
   const adapter = {
+    supportsGatewayInventory: async () =>
+      (await discoverNickHostingExtension(options))?.capabilities.gatewayInventory === true,
+    readGatewayInventory: (nodeIds: number[], uuids: string[]) =>
+      readGatewayInventory(transport, nodeIds, uuids),
     getAccount: () =>
       transport.entity(
         'client',

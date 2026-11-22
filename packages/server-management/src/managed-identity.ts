@@ -1,6 +1,6 @@
 import { DomainError } from '@nickhosting/core';
 import type { Database } from '@nickhosting/database';
-import type { ApplicationServer } from '@nickhosting/pterodactyl-adapter';
+import type { GatewayInventoryServer } from '@nickhosting/pterodactyl-adapter';
 import { type Kysely, type Selectable, sql } from 'kysely';
 import { canonicalAllocationAddress } from './allocation-pool.js';
 
@@ -46,7 +46,7 @@ export async function readManagedIdentity(
 /** Pure identity comparison shared by browsing and lifecycle effects. */
 export function assertManagedIdentity(
   server: ServerIdentity,
-  remote: ApplicationServer,
+  remote: GatewayInventoryServer,
   snapshot: ManagedIdentitySnapshot,
   provisioning = false,
 ): void {

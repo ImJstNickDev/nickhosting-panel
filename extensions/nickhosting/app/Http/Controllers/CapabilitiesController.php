@@ -12,7 +12,7 @@ class CapabilitiesController
         return new JsonResponse([
             'schemaVersion' => 1,
             'extension' => 'nickhosting',
-            'extensionVersion' => '1.8.2',
+            'extensionVersion' => '1.9.0',
             'target' => [
                 'panel' => '1.15.1',
                 'blueprint' => 'beta-2026-08',
@@ -28,7 +28,10 @@ class CapabilitiesController
                 'bulkUploadUrls' => true,
                 'bulkDownloadUrls' => true,
                 'bulkDirectoryListings' => true,
-            ],
+            ] + ($request->query('inventory') === '1' ? [
+                'gatewayInventory' => true,
+                'linkedServerSnapshots' => true,
+            ] : []),
         ], 200, ['Cache-Control' => 'no-store']);
     }
 }

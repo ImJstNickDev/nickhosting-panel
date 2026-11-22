@@ -121,3 +121,20 @@ it('rejects a changed current authority and caps an equivalent renewal at the ob
   renewed.revision++;
   expect(readinessReceipt(renewed, current, receipt, serverId, now, 1000)).toBeUndefined();
 });
+
+it('accepts retirement of the startup countdown and rejects other simultaneous presentation changes', () => {
+  const { current, receipt, serverId } = fixture();
+  const before = current.routes[0],
+    after = receipt.routes[0];
+  if (!before || !after) throw new Error('missing route');
+  const presentation = { serverName: 'Fixture', messages: {} };
+  before.presentation = {
+    ...presentation,
+    startupBeganAt: new Date(now - 1000).toISOString(),
+    estimatedStartupSeconds: 4,
+  };
+  after.presentation = presentation;
+  expect(readinessReceipt(current, current, receipt, serverId, now, 1000)).toBeDefined();
+  after.presentation = { ...presentation, serverName: 'different' };
+  expect(readinessReceipt(current, current, receipt, serverId, now, 1000)).toBeUndefined();
+});

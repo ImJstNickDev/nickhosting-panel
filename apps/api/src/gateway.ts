@@ -14,7 +14,7 @@ import {
   gatewayWakeRequestSchema,
 } from '@nickhosting/game-sdk';
 import { gatewayReachabilityProofSchema } from '@nickhosting/gateway-safety';
-import type { ApplicationServer } from '@nickhosting/pterodactyl-adapter';
+import type { GatewayInventoryServer } from '@nickhosting/pterodactyl-adapter';
 import {
   authorizeServer,
   gatewayConfiguration,
@@ -39,7 +39,7 @@ import { bodyLimit } from 'hono/body-limit';
 import { z } from 'zod';
 import { resolveSatisfactoryApi } from '../../../packages/server-management/src/satisfactory-api.js';
 import type { Variables } from './app.js';
-import { gatewayEvidence } from './gateway-evidence.js';
+import { createGatewayInventoryReader, gatewayEvidence } from './gateway-evidence.js';
 import {
   indexGatewayRemotes,
   readGatewayClaims,
@@ -59,7 +59,7 @@ const routeRequest = z
   .object({ routeId: z.uuid(), routeRevision: z.number().int().positive().optional() })
   .strict();
 const hash = (text: string) => createHash('sha256').update(text).digest();
-const safetyServer = (remote: ApplicationServer) => ({
+const safetyServer = (remote: GatewayInventoryServer) => ({
   id: remote.id,
   uuid: remote.uuid,
   external_id: remote.external_id,
@@ -142,9 +142,16 @@ export function registerGatewayRoutes(
   registerGatewaySleepRoutes(app, { ...options, authenticate: authenticateGateway });
   registerSatisfactoryOfflineApi(app, { ...options, route });
   registerSatisfactoryConsoleApi(app, { ...options, route });
+  const readInventory = createGatewayInventoryReader();
   const prefix = '/internal/gateway/:gatewayId';
   app.get(`${prefix}/evidence`, async (c) => {
-    const evidence = await gatewayEvidence(db, env, await options.management(), safetyServer);
+    const evidence = await gatewayEvidence(
+      db,
+      env,
+      await options.management(),
+      safetyServer,
+      readInventory,
+    );
     c.header('Cache-Control', 'no-store');
     return c.json({
       ...evidence,

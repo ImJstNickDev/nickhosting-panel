@@ -1,8 +1,13 @@
+import { createHash } from 'node:crypto';
 import type { SecretCodec } from '@nickhosting/core';
 import { type Database, getSecret, getSettings } from '@nickhosting/database';
 import {
   createNickHostingBridge,
   discoverNickHostingExtension,
+  type NickHostingExtension,
+  PROVIDER_SNAPSHOT_BATCH_SIZE,
+  type ProviderChange,
+  PterodactylError,
 } from '@nickhosting/pterodactyl-adapter';
 import { type Kysely, sql } from 'kysely';
 import { backupSchemaAvailable } from './provider-backup-events.js';
@@ -10,6 +15,7 @@ import {
   invalidateProviderFeedHealth,
   linkProviderFeedServer,
   markProviderFeedHealth,
+  refreshLinkedProviderSnapshots,
 } from './provider-change-feed.js';
 
 /** Link one newly provisioned identity immediately so its first installer stream
@@ -81,6 +87,56 @@ export async function ensureInstallationFeedLink(
   await linkProviderFeedServer(db, feed.instance_id, serverId, snapshot);
 }
 
+const discoveryByDatabase = new WeakMap<
+  Kysely<Database>,
+  { binding: string; checkedAt: Date; extension: NickHostingExtension | null }
+>();
+
+async function feedCapabilities(
+  db: Kysely<Database>,
+  options: Parameters<typeof discoverNickHostingExtension>[0],
+) {
+  const binding = createHash('sha256')
+    .update(JSON.stringify([options.baseURL, options.applicationKey]))
+    .digest('hex');
+  const previous = discoveryByDatabase.get(db);
+  if (previous?.binding === binding && Date.now() - previous.checkedAt.getTime() < 60_000)
+    return previous;
+  const extension = await discoverNickHostingExtension(options);
+  const discovery = { binding, checkedAt: new Date(), extension };
+  discoveryByDatabase.set(db, discovery);
+  return discovery;
+}
+
+async function refreshExistingLinks(
+  db: Kysely<Database>,
+  bridge: ReturnType<typeof createNickHostingBridge>,
+  instanceId: string,
+  targets: { id: string; providerUuid: string; revision: string }[],
+  batchSupported: boolean,
+) {
+  for (let offset = 0; offset < targets.length; offset += PROVIDER_SNAPSHOT_BATCH_SIZE) {
+    const batch = targets.slice(offset, offset + PROVIDER_SNAPSHOT_BATCH_SIZE);
+    let snapshots: ProviderChange[] = [];
+    if (batchSupported) {
+      const result = await bridge.getLinkedServerSnapshots(
+        instanceId,
+        batch.map((entry) => entry.providerUuid),
+      );
+      snapshots = result.servers;
+    } else {
+      for (const entry of batch) {
+        try {
+          snapshots.push(await bridge.getServer(instanceId, entry.providerUuid));
+        } catch (error) {
+          if (!(error instanceof PterodactylError && error.reason === 'not_found')) throw error;
+        }
+      }
+    }
+    await refreshLinkedProviderSnapshots(db, instanceId, batch, snapshots);
+  }
+}
+
 /** One shared background feed check, never one poll per browser or Start. */
 export async function refreshProviderFeeds(
   db: Kysely<Database>,
@@ -102,11 +158,9 @@ export async function refreshProviderFeeds(
   if (!feeds.length) return;
   const applicationKey = await getSecret(db, codec, 'pterodactylApplicationKey', env);
   if (!applicationKey || !values.pterodactylBaseUrl) return;
-  const bridge = createNickHostingBridge({
-    baseURL: values.pterodactylBaseUrl,
-    applicationKey,
-    coordinator,
-  });
+  const options = { baseURL: values.pterodactylBaseUrl, applicationKey, coordinator };
+  const bridge = createNickHostingBridge(options);
+  let unavailable = false;
   for (const feed of feeds) {
     try {
       if (feed.provider_url !== values.pterodactylBaseUrl.replace(/\/$/, '')) {
@@ -133,66 +187,96 @@ export async function refreshProviderFeeds(
             's.provider_user_id',
             's.external_id',
             'n.pterodactyl_node_id',
-            'p.synchronized_at',
+            'p.revision',
           ])
           .where('s.deleted_at', 'is', null)
           .where('s.pterodactyl_id', 'is not', null)
+          .where((eb) =>
+            eb.or([eb('p.instance_id', 'is', null), eb('p.instance_id', '=', feed.instance_id)]),
+          )
+          .where((eb) =>
+            eb.or([
+              eb('p.server_id', 'is', null),
+              eb.and([
+                eb('p.identity_invalidated', '=', false),
+                eb('p.synchronized_at', '<=', new Date(Date.now() - 60_000)),
+              ]),
+            ]),
+          )
           .execute();
+        const { checkedAt, extension } = await feedCapabilities(db, options);
+        if (
+          (await backupSchemaAvailable(db)) &&
+          (!feed.capabilities_checked_at || checkedAt > feed.capabilities_checked_at)
+        ) {
+          await db
+            .updateTable('provider_change_feeds')
+            .set({
+              backup_events: extension?.capabilities.backupEvents === true,
+              capabilities_checked_at: checkedAt,
+            })
+            .where('instance_id', '=', feed.instance_id)
+            .execute();
+        }
+        const linked = [];
         for (const server of servers) {
-          if (server.synchronized_at && Date.now() - server.synchronized_at.getTime() < 60000)
-            continue;
           if (!server.pterodactyl_id || !server.pterodactyl_uuid || !server.pterodactyl_identifier)
             continue;
-          const snapshot = server.synchronized_at
-            ? await bridge.getServer(feed.instance_id, server.pterodactyl_uuid)
-            : await bridge.linkServer(
-                feed.instance_id,
-                {
-                  providerId: server.pterodactyl_id,
-                  providerUuid: server.pterodactyl_uuid,
-                  identifier: server.pterodactyl_identifier,
-                  externalId: server.external_id,
-                  nodeId: server.pterodactyl_node_id,
-                },
-                server.provider_user_id ?? undefined,
-              );
-          // Projection updates own short transaction so receiver deliveries are not blocked by network I/O.
-          await linkProviderFeedServer(db, feed.instance_id, server.id, snapshot);
+          if (server.revision !== null) {
+            linked.push({
+              id: server.id,
+              providerUuid: server.pterodactyl_uuid,
+              revision: server.revision,
+            });
+            continue;
+          }
+          // First links still require the complete managed identity and the expected owner.
+          try {
+            const snapshot = await bridge.linkServer(
+              feed.instance_id,
+              {
+                providerId: server.pterodactyl_id,
+                providerUuid: server.pterodactyl_uuid,
+                identifier: server.pterodactyl_identifier,
+                externalId: server.external_id,
+                nodeId: server.pterodactyl_node_id,
+              },
+              server.provider_user_id ?? undefined,
+            );
+            await linkProviderFeedServer(db, feed.instance_id, server.id, snapshot);
+          } catch (error) {
+            // A deleted or mismatched new identity has no projection and cannot poison its peers.
+            if (
+              !(
+                error instanceof PterodactylError &&
+                (error.upstreamStatus === 404 || error.upstreamStatus === 409)
+              )
+            )
+              throw error;
+          }
         }
+        await refreshExistingLinks(
+          db,
+          bridge,
+          feed.instance_id,
+          linked,
+          extension?.capabilities.linkedServerSnapshots === true,
+        );
         const cursor = await db
           .selectFrom('provider_change_feeds')
           .select('generation')
           .where('instance_id', '=', feed.instance_id)
           .executeTakeFirstOrThrow();
         const health = await bridge.health(feed.instance_id);
-        // Shared discovery, never an extra request per backup or browser tab.
-        if (
-          (await backupSchemaAvailable(db)) &&
-          (!feed.capabilities_checked_at ||
-            Date.now() - feed.capabilities_checked_at.getTime() > 60_000)
-        ) {
-          const extension = await discoverNickHostingExtension({
-            baseURL: values.pterodactylBaseUrl ?? '',
-            applicationKey,
-            coordinator,
-          });
-          await db
-            .updateTable('provider_change_feeds')
-            .set({
-              backup_events: extension?.capabilities.backupEvents === true,
-              capabilities_checked_at: new Date(),
-            })
-            .where('instance_id', '=', feed.instance_id)
-            .execute();
-        }
         if (health.instanceId !== feed.instance_id) throw new Error('identity mismatch');
         await markProviderFeedHealth(db, { ...health, expectedGeneration: cursor.generation });
       });
     } catch {
       await invalidateProviderFeedHealth(db, feed.instance_id);
-      throw new Error('Provider change feed unavailable');
+      unavailable = true;
     }
   }
+  if (unavailable) throw new Error('Provider change feed unavailable');
 }
 export function startProviderFeedLoop(refresh: () => Promise<void>, failed: () => void) {
   let stopped = false;

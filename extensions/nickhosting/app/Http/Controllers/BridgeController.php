@@ -3,6 +3,7 @@ namespace Pterodactyl\BlueprintFramework\Extensions\{identifier}\Http\Controller
 
 use Illuminate\Http\Request;
 use Illuminate\Http\JsonResponse;
+use Illuminate\Support\Str;
 use Illuminate\Support\Facades\DB;
 use Pterodactyl\Models\ApiKey;
 use Pterodactyl\Models\Server;
@@ -10,15 +11,16 @@ use Pterodactyl\Models\User;
 use Pterodactyl\Services\Acl\Api\AdminAcl;
 use Pterodactyl\BlueprintFramework\Extensions\{identifier}\Services\Protocol;
 use Pterodactyl\BlueprintFramework\Extensions\{identifier}\Services\ChangeFeed;
+use Pterodactyl\BlueprintFramework\Extensions\{identifier}\Services\GatewayInventory;
 
 final class BridgeController
 {
-    private function authorize(Request $request, string $resource, bool $write = true): ApiKey
+    private function authorize(Request $request, string $resource, bool $write = true, int $maxBytes = 65536): ApiKey
     {
         $key = $request->user()?->currentAccessToken();
         abort_unless($key instanceof ApiKey && $key->key_type === ApiKey::TYPE_APPLICATION
             && AdminAcl::check($key, $resource, $write ? AdminAcl::WRITE : AdminAcl::READ), 403);
-        abort_if(strlen($request->getContent()) > 65536, 413);
+        abort_if(strlen($request->getContent()) > $maxBytes, 413);
         return $key;
     }
 
@@ -39,6 +41,50 @@ final class BridgeController
     {
         DB::table('nickhosting_audit')->insert(['instance_id' => $instance, 'action' => $action,
             'subject' => $subject, 'created_at' => now()]);
+    }
+
+    private function ids(Request $request, string $field, int $limit, bool $uuids): array
+    {
+        $items = $request->input($field);
+        abort_unless(is_array($items) && array_is_list($items) && count($items) <= $limit, 422);
+        $seen = [];
+        foreach ($items as $item) {
+            if ($uuids) {
+                abort_unless(is_string($item) && strlen($item) === 36 && Str::isUuid($item), 422);
+                $item = strtolower($item);
+            } else {
+                abort_unless(is_int($item) && $item >= 1 && $item <= 4294967295, 422);
+            }
+            abort_if(isset($seen[$item]), 422);
+            $seen[$item] = true;
+        }
+        return array_keys($seen);
+    }
+
+    public function gatewayInventory(Request $request): JsonResponse
+    {
+        $key = $this->authorize($request, 'servers', false, 524288);
+        abort_unless(AdminAcl::check($key, AdminAcl::RESOURCE_NODES, AdminAcl::READ)
+            && AdminAcl::check($key, AdminAcl::RESOURCE_ALLOCATIONS, AdminAcl::READ), 403);
+        abort_if(array_diff(array_keys($request->all()), ['nodeIds', 'serverUuids']), 422);
+        $result = app(GatewayInventory::class)->read(
+            $this->ids($request, 'nodeIds', 256, false),
+            $this->ids($request, 'serverUuids', 10000, true)
+        );
+        $response = $this->reply($result);
+        // The consumer's transport reads at most 4 MiB. Never send a partial catalog.
+        abort_if(strlen($response->getContent()) > 4194304, 413);
+        return $response;
+    }
+
+    public function serverSnapshots(Request $request, string $instance): JsonResponse
+    {
+        $this->instance($request, $instance, 'servers', false);
+        abort_if(array_diff(array_keys($request->all()), ['serverUuids']), 422);
+        $uuids = $this->ids($request, 'serverUuids', 100, true);
+        abort_if(!$uuids, 422);
+        return $this->reply(['schemaVersion' => 1, 'instanceId' => $instance,
+            'servers' => app(ChangeFeed::class)->snapshots($instance, $uuids)]);
     }
 
     public function register(Request $request, string $instance): JsonResponse

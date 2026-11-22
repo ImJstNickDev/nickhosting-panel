@@ -65,6 +65,7 @@ export type {
   FileOperationReceipt,
   GuardedDirectoryDelete,
 } from './file-operations.js';
+export type { GatewayInventoryServer } from './gateway-inventory.js';
 export * from './network-observer.js';
 export { supportsStopConfirmation } from './power.js';
 export type { TransferOptions } from './transfer-guard.js';

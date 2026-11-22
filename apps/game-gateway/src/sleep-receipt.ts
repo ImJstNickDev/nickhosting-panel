@@ -43,7 +43,13 @@ export function sleepReceipt(
     completedSleep: _completion,
     sleepEligibleAt: _idle,
     ...route
-  }: GatewayRoute) => route;
+  }: GatewayRoute) => {
+    if (route.presentation) {
+      const { stopping: _stopping, ...presentation } = route.presentation;
+      route.presentation = presentation;
+    }
+    return route;
+  };
   const members = current.routes.filter((route) => route.serverId === serverId);
   if (!members.length || members.length !== fence.routes.length) return;
   const completion = next.routes.find((route) => route.serverId === serverId)?.completedSleep;
@@ -69,6 +75,7 @@ export function sleepReceipt(
       before.generation !== fence.generation ||
       after.generation !== fence.generation ||
       after.mode !== 'sleeping' ||
+      after.presentation?.stopping === true ||
       after.wakeJobId !== undefined ||
       after.revision <= before.revision ||
       before.revision < original.revision ||

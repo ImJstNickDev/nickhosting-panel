@@ -2146,3 +2146,37 @@ describe('Gateway pre-bind and forwarding safety', () => {
     await expect(f.validator().validate(f.route, [])).rejects.toThrow('allocation_unavailable');
   });
 });
+
+it('permits only local responses when Core advances the exact wake before Docker publications exist', async () => {
+  const f = fixture();
+  const validator = f.validator();
+  f.route.mode = 'waking';
+  f.route.wakeJobId = '77777777-7777-4777-8777-777777777777';
+  await validator.validate(f.route, []);
+  expect(validator.hasFreshBackendBinding?.(f.route)).toBe(true);
+  f.route.revision++;
+  f.route.mode = 'online';
+  const [container] = f.observation.containers;
+  if (!container) throw new Error('fixture container missing');
+  container.activeBindings = [];
+  vi.mocked(f.options.probeBackend).mockClear();
+  await expect(validator.validate(f.route, [f.route.public])).resolves.toEqual({
+    backendReady: false,
+  });
+  expect(validator.hasFreshBackendBinding?.(f.route)).toBe(false);
+  expect(f.options.probeNode).toHaveBeenCalled();
+  expect(f.options.probeBackend).not.toHaveBeenCalled();
+  await expect(validator.validate(f.route, [])).rejects.toThrow();
+  for (const replacement of [
+    { generation: '88888888-8888-4888-8888-888888888888' },
+    { wakeJobId: undefined },
+  ])
+    await expect(
+      validator.validate({ ...f.route, ...replacement }, [f.route.public]),
+    ).rejects.toThrow();
+  container.activeBindings = structuredClone(container.configuredBindings);
+  await expect(validator.validate(f.route, [f.route.public])).resolves.toEqual({
+    backendReady: true,
+  });
+  expect(validator.hasFreshBackendBinding?.(f.route)).toBe(true);
+});

@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { createSocket, type Socket as DatagramSocket, type RemoteInfo } from 'node:dgram';
 import { connect, createServer, isIP, type Server, type Socket } from 'node:net';
+import { setTimeout as delay } from 'node:timers/promises';
 import { isDeepStrictEqual } from 'node:util';
 import { DomainError } from '@nickhosting/core';
 import {
@@ -24,7 +25,7 @@ import {
   GatewayProviderRateLimitedError,
   GatewayRouteRevisionStaleError,
 } from './control-client.js';
-import { readinessReceipt } from './readiness-receipt.js';
+import { isReadinessTransition, readinessReceipt } from './readiness-receipt.js';
 import { sleepReceipt } from './sleep-receipt.js';
 
 const positive = z.number().int().positive().max(2_147_483_647);
@@ -165,6 +166,7 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
   let stopping = false;
   let started = false;
   let leaseTimer: ReturnType<typeof setTimeout> | undefined;
+  const changeController = new AbortController();
   let pollTimer: ReturnType<typeof setTimeout> | undefined;
   let observationTimer: ReturnType<typeof setTimeout> | undefined;
   let idleDeadlineTimer: ReturnType<typeof setTimeout> | undefined;
@@ -469,10 +471,14 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
   const processIntent = async (
     listener: Listener,
     input: Uint8Array,
+    fallbackMode?: GatewayMode,
   ): Promise<{ pending?: boolean; bytes?: Uint8Array }> => {
     if (!active(listener)) return {};
     const route = listener.route;
     const handler = protocol(route);
+    const stillCurrent = () =>
+      active(listener) &&
+      (listener.route.revision === route.revision || isReadinessTransition(route, listener.route));
     if (!handler) return {};
     try {
       const intent = handler.classify(input, {
@@ -487,19 +493,91 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
               handler.prepareResponse?.({ ...observationContext(route, signal), input }) ??
               Promise.resolve(),
           );
-        return active(listener) && listener.route === route
-          ? { bytes: response(route, responseMode(listener), input) }
+        return stillCurrent()
+          ? { bytes: response(listener.route, responseMode(listener, fallbackMode), input) }
           : {};
       }
       if (intent.kind !== 'join') return {};
       const mode =
         route.mode === 'sleeping' || route.mode === 'blocked' ? await wake(route) : route.mode;
-      return active(listener) && listener.route === route
-        ? { bytes: response(route, responseMode(listener, mode), input) }
+      return stillCurrent()
+        ? { bytes: response(listener.route, responseMode(listener, fallbackMode ?? mode), input) }
         : {};
     } catch {
       return {};
     }
+  };
+  const canForward = (listener: Listener) =>
+    active(listener) &&
+    !listener.statusOnly &&
+    listener.backendReady &&
+    listener.route.mode === 'online' &&
+    !quiescence.has(listener.route.serverId);
+  const forwardTcp = (listener: Listener, socket: Socket, prefix?: Buffer) => {
+    const route = listener.route;
+    listener.forwardingClients.add(socket);
+    // Leave client data buffered by Node until connect succeeds. A refused
+    // first connection may still receive the game's bounded local response.
+    socket.pause();
+    const backend = connect({
+      host: route.backend.address,
+      port: route.backend.port,
+      allowHalfOpen: true,
+    });
+    let connected = false;
+    backend.setNoDelay(true);
+    const timer = setTimeout(
+      () => backend.destroy(new Error('connect timeout')),
+      policy.tcpConnectTimeoutMs,
+    );
+    timer.unref();
+    backend.once('connect', () => {
+      clearTimeout(timer);
+      if (
+        socket.destroyed ||
+        !canForward(listener) ||
+        listener.route.generation !== route.generation
+      ) {
+        backend.destroy();
+        socket.destroy();
+        return;
+      }
+      connected = true;
+      if (prefix) {
+        backend.write(prefix);
+        counters.tcpBytesToBackend += prefix.length;
+      }
+      socket.on('data', (bytes: Buffer) => {
+        counters.tcpBytesToBackend += bytes.length;
+      });
+      backend.on('data', (bytes: Buffer) => {
+        counters.tcpBytesToClient += bytes.length;
+      });
+      socket.pipe(backend).pipe(socket);
+    });
+    backend.on('error', () => {
+      clearTimeout(timer);
+      if (
+        connected ||
+        socket.destroyed ||
+        !canForward(listener) ||
+        listener.route.revision !== route.revision ||
+        !protocol(route)?.createSession
+      ) {
+        socket.destroy();
+        return;
+      }
+      listener.forwardingClients.delete(socket);
+      localTcp(listener, socket, route.wakeJobId ? 'waking' : 'blocked', prefix);
+    });
+    backend.once('close', (failed) => {
+      clearTimeout(timer);
+      if (connected && (failed || !backend.readableEnded)) socket.destroy();
+    });
+    socket.once('close', () => {
+      clearTimeout(timer);
+      backend.destroy();
+    });
   };
   const accept = (listener: Listener, socket: Socket) => {
     socket.on('error', () => socket.destroy());
@@ -736,42 +814,15 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
         .catch(() => socket.destroy());
       return;
     }
-    if (
-      listener.backendReady &&
-      listener.route.mode === 'online' &&
-      !quiescence.has(listener.route.serverId)
-    ) {
-      listener.forwardingClients.add(socket);
-      const backend = connect({
-        host: listener.route.backend.address,
-        port: listener.route.backend.port,
-        allowHalfOpen: true,
-      });
-      backend.setNoDelay(true);
-      const timer = setTimeout(() => {
-        socket.destroy();
-        backend.destroy();
-      }, policy.tcpConnectTimeoutMs);
-      timer.unref();
-      backend.once('connect', () => clearTimeout(timer));
-      backend.on('error', () => socket.destroy());
-      backend.once('close', (failed) => {
-        clearTimeout(timer);
-        if (failed || !backend.readableEnded) socket.destroy();
-      });
-      socket.once('close', () => {
-        clearTimeout(timer);
-        backend.destroy();
-      });
-      socket.on('data', (bytes: Buffer) => {
-        counters.tcpBytesToBackend += bytes.length;
-      });
-      backend.on('data', (bytes: Buffer) => {
-        counters.tcpBytesToClient += bytes.length;
-      });
-      socket.pipe(backend).pipe(socket);
-      return;
-    }
+    if (canForward(listener)) forwardTcp(listener, socket);
+    else localTcp(listener, socket);
+  };
+  const localTcp = (
+    listener: Listener,
+    socket: Socket,
+    fallbackMode?: GatewayMode,
+    initialInput?: Buffer,
+  ) => {
     const handler = protocol(listener.route);
     if (handler?.createSession) {
       const sessionRoute = listener.route;
@@ -799,6 +850,10 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
       }
       let buffered = Buffer.alloc(0);
       let inputBytes = 0;
+      // Before the first local reply, the backend may still consume this exact
+      // bounded handshake from byte zero. Never splice an answered dialogue.
+      let prefix: Buffer[] | undefined =
+        !fallbackMode && sessionRoute.mode === 'waking' ? [] : undefined;
       let outputBytes = 0;
       let draining = false;
       let idleTimer: ReturnType<typeof setTimeout> | undefined;
@@ -823,7 +878,8 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
         !socket.destroyed &&
         !controller.signal.aborted &&
         active(listener) &&
-        listener.route.revision === sessionRoute.revision;
+        (listener.route.revision === sessionRoute.revision ||
+          isReadinessTransition(sessionRoute, listener.route));
       const rejectSession = () => {
         socket.destroy();
         return false;
@@ -844,13 +900,14 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
           buffered = buffered.subarray(intent.consumedBytes);
           if (intent.kind === 'unsupported') return rejectSession();
           if (intent.kind === 'continue') continue;
+          prefix = undefined;
           const state =
             intent.kind === 'join' &&
             (sessionRoute.mode === 'sleeping' || sessionRoute.mode === 'blocked')
               ? await wake(sessionRoute)
               : sessionRoute.mode;
           if (!valid()) return rejectSession();
-          const result = session.response(responseMode(listener, state));
+          const result = session.response(responseMode(listener, fallbackMode ?? state));
           outputBytes += result.bytes?.byteLength ?? 0;
           if (outputBytes > policy.maxProtocolResponseBytes) return rejectSession();
           if (result.close) {
@@ -893,16 +950,33 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
           })
           .catch(() => socket.destroy());
       };
-      socket.on('data', (chunk: Buffer) => {
+      const onData = (chunk: Buffer) => {
         clearTimeout(idleTimer);
         idleTimer = undefined;
         lastInputAt = performance.now();
         inputBytes += chunk.length;
         if (inputBytes > policy.maxClassificationBytes) return void socket.destroy();
         if (draining) return;
+        if (prefix) {
+          prefix.push(chunk);
+          if (
+            valid() &&
+            canForward(listener) &&
+            isReadinessTransition(sessionRoute, listener.route)
+          ) {
+            clearTimeout(timer);
+            socket.off('data', onData);
+            controller.abort();
+            forwardTcp(listener, socket, Buffer.concat(prefix, inputBytes));
+            return;
+          }
+        }
         buffered = Buffer.concat([buffered, chunk]);
         run();
-      });
+      };
+      socket.on('data', onData);
+      if (initialInput) onData(initialInput);
+      else socket.resume();
       return;
     }
     let bytes = Buffer.alloc(0);
@@ -910,13 +984,13 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
     const timer = setTimeout(() => socket.destroy(), policy.classificationTimeoutMs);
     timer.unref();
     socket.once('close', () => clearTimeout(timer));
-    socket.on('data', (chunk: Buffer) => {
+    const onData = (chunk: Buffer) => {
       if (processing) return;
       if (bytes.length + chunk.length > policy.maxClassificationBytes) return void socket.destroy();
       bytes = Buffer.concat([bytes, chunk]);
       processing = true;
       socket.pause();
-      void processIntent(listener, bytes).then((result) => {
+      void processIntent(listener, bytes, fallbackMode).then((result) => {
         if (result.pending) {
           processing = false;
           socket.resume();
@@ -925,7 +999,10 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
         if (result.bytes) socket.end(result.bytes);
         else socket.destroy();
       });
-    });
+    };
+    socket.on('data', onData);
+    if (initialInput) onData(initialInput);
+    else socket.resume();
   };
   const sendUdpResponse = (
     listener: Listener,
@@ -1122,6 +1199,24 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
     sleepWatches.clear();
     if (expired.length) counters.leaseExpirations++;
     await Promise.all(expired.map((listener) => closeListener(listener)));
+  };
+  const scheduleExpiry = () => {
+    if (leaseTimer) clearTimeout(leaseTimer);
+    if (stopping || !snapshot) return;
+    leaseTimer = setTimeout(
+      () => {
+        // Timers use an elapsed clock; leases use wall time. An early callback
+        // must re-arm the deadline for already established streams.
+        if (leased()) {
+          scheduleExpiry();
+          return;
+        }
+        syncStartupWatches();
+        void expire();
+      },
+      Math.max(1, Date.parse(snapshot.expiresAt) - now()),
+    );
+    leaseTimer.unref();
   };
   const apply = async (input: unknown, fetchStartedAt: number, renewal?: GatewaySafetyRenewal) => {
     const applyStarted = performance.now();
@@ -1331,8 +1426,12 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
               isDeepStrictEqual(candidate.public, current.route.public) &&
               isDeepStrictEqual(candidate.backend, current.route.backend) &&
               isDeepStrictEqual(candidate.protocol, current.route.protocol);
-            if (leased() && (isDeepStrictEqual(candidate, current.route) || sameWakingTarget)) {
-              if (sameWakingTarget) current.statusMode = 'waking';
+            const sameReadyTarget = candidate && isReadinessTransition(current.route, candidate);
+            if (
+              leased() &&
+              (isDeepStrictEqual(candidate, current.route) || sameWakingTarget || sameReadyTarget)
+            ) {
+              if (sameWakingTarget || sameReadyTarget) current.statusMode = 'waking';
               logRouteTransition(current, 'observer_container_churn');
             } else {
               logRouteTransition(current, 'safety_rejected', false);
@@ -1539,15 +1638,7 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
           active(listener),
           Math.round(performance.now() - applyStarted),
         );
-      if (leaseTimer) clearTimeout(leaseTimer);
-      leaseTimer = setTimeout(
-        () => {
-          syncStartupWatches();
-          void expire();
-        },
-        Math.max(1, expires - now()),
-      );
-      leaseTimer.unref();
+      scheduleExpiry();
       for (const serverId of wakeRequests.keys())
         if (
           !next.routes.some(
@@ -1698,11 +1789,20 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
             const captured = snapshot;
             observationEpochs.set(serverId, {});
             if (
-              await applyReadinessReceipt(receipt.snapshot, captured, serverId, receipt.observedAt)
+              await applyReadinessReceipt(
+                receipt.snapshot,
+                captured,
+                serverId,
+                receipt.observedAt,
+                true,
+              )
             )
               return;
             // Lost/racing receipt uses the already committed durable snapshot.
-            if (current()) await refresh().catch(() => {});
+            if (current()) {
+              await refreshing?.catch(() => {});
+              if (current()) await refresh().catch(() => {});
+            }
             return;
           }
           // Supersede only this server: an old negative probe must neither delay
@@ -1732,24 +1832,29 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
         !candidateSnapshot ||
         candidateSnapshot.revision !== snapshot.revision ||
         !isDeepStrictEqual(candidateSnapshot.routes, snapshot.routes) ||
-        quiescence.get(serverId) !== captured ||
-        [...listeners.values()].some((listener) => listener.statusOnly)
+        quiescence.get(serverId) !== captured
       )
         return false;
       const next = sleepReceipt(snapshot, input, serverId, captured, now(), policy.maxClockSkewMs);
-      if (!next || next.routes.some((route) => !listeners.has(route.id))) return false;
+      if (!next) return false;
+      const targetRoutes = next.routes.filter((route) => route.serverId === serverId);
+      if (
+        targetRoutes.some((route) => {
+          const listener = listeners.get(route.id);
+          return !listener || listener.statusOnly;
+        })
+      )
+        return false;
       snapshot = next;
       candidateSnapshot = next;
       quiescence.delete(serverId);
-      for (const route of next.routes) {
+      for (const route of targetRoutes) {
         const listener = listeners.get(route.id);
         if (!listener) throw new DomainError('internal_error');
         listener.route = route;
-        if (route.serverId === serverId) {
-          clearSessions(listener);
-          listener.backendReady = false;
-          logRouteTransition(listener, 'sleep_completion_receipt');
-        }
+        clearSessions(listener);
+        listener.backendReady = false;
+        logRouteTransition(listener, 'sleep_completion_receipt');
       }
       logTiming('gateway.quiescence_released', {
         serverId,
@@ -1759,14 +1864,7 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
       syncStartupWatches();
       syncIdleDeadline();
       syncSleepWatches();
-      if (leaseTimer) clearTimeout(leaseTimer);
-      leaseTimer = setTimeout(
-        () => {
-          void expire();
-        },
-        Math.max(1, Date.parse(next.expiresAt) - now()),
-      );
-      leaseTimer.unref();
+      scheduleExpiry();
       return true;
     });
     serial = work.then(
@@ -1818,6 +1916,7 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
     captured: GatewaySnapshot,
     serverId: string,
     observedAt: string,
+    providerReceipt = false,
   ) => {
     const queuedAt = performance.now();
     const work = serial.then(() => {
@@ -1826,7 +1925,6 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
         stopping ||
         !snapshot ||
         quiescence.has(serverId) ||
-        [...listeners.values()].some((listener) => listener.statusOnly) ||
         now() - Date.parse(observedAt) > policy.probeTimeoutMs ||
         !candidateSnapshot ||
         !isDeepStrictEqual(candidateSnapshot.routes, captured.routes)
@@ -1840,31 +1938,34 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
         now(),
         policy.maxClockSkewMs,
       );
-      if (!next || next.routes.some((route) => !listeners.has(route.id))) return false;
+      if (!next) return false;
+      const targetRoutes = next.routes.filter((route) => route.serverId === serverId);
+      if (
+        targetRoutes.some((route) => {
+          const listener = listeners.get(route.id);
+          return (
+            !listener ||
+            listener.statusOnly ||
+            (providerReceipt && options.safety.hasFreshBackendBinding?.(listener.route) !== true)
+          );
+        })
+      )
+        return false;
       snapshot = next;
       candidateSnapshot = next;
-      for (const route of next.routes) {
+      for (const route of targetRoutes) {
         const listener = listeners.get(route.id);
         if (!listener) throw new DomainError('internal_error');
         listener.route = route;
-        if (route.serverId === serverId) {
-          listener.backendReady = true;
-          logRouteTransition(listener, 'readiness_receipt');
-          logTiming('gateway.readiness_receipt_applied', { ...routeIdentity(route), queueMs });
-        }
+        listener.backendReady = true;
+        logRouteTransition(listener, 'readiness_receipt');
+        logTiming('gateway.readiness_receipt_applied', { ...routeIdentity(route), queueMs });
       }
       syncStartupWatches();
       syncIdleDeadline();
       // A receipt may shorten the expiry after an equivalent renewal raced it.
       // Close existing streams at that original deadline, not a later sweep.
-      if (leaseTimer) clearTimeout(leaseTimer);
-      leaseTimer = setTimeout(
-        () => {
-          void expire();
-        },
-        Math.max(1, Date.parse(next.expiresAt) - now()),
-      );
-      leaseTimer.unref();
+      scheduleExpiry();
       return true;
     });
     serial = work.then(
@@ -2310,6 +2411,7 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
         failed = true;
       });
       if (!stopping) {
+        if (pollTimer) clearTimeout(pollTimer);
         pollTimer = setTimeout(
           () => {
             void poll();
@@ -2321,6 +2423,35 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
         pollTimer.unref();
       }
     };
+    const waitForChange = options.control.waitForRouteChange;
+    const watchChanges = async () => {
+      if (!waitForChange) return;
+      const signal = changeController.signal;
+      while (!signal.aborted) {
+        const waitingSince = performance.now();
+        let minimumInterval = Math.min(500, policy.pollIntervalMs);
+        try {
+          const changed = await waitForChange(signal);
+          if (changed && !signal.aborted && providerRetryAt <= now()) {
+            // A fetch already in progress may have read its revision before the
+            // notification. Issue one post-commit fetch and reschedule the poll.
+            await refreshing?.catch(() => {});
+            if (!signal.aborted) {
+              if (pollTimer) clearTimeout(pollTimer);
+              await poll();
+            }
+          }
+        } catch {
+          // Unavailable subscription (including an older Core): regular polling
+          // remains independent. Never create a fast reconnect loop.
+          minimumInterval = 5000;
+        }
+        const remaining = minimumInterval - (performance.now() - waitingSince);
+        if (remaining > 0 && !signal.aborted)
+          await delay(remaining, undefined, { signal, ref: false }).catch(() => {});
+      }
+    };
+    void watchChanges();
     const observations = async () => {
       if (stopping) return;
       const cycleStarted = performance.now();
@@ -2361,6 +2492,7 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
   const stop = () => {
     if (shutdown) return shutdown;
     stopping = true;
+    changeController.abort();
     for (const watch of startupWatches.values()) watch.abort.abort();
     startupWatches.clear();
     for (const watch of sleepWatches.values()) watch.abort.abort();

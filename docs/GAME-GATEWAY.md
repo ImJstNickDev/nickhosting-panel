@@ -148,6 +148,18 @@ See [ADR 0016](decisions/0016-provider-readiness.md).
 
 ## Snapshot renewal and worker recovery
 
+With Blueprint 1.9.0, each evidence cycle reads the node catalogue, every allocation
+on policy nodes and every allocation owned by the selected servers in one consistent
+provider inventory. Only capability discovery is cached. An older extension uses
+the stock inventory APIs. An explicit size-limit response also uses the complete
+stock read. Other provider failures do not produce new evidence.
+
+The Gateway holds one authenticated change request open. Committed changes to
+power, intent, readiness state or process identity prompt a fresh evidence cycle.
+Routine metric and readiness timestamps do not trigger it. A missed notification
+is covered by the configured renewal interval. A hint itself carries no route or
+authority to forward.
+
 Core reads eligible routes, policy, Minecraft combinations and startup samples in batches.
 Each valid route renews its lease on every full snapshot. Route revisions advance when
 their published content changes. Scoped inventory validates the requested routes and
@@ -195,7 +207,10 @@ validated listeners as local protocol responders within their original lease.
 A new waking generation may change only the response text when server, node,
 allocation, endpoints, protocol and locale remain identical; it does not adopt
 the candidate route or extend authority. Forwarding, wake effects and readiness receipts are suppressed until fresh
-validation succeeds. Existing local status connections remain open; backend streams
+validation succeeds. A transition from waking to online for the same wake job and
+generation can retain that local waking responder within its original lease. A
+provider-running receipt needs a fresh validated Docker backend binding before it
+can promote a listener. Existing local status connections remain open; backend streams
 and UDP forwarding sessions close. New/changed routes, real collisions, unknown
 safety errors and expired leases still fail closed. One immediate validation retry
 is bounded; no indefinite retry or lease extension is introduced.

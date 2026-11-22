@@ -1,6 +1,6 @@
 # NickHosting Blueprint bridge
 
-Version **1.8.2**, targeting Pterodactyl **1.15.1** and Blueprint
+Version **1.9.0**, targeting Pterodactyl **1.15.1** and Blueprint
 **beta-2026-08**. Native PHP contracts retain compatibility with Panel **1.11.11**
 for coordinated rollback; the framework target and live deployment evidence are
 separate from that library-level compatibility. The monorepo is the source of truth; `.blueprint/dev` is optional
@@ -430,7 +430,7 @@ uses Laravel fakes. It exercises transaction rollback, idempotency, encryption,
 authorization, identity invalidation, delivery retry and configuration transforms.
 It is not a MySQL lock-concurrency or real HTTP middleware test. Packaging uses
 an explicit file allowlist, excludes secrets/tests/docs, rejects symlinks and
-existing output, and defaults to ignored `build/blueprint/1.8.2/nickhosting.blueprint`.
+existing output, and defaults to ignored `build/blueprint/1.9.0/nickhosting.blueprint`.
 
 The [extension-only update procedure](UPDATE-INSTALLED.md) supports the reviewed
 1.5.0 → 1.6.0 and 1.6.0 → 1.6.1 transitions. Its default is a read-only plan;
@@ -575,3 +575,38 @@ or checksum proof. Wings may skip members denied by its configured file denylist
 world imports trust that native behavior. Modpack publication still reads back its
 final destinations before recording applied file metadata. Unknown extraction
 outcomes use manifest reconciliation and do not infer success from archive presence.
+
+### Gateway inventory and linked server snapshots (1.9.0)
+
+Both operations return fresh Application API evidence with `Cache-Control: no-store`.
+
+- `POST /api/application/extensions/nickhosting/gateway-inventory` accepts
+  `{nodeIds, serverUuids}`. It requires Application READ on servers, nodes and
+  allocations. A single repeatable-read transaction reads the global node identity
+  catalog, complete allocation listings for the requested nodes, and the identity,
+  owner, runtime, suspension, primary allocation and all allocations of the requested
+  servers. Occupied ports remain visible even on a foreign server. No foreign
+  server details are included through an allocation listing. The response contains
+  `{schemaVersion:1,nodes,allocations,servers}`. A missing requested identity or
+  cross-node claim returns 409. An inventory that exceeds 10,000 nodes, 65,536
+  allocation rows or the 4 MiB consumer budget returns 413. Selectors must be
+  distinct and contain at most 256 node IDs and 10,000 server UUIDs.
+- `POST /api/application/extensions/nickhosting/instances/{instance}/server-snapshots`
+  accepts `{serverUuids}` with 1–100 distinct UUIDs. It requires the instance's
+  exact Application key with servers READ. It returns
+  `{schemaVersion:1,instanceId,servers}`, where each server is a normal
+  revisioned snapshot envelope. Only already linked identities belonging to this
+  instance appear. The caller checks coverage and keeps the existing explicit
+  binding path for new servers. Current provider rows and link rows are locked
+  in the same order as normal updates. Drift advances the affected revisions
+  and appends their signed-delivery events transactionally. Permanent invalidation
+  preserves the last known limits until an explicit verified relink. Health is
+  checked separately against the consumer's generation after reconciliation.
+
+Consumers request `GET /api/application/extensions/nickhosting/capabilities?inventory=1`
+to discover `gatewayInventory` and `linkedServerSnapshots`. The unqualified
+capabilities route keeps the 1.8.2 property set for legacy readers. Both routes
+report the installed extension version. Older providers ignore the requested
+query option and return their existing capabilities. Use the native
+Blueprint package installation and retain the previous reviewed artifact for
+rollback. This release reuses the existing extension schema and dependencies.

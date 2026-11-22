@@ -170,6 +170,7 @@ beforeEach(async () => {
     updated_at: new Date().toISOString(),
   };
   Object.assign(f.adapter, {
+    supportsGatewayInventory: vi.fn(async () => false),
     listNodes: vi.fn(async () => [{ id: f.providerNodeId, uuid: f.nodeId, fqdn: secret }]),
     getApplicationServer: vi.fn(async () => remote),
     getApplicationServers: vi.fn(async () => [remote]),
@@ -1382,6 +1383,52 @@ describe('M3 Core service authentication and managed control plane', () => {
     expect(f.adapter.listNodes).toHaveBeenCalledTimes(1);
     expect(f.adapter.listAllocations).toHaveBeenCalledTimes(1);
     expect(f.adapter.getApplicationServer).not.toHaveBeenCalled();
+  });
+
+  it('renews Blueprint evidence on every cycle and only caches discovery', async () => {
+    vi.mocked(f.adapter.supportsGatewayInventory).mockResolvedValue(true);
+    const allocations = (remote.relationships?.allocations?.data ?? []).map(
+      ({ attributes: a }) => ({
+        id: a.id,
+        ip: a.ip,
+        port: a.port,
+        assigned: a.assigned,
+      }),
+    );
+    f.adapter.readGatewayInventory = vi.fn(async () => ({
+      schemaVersion: 1 as const,
+      nodes: [{ id: f.providerNodeId, uuid: f.nodeId }],
+      allocations: [{ nodeId: f.providerNodeId, allocations }],
+      servers: [
+        {
+          ...remote,
+          relationships: {
+            allocations: {
+              object: 'list' as const,
+              data: allocations.map((attributes) => ({ attributes })),
+            },
+          },
+        },
+      ],
+    }));
+    for (let cycle = 0; cycle < 2; cycle++) {
+      const result = await request(`${prefix()}/evidence`);
+      expect(result.status).toBe(200);
+      expect(await result.text()).not.toContain(secret);
+    }
+    expect(f.adapter.supportsGatewayInventory).toHaveBeenCalledOnce();
+    expect(f.adapter.readGatewayInventory).toHaveBeenCalledTimes(2);
+    expect(f.adapter.listNodes).not.toHaveBeenCalled();
+    vi.mocked(f.adapter.readGatewayInventory).mockRejectedValueOnce(
+      new PterodactylError('rate_limited', 'application', 'rejected', 429),
+    );
+    expect((await request(`${prefix()}/evidence`)).status).toBeGreaterThanOrEqual(400);
+    expect(f.adapter.listNodes).not.toHaveBeenCalled();
+    vi.mocked(f.adapter.readGatewayInventory).mockRejectedValueOnce(
+      new PterodactylError('invalid_request', 'application', 'rejected', 413),
+    );
+    expect((await request(`${prefix()}/evidence`)).status).toBe(200);
+    expect(f.adapter.listNodes).toHaveBeenCalledOnce();
   });
 
   it('collects evidence for more than one provider batch and rejects incomplete inventory', async () => {

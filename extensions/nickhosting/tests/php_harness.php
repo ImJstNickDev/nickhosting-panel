@@ -606,4 +606,5 @@ $http->fake(function ($request,$options) use (&$deliveryOptions) { $deliveryOpti
 (new Pterodactyl\BlueprintFramework\Extensions\nickhosting\Jobs\DeliverChanges())->handle();
 check(count($deliveryOptions)===1 && DB::table('nickhosting_outbox')->whereNull('delivered_at')->count()===$beforePending-1, 'delivery job honors lower event batch setting');
 check($deliveryOptions[0]['connect_timeout']===1 && $deliveryOptions[0]['timeout']===1, 'delivery clamps connect timeout to configured response timeout');
+eval($inventoryHarness);
 echo "$count checks passed\n";

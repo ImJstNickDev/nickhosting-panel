@@ -29,5 +29,6 @@ script+="\n$fileOperationMigration=eval(base64_decode('"+base64.b64encode(fileop
 recovery=root/'private/migrations/2026_10_19_000006_nickhosting_file_operation_recovery.php'
 script+="\n$fileOperationRecoveryMigration=eval(base64_decode('"+base64.b64encode(recovery.read_bytes().removeprefix(b'<?php')).decode()+"'));\n"
 script+="\n$fileOperationHarness=base64_decode('"+base64.b64encode((root/'tests/file_operations_harness.php').read_bytes().removeprefix(b'<?php')).decode()+"');\n"
+script+="\n$inventoryHarness=base64_decode('"+base64.b64encode((root/'tests/inventory_harness.php').read_bytes().removeprefix(b'<?php')).decode()+"');\n"
 script+=(root/'tests/php_harness.php').read_text().removeprefix('<?php')
 subprocess.run(['docker','exec','-i',args.container,'php'],input=script,text=True,check=True)

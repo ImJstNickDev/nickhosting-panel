@@ -46,6 +46,8 @@ function fixture(authenticated = true) {
   });
   return {
     input,
+    changes: (signal?: AbortSignal) =>
+      app.request(`/internal/gateway/${gatewayId}/changes`, { signal }),
     route,
     close,
     authenticate,
@@ -249,6 +251,24 @@ describe('durable sleep completion notifications', () => {
     expect(mocks.listen).toHaveBeenCalledOnce();
     controller.abort();
     expect((await Promise.all(requests)).every((r) => r.status === 204)).toBe(true);
+    expect(f.close).toHaveBeenCalledOnce();
+  });
+});
+
+describe('Gateway transition hints', () => {
+  it('delivers one authenticated hint without fetching evidence, and cleans up on abort', async () => {
+    expect((await fixture(false).changes()).status).toBe(400);
+    const f = fixture();
+    const controller = new AbortController();
+    const first = f.changes();
+    const second = f.changes(controller.signal);
+    await vi.waitFor(() => expect(mocks.listen).toHaveBeenCalledOnce());
+    controller.abort();
+    expect((await second).status).toBe(204);
+    f.changed();
+    expect(await (await first).json()).toEqual({ changed: true });
+    expect(f.authenticate).toHaveBeenCalledOnce();
+    expect(mocks.snapshot).not.toHaveBeenCalled();
     expect(f.close).toHaveBeenCalledOnce();
   });
 });

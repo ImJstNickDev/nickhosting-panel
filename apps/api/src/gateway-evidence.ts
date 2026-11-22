@@ -1,7 +1,11 @@
 import { isDeepStrictEqual } from 'node:util';
 import { DomainError } from '@nickhosting/core';
 import type { createDatabase } from '@nickhosting/database';
-import type { ApplicationServer } from '@nickhosting/pterodactyl-adapter';
+import {
+  type ApplicationServer,
+  type GatewayInventoryServer,
+  PterodactylError,
+} from '@nickhosting/pterodactyl-adapter';
 import {
   gatewayConfiguration,
   getGatewaySnapshot,
@@ -13,12 +17,83 @@ import {
   verifyGatewayClaims,
 } from './gateway-managed-inventory.js';
 
+async function stockInventory(management: ManagementRuntime, nodeIds: number[], uuids: string[]) {
+  const [nodes, remotes, allocations] = await Promise.all([
+    management.adapter.listNodes(),
+    (async () => {
+      // The snapshot permits 10,000 routes; the adapter accepts 1,000 distinct IDs per lookup.
+      const found: ApplicationServer[] = [];
+      for (let offset = 0; offset < uuids.length; offset += 1000)
+        found.push(
+          ...(await management.adapter.getApplicationServers(uuids.slice(offset, offset + 1000))),
+        );
+      return found;
+    })(),
+    (async () => {
+      let next = 0;
+      const results: {
+        nodeId: number;
+        allocations: { id: number; ip: string; port: number; assigned: boolean }[];
+      }[] = [];
+      await Promise.all(
+        Array.from({ length: Math.min(4, nodeIds.length) }, async () => {
+          for (;;) {
+            const nodeId = nodeIds[next++];
+            if (nodeId === undefined) return;
+            results.push({
+              nodeId,
+              allocations: (await management.adapter.listAllocations(nodeId)).map(
+                ({ id, ip, port, assigned }) => ({ id, ip, port, assigned }),
+              ),
+            });
+          }
+        }),
+      );
+      return results;
+    })(),
+  ]);
+  return { nodes, servers: remotes, allocations };
+}
+
+/** Only capability metadata is reused. Every evidence cycle reads new provider inventory. */
+export function createGatewayInventoryReader() {
+  let cached: { binding: string; expiresAt: number; supported: Promise<boolean> } | undefined;
+  return async (management: ManagementRuntime, nodeIds: number[], uuids: string[]) => {
+    if (nodeIds.length > 256) return stockInventory(management, nodeIds, uuids);
+    if (
+      !cached ||
+      cached.binding !== management.consoleProviderBinding ||
+      cached.expiresAt <= Date.now()
+    ) {
+      const supported = management.adapter.supportsGatewayInventory();
+      cached = {
+        binding: management.consoleProviderBinding,
+        expiresAt: Date.now() + 60_000,
+        supported,
+      };
+      void supported.catch(() => {
+        if (cached?.supported === supported) cached = undefined;
+      });
+    }
+    if (await cached.supported) {
+      try {
+        return await management.adapter.readGatewayInventory(nodeIds, uuids);
+      } catch (error) {
+        // The extension explicitly declines an oversized complete result. No partial data is reused.
+        if (!(error instanceof PterodactylError) || error.upstreamStatus !== 413) throw error;
+      }
+    }
+    return stockInventory(management, nodeIds, uuids);
+  };
+}
+
 /** One bounded, revision-bound read. The timestamp precedes every source read. */
 export async function gatewayEvidence(
   db: ReturnType<typeof createDatabase>['db'],
   env: Readonly<Record<string, string | undefined>>,
   management: ManagementRuntime,
-  projectServer: (server: ApplicationServer) => unknown,
+  projectServer: (server: GatewayInventoryServer) => unknown,
+  readInventory: ReturnType<typeof createGatewayInventoryReader>,
 ) {
   const observedAt = Date.now();
   const configuration = await gatewayConfiguration(db, env);
@@ -59,41 +134,15 @@ export async function gatewayEvidence(
     throw new DomainError('conflict', 412, { gatewayControlReason: 'snapshot_membership_changed' });
   };
   const policyNodes = configuration.gatewayNetworkPolicy?.nodes ?? [];
-  const [nodes, remotes, allocations] = await Promise.all([
-    management.adapter.listNodes(),
-    (async () => {
-      // The snapshot permits 10,000 routes; the adapter accepts 1,000 distinct IDs per lookup.
-      const ids = [...expected];
-      const found: ApplicationServer[] = [];
-      for (let offset = 0; offset < ids.length; offset += 1000)
-        found.push(
-          ...(await management.adapter.getApplicationServers(ids.slice(offset, offset + 1000))),
-        );
-      return found;
-    })(),
-    (async () => {
-      let next = 0;
-      const results: {
-        nodeId: number;
-        allocations: { id: number; ip: string; port: number; assigned: boolean }[];
-      }[] = [];
-      await Promise.all(
-        Array.from({ length: Math.min(4, policyNodes.length) }, async () => {
-          for (;;) {
-            const node = policyNodes[next++];
-            if (!node) return;
-            results.push({
-              nodeId: node.nodeId,
-              allocations: (await management.adapter.listAllocations(node.nodeId)).map(
-                ({ id, ip, port, assigned }) => ({ id, ip, port, assigned }),
-              ),
-            });
-          }
-        }),
-      );
-      return results;
-    })(),
-  ]);
+  const {
+    nodes,
+    servers: remotes,
+    allocations,
+  } = await readInventory(
+    management,
+    policyNodes.map((node) => node.nodeId),
+    [...expected],
+  );
   const byUuid = indexGatewayRemotes(remotes, expected);
   // Build authority once, after external reads. getGatewaySnapshot acquires
   // the resource lock in this same transaction; contexts/proofs/claims below

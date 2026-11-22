@@ -581,7 +581,12 @@ export function createGatewaySafetyValidator(options: GatewaySafetyOptions): Gat
   // this is not cached permission or cached inventory. New listeners cannot use it.
   const retainedBindings = new Map<
     string,
-    { public: GatewayEndpoint; container: ObservedContainer }
+    {
+      public: GatewayEndpoint;
+      container: ObservedContainer;
+      wakeGeneration?: string;
+      wakeJobId?: string;
+    }
   >();
   async function inventories(signal?: AbortSignal) {
     const result = new Map<number, Awaited<ReturnType<GatewayProviderSource['listAllocations']>>>();
@@ -888,7 +893,12 @@ export function createGatewaySafetyValidator(options: GatewaySafetyOptions): Gat
     // shape into forwarding or a new listener.
     const mayRetainStatus =
       listener &&
-      (route.mode === 'waking' || route.mode === 'sleeping') &&
+      (route.mode === 'waking' ||
+        route.mode === 'sleeping' ||
+        (route.mode === 'online' &&
+          route.wakeJobId !== undefined &&
+          retained?.wakeGeneration === route.generation &&
+          retained.wakeJobId === route.wakeJobId)) &&
       retained !== undefined &&
       exactEndpoint(retained.public, route.public) &&
       ownedBindings.some((binding) => exactEndpoint(binding, route.public));
@@ -1080,6 +1090,11 @@ export function createGatewaySafetyValidator(options: GatewaySafetyOptions): Gat
       if (validatedProvider.size > 10000) {
         const oldest = validatedProvider.keys().next().value;
         if (oldest) validatedProvider.delete(oldest);
+      }
+      const retained = retainedBindings.get(route.id);
+      if (retained && route.mode === 'waking' && route.wakeJobId) {
+        retained.wakeGeneration = route.generation;
+        retained.wakeJobId = route.wakeJobId;
       }
       return { backendReady };
     };
@@ -1338,6 +1353,15 @@ export function createGatewaySafetyValidator(options: GatewaySafetyOptions): Gat
     createValidationBatch,
     prepareRenewal,
     validateBackend,
+    hasFreshBackendBinding(value) {
+      const route = gatewayRouteSchema.parse(value);
+      const grant = validatedProvider.get(route.id);
+      return (
+        grant?.leasedProbe?.routeKey === JSON.stringify(route) &&
+        freshGrant(grant) &&
+        failures.get(route.id) === grant.leasedProbe.failures
+      );
+    },
     async probeLeasedBackend(routeValue, signal) {
       signal?.throwIfAborted();
       const route = gatewayRouteSchema.parse(routeValue);

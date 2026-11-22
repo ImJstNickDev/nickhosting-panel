@@ -678,3 +678,26 @@ describe('authenticated bounded Gateway control client', () => {
     await expect(client.requestJson('snapshot')).rejects.toThrow('integration_unavailable');
   });
 });
+
+it('accepts only the authenticated route-change hint and idle timeout', async () => {
+  const fetcher = vi
+    .fn<typeof fetch>()
+    .mockResolvedValueOnce(Response.json({ changed: true }))
+    .mockResolvedValueOnce(new Response(null, { status: 204 }))
+    .mockResolvedValueOnce(Response.json({ changed: false }))
+    .mockResolvedValueOnce(Response.json({ changed: true }, { status: 503 }));
+  const c = createGatewayControlClient({ ...settings, fetcher });
+  const signal = new AbortController().signal;
+  try {
+    await expect(c.waitForRouteChange?.(signal)).resolves.toBe(true);
+    await expect(c.waitForRouteChange?.(signal)).resolves.toBe(false);
+    await expect(c.waitForRouteChange?.(signal)).rejects.toThrow();
+    await expect(c.waitForRouteChange?.(signal)).rejects.toThrow();
+    expect(new URL(String(fetcher.mock.calls[0]?.[0])).pathname).toBe(
+      `/internal/gateway/${gatewayId}/changes`,
+    );
+    expect(fetcher.mock.calls[0]?.[1]).toMatchObject({ method: 'GET', redirect: 'error' });
+  } finally {
+    c.close();
+  }
+});

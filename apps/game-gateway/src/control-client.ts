@@ -332,6 +332,13 @@ export function createGatewayControlClient(
         throw new DomainError('integration_unavailable');
       return parsed.data;
     },
+    async waitForRouteChange(signal) {
+      const hint = await request('changes', undefined, signal, 25000);
+      if (hint === undefined) return false;
+      if (!z.strictObject({ changed: z.literal(true) }).safeParse(hint).success)
+        throw new DomainError('integration_unavailable');
+      return true;
+    },
     async waitForSleep(input, signal) {
       const value = z
         .object({

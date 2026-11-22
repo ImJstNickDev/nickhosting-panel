@@ -144,6 +144,89 @@ export async function linkProviderFeedServer(
   });
 }
 
+/** Refresh existing links only. Receiver transactions take the same feed lock first;
+ * a newer delivery during provider I/O wins, including over an omitted batch row. */
+export async function refreshLinkedProviderSnapshots(
+  db: Kysely<Database>,
+  instanceId: string,
+  targets: { id: string; providerUuid: string; revision: string }[],
+  snapshots: ProviderChange[],
+  now = new Date(),
+) {
+  const requested = new Map(targets.map((target) => [target.id, target]));
+  const received = new Map(snapshots.map((snapshot) => [snapshot.server.providerUuid, snapshot]));
+  await db.transaction().execute(async (tx) => {
+    const feed = await tx
+      .selectFrom('provider_change_feeds')
+      .select('enabled')
+      .where('instance_id', '=', instanceId)
+      .forUpdate()
+      .executeTakeFirst();
+    if (!feed?.enabled) return;
+    const rows = await tx
+      .selectFrom('provider_server_projections as p')
+      .innerJoin('managed_servers as s', 's.id', 'p.server_id')
+      .innerJoin('managed_nodes as n', 'n.id', 's.node_id')
+      .select([
+        's.id',
+        's.pterodactyl_id',
+        's.pterodactyl_uuid',
+        's.pterodactyl_identifier',
+        's.external_id',
+        'n.pterodactyl_node_id',
+        'p.revision',
+        'p.valid',
+        'p.payload',
+      ])
+      .where('p.instance_id', '=', instanceId)
+      .where('p.server_id', 'in', [...requested.keys()])
+      .where('s.deleted_at', 'is', null)
+      .where('p.identity_invalidated', '=', false)
+      .forUpdate('p')
+      .execute();
+    const updates = [];
+    for (const row of rows) {
+      const target = requested.get(row.id);
+      if (!target) continue;
+      const event = received.get(target.providerUuid);
+      if (event && BigInt(event.revision) < BigInt(row.revision)) continue;
+      const previous = providerChangeSchema.safeParse(row.payload);
+      if (
+        !event ||
+        !previous.success ||
+        event.instanceId !== instanceId ||
+        !matches(row, event.server) ||
+        !isDeepStrictEqual(previous.data.server, event.server) ||
+        !fresh(new Date(event.occurredAt), now, MAX_SNAPSHOT_AGE) ||
+        event.type === 'limits.updated'
+      ) {
+        if (row.valid && row.revision === target.revision)
+          updates.push({ id: row.id, valid: false });
+        continue;
+      }
+      updates.push({
+        id: row.id,
+        revision: event.revision,
+        payload: event,
+        synchronized_at: event.occurredAt,
+        valid: event.type === 'snapshot',
+        identity_invalidated: event.type === 'identity.invalidated',
+      });
+    }
+    if (updates.length)
+      await sql`
+      UPDATE provider_server_projections p
+      SET revision = coalesce(u.revision, p.revision), payload = coalesce(u.payload, p.payload),
+          synchronized_at = coalesce(u.synchronized_at, p.synchronized_at), valid = u.valid,
+          identity_invalidated = coalesce(u.identity_invalidated, p.identity_invalidated)
+      FROM jsonb_to_recordset(${JSON.stringify(updates)}::jsonb)
+        AS u(id uuid, revision bigint, payload jsonb, synchronized_at timestamptz,
+             valid boolean, identity_invalidated boolean)
+      WHERE p.server_id = u.id AND p.instance_id = ${instanceId}::uuid
+    `.execute(tx);
+  });
+}
+
 /** Caller verifies raw-body HMAC, timestamp and event-ID headers before invoking this transaction.
  * An event can update an existing explicit link only; it can never import a provider server. */
 export async function applyProviderChange(db: Kysely<Database>, value: unknown, now = new Date()) {

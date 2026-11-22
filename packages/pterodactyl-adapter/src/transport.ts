@@ -205,7 +205,7 @@ export function createTransport(options: TransportOptions) {
     method = 'GET',
     body?: unknown,
     raw = false,
-    requestOptions?: { timeoutMs: number },
+    requestOptions?: { timeoutMs?: number; readOnly?: true },
   ): Promise<Response> {
     const key = scope === 'application' ? options.applicationKey : options.clientKey;
     if (!key) throw new PterodactylError('credential_missing', scope, 'rejected');
@@ -223,7 +223,7 @@ export function createTransport(options: TransportOptions) {
       Math.max(requestScope.cooldownUntil, resourceScope?.cooldownUntil ?? 0) - Date.now();
     if (remaining > 0)
       throw new PterodactylError('rate_limited', scope, 'rejected', 429, remaining);
-    const mutating = method !== 'GET';
+    const mutating = method !== 'GET' && !requestOptions?.readOnly;
     const invalidatedReads = mutating
       ? [
           requestScope.pendingJson,
@@ -241,7 +241,7 @@ export function createTransport(options: TransportOptions) {
         method,
         redirect: 'error',
         signal: AbortSignal.timeout(
-          requestOptions
+          requestOptions?.timeoutMs !== undefined
             ? parseInput(z.number().int().min(1).max(120000), requestOptions.timeoutMs)
             : timeoutMs,
         ),
@@ -299,7 +299,7 @@ export function createTransport(options: TransportOptions) {
     method = 'GET',
     body?: unknown,
     coalesce = true,
-    requestOptions?: { timeoutMs: number },
+    requestOptions?: { timeoutMs?: number; readOnly?: true },
   ): Promise<T> {
     async function readJson(): Promise<string> {
       // Request errors preserve rate-limit metadata and mutation uncertainty.
@@ -310,7 +310,7 @@ export function createTransport(options: TransportOptions) {
         throw new PterodactylError(
           'invalid_response',
           scope,
-          method === 'GET' ? 'rejected' : 'unknown',
+          method === 'GET' || requestOptions?.readOnly ? 'rejected' : 'unknown',
         );
       }
     }
@@ -337,7 +337,7 @@ export function createTransport(options: TransportOptions) {
       throw new PterodactylError(
         'invalid_response',
         scope,
-        method === 'GET' ? 'rejected' : 'unknown',
+        method === 'GET' || requestOptions?.readOnly ? 'rejected' : 'unknown',
       );
     }
   }
