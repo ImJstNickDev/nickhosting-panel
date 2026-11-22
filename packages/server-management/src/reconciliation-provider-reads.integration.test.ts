@@ -151,7 +151,11 @@ it.each([
   [100, 3],
 ])('observes %i servers with %i HTTP identity reads', async (count, requests) => {
   const f = await fleet(count);
-  expect(await f.runtime.reconcile()).toMatchObject({
+  // Count the initial identity requests inside one valid snapshot window. The
+  // expiry cases below independently advance this clock and assert real renewals.
+  const clock = vi.spyOn(performance, 'now').mockReturnValue(performance.now());
+  const result = await f.runtime.reconcile().finally(() => clock.mockRestore());
+  expect(result).toMatchObject({
     observed: count,
     deferred: [],
     unavailable: [],
