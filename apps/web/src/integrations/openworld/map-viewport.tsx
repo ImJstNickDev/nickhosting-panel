@@ -31,11 +31,13 @@ import {
 } from './map-atlas-data.js';
 import { CheckpointGlyph } from './map-checkpoints.js';
 import { type FeatureKind, useFeatureLayer } from './map-feature-layer.js';
+import { MapFps } from './map-fps.js';
 import { fit, populatedExtent } from './map-framing.js';
 import { type AtlasMarker, MapMarkerLayer } from './map-marker-layer.js';
 import type { MapViewportProps } from './map-plan-fallback.js';
 import { playerHref } from './map-players.js';
 import { mapKey as k, mapBase, mapParams, scopeLost, useMapData } from './map-query.js';
+import { MapStatsMenu } from './map-stats-menu.js';
 
 export type { MapFace } from './map-framing.js';
 
@@ -156,6 +158,7 @@ function AtlasViewport(props: ViewProps & { unavailable: () => void }) {
   } = props;
   const t = useT();
   const canvas = useRef<HTMLCanvasElement>(null);
+  const debugFrames = useRef<number | null>(null);
   const overlay = useRef<HTMLDivElement>(null);
   const plot = useRef<HTMLDivElement>(null);
   const scene = useRef<AtlasController | null>(null);
@@ -321,7 +324,10 @@ function AtlasViewport(props: ViewProps & { unavailable: () => void }) {
         onCamera: (view) => {
           if (active) setFrame(view);
         },
-        onFrame: projectPins,
+        onFrame: () => {
+          if (debugFrames.current !== null) debugFrames.current++;
+          projectPins();
+        },
         onFlightKeyboardLockChange: (captured) => {
           if (active) setKeyboardCaptured(captured);
         },
@@ -624,6 +630,8 @@ function AtlasViewport(props: ViewProps & { unavailable: () => void }) {
         <canvas
           ref={canvas}
           tabIndex={0}
+          aria-haspopup="menu"
+          aria-keyshortcuts="Shift+F10"
           aria-label={t(k('stage'), { world, face })}
           aria-description={t(k(flightHint))}
         />
@@ -719,6 +727,8 @@ function AtlasViewport(props: ViewProps & { unavailable: () => void }) {
             {scale >= 1000 ? `${scale / 1000} km` : `${scale} m`}
           </div>
         )}
+        {props.debug && <MapFps frames={debugFrames} />}
+        <MapStatsMenu canvas={canvas} enabled={props.debug} onToggle={props.onToggleDebug} />
         {locked && <span className="ow-atlas-reticle" aria-hidden="true" />}
         {mode !== 'plan' && !locked && (
           <div className="ow-atlas-motion">

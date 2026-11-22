@@ -155,6 +155,8 @@ function MapWorld({
     format = useFormat(),
     query = mapParams({ world: world.key, processRef });
   const [withCheckpoints, setWithCheckpoints] = useState(true);
+  const [debug, setDebug] = useState(false);
+  const toggleDebug = useCallback(() => setDebug((enabled) => !enabled), []);
   const [withSeed, setWithSeed] = useState(false);
   const [biomes, setBiomes] = useState(false);
   const [feature, setFeature] = useState('');
@@ -486,6 +488,8 @@ function MapWorld({
           ) : (
             <MapViewport
               key={`${face}/${terrainEdge}/${viewportRevision}`}
+              debug={debug}
+              onToggleDebug={toggleDebug}
               server={server}
               world={world.key}
               edge={terrainEdge}

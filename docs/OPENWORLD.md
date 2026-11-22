@@ -171,6 +171,9 @@ full screen on browsers that support capturing the flight keys. Hold Ctrl to
 descend there, or use Q anywhere. The on-screen hint shows the keys available
 in the current session. Esc releases the mouse. Use **Inspect terrain** to
 select a point with the cursor, or the on-screen flight controls on a touchscreen.
+Right-click the terrain and choose **Stats for nerds** to toggle the map's FPS
+counter. With the map focused, Shift+F10 opens the same menu. The counter
+reports frames drawn in the last sample and reaches zero when the map is idle.
 
 Layers include checkpoints, live players, creatures by species and active factory
 columns with their respective permissions. With both map and Seed Inspector access,

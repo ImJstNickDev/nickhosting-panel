@@ -14,6 +14,7 @@ import { maxOpenworldMapColumn } from '../../../../../games/openworld/src/world-
 import { useT } from '../../app/i18n.js';
 import { ErrorNotice } from '../../components/ui.js';
 import { CheckpointGlyph, type MapCheckpoint, type MapPoint } from './map-checkpoints.js';
+import { MapFps } from './map-fps.js';
 import {
   type Area,
   type Bounds,
@@ -24,6 +25,7 @@ import {
 } from './map-framing.js';
 import { type MapPlayer, playerHref } from './map-players.js';
 import { mapKey as k, mapData, mapParams, mapScope, scopeLost } from './map-query.js';
+import { MapStatsMenu } from './map-stats-menu.js';
 import type { ServerView } from './telemetry.js';
 
 type Surface = { side: number; samples: number[] };
@@ -54,6 +56,8 @@ function surfaceImage(tile: Surface) {
   return c;
 }
 export type MapViewportProps = {
+  debug: boolean;
+  onToggleDebug: () => void;
   server: ServerView;
   world: string;
   edge: number;
@@ -74,6 +78,8 @@ export type MapViewportProps = {
 };
 
 export function MapPlanFallback({
+  debug,
+  onToggleDebug,
   server,
   world,
   edge,
@@ -96,6 +102,7 @@ export function MapPlanFallback({
     host = useRef<HTMLDivElement>(null),
     canvas = useRef<HTMLCanvasElement>(null);
   const [size, setSize] = useState({ width: 0, height: 0 });
+  const debugFrames = useRef<number | null>(null);
   useEffect(() => {
     const el = host.current;
     if (!el) return;
@@ -282,6 +289,7 @@ export function MapPlanFallback({
       el.height = Math.round(size.height * dpr);
     }
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    if (debugFrames.current !== null) debugFrames.current++;
     ctx.clearRect(0, 0, size.width, size.height);
     ctx.imageSmoothingEnabled = false;
     const left = (x: number) => (x - minX) * px + (draftPan?.dx ?? 0);
@@ -490,10 +498,14 @@ export function MapPlanFallback({
         <canvas
           ref={canvas}
           tabIndex={0}
+          aria-haspopup="menu"
+          aria-keyshortcuts="Shift+F10"
           aria-label={t(k('stage'), { world, face })}
           aria-description={t(k('panHint'))}
           onKeyDown={keyboard}
         />
+        {debug && <MapFps frames={debugFrames} />}
+        <MapStatsMenu canvas={canvas} enabled={debug} onToggle={onToggleDebug} />
         {focus && pin(focus) && !selectedId && (
           <span
             role="img"

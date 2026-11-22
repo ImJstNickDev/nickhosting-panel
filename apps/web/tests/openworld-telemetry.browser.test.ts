@@ -2540,6 +2540,64 @@ function completedMapTextures(page: Page) {
   return materials;
 }
 
+it('shows the map FPS counter only in debug and measures movement and idle frames', async () => {
+  const page = await browser.newPage({ viewport: { width: 1024, height: 768 } });
+  try {
+    await mapRoutes(page, { bridge: true, radius: 3 });
+    await page.goto(
+      `${url}telemetry-fixture?section=map&cartographer#world=earth&face=0&x=235&z=244`,
+    );
+    const canvas = page.locator('.ow-map-stage canvas');
+    const counter = page.locator('.ow-atlas-fps');
+    const debug = page.getByRole('menuitemcheckbox', { name: 'Stats for nerds', exact: true });
+    await check(canvas).toBeVisible();
+    await check(counter).toHaveCount(0);
+    await check(debug).toHaveCount(0);
+    await canvas.click({ button: 'right', position: { x: 100, y: 70 } });
+    await check(debug).toHaveAttribute('aria-checked', 'false');
+    await debug.click();
+    await check(debug).toHaveCount(0);
+    await check(counter).toBeVisible();
+    await check(counter).toHaveText(/\b0\b/);
+
+    await page.getByRole('button', { name: 'Full screen', exact: true }).click();
+    await check
+      .poll(() => counter.evaluate((el) => document.fullscreenElement?.contains(el)))
+      .toBe(true);
+    await canvas.focus();
+    await page.keyboard.down('ArrowRight');
+    try {
+      await check(counter).toHaveText(/\b[1-9]\d*\b/);
+    } finally {
+      await page.keyboard.up('ArrowRight');
+    }
+    await check(counter).toHaveText(/\b0\b/);
+    await page.getByRole('button', { name: 'Exit full screen', exact: true }).click();
+    await canvas.press('Shift+F10');
+    await check(debug).toHaveAttribute('aria-checked', 'true');
+    await debug.press('Enter');
+    await check(counter).toHaveCount(0);
+    await page.getByRole('button', { name: 'Isometric', exact: true }).click();
+    await canvas.scrollIntoViewIfNeeded();
+    const pin = page
+      .locator('.ow-map-stage')
+      .getByRole('button', { name: 'Footbridge', exact: true });
+    const position = () => pin.evaluate((el) => el.getBoundingClientRect().x);
+    await check(pin).toBeVisible();
+    const before = await position();
+    const bounds = await canvas.boundingBox();
+    if (!bounds) throw new Error('Missing map canvas');
+    await page.mouse.move(bounds.x + 100, bounds.y + 70);
+    await page.mouse.down({ button: 'right' });
+    await page.mouse.move(bounds.x + 166, bounds.y + 70, { steps: 6 });
+    await page.mouse.up({ button: 'right' });
+    await check.poll(async () => Math.abs((await position()) - before)).toBeGreaterThan(1);
+    await check(debug).toHaveCount(0);
+  } finally {
+    await page.close();
+  }
+});
+
 it('keeps the same bridge across the three projections', async () => {
   const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
   try {
@@ -2901,6 +2959,8 @@ it('falls back to the readable 2D map with checkpoint navigation when WebGL2 is 
       `${url}telemetry-fixture?section=map&reader&seedAccess#world=earth&face=0&x=128&z=120`,
     );
     await check(page.getByText('WebGL is unavailable. Showing the 2D terrain map.')).toBeVisible();
+    const counter = page.locator('.ow-atlas-fps');
+    await check(counter).toHaveCount(0);
     await check.poll(() => paths.some((u) => u.pathname.endsWith('/surface'))).toBe(true);
     await page.getByRole('searchbox').fill('Lakeside');
     await page
@@ -2910,6 +2970,11 @@ it('falls back to the readable 2D map with checkpoint navigation when WebGL2 is 
     await check(page.getByRole('heading', { name: 'Lakeside' })).toBeVisible();
     await page.getByRole('button', { name: 'Layers', exact: true }).click();
     await check(page.getByLabel('Seed preview')).toHaveCount(0);
+    await page
+      .locator('.ow-map-stage canvas')
+      .click({ button: 'right', position: { x: 100, y: 70 } });
+    await page.getByRole('menuitemcheckbox', { name: 'Stats for nerds' }).click();
+    await check(counter).toHaveText('0 FPS');
     expect(paths.some((u) => /\/(mesh|meshes|seed-tile|seed-legend)$/.test(u.pathname))).toBe(
       false,
     );

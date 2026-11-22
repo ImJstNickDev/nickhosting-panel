@@ -139,6 +139,52 @@
   box-shadow: 0 0 0 1px #243831;
   pointer-events: none;
 }
+.ow-atlas-fps {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  padding: 3px 7px;
+  border-radius: 4px;
+  background: #14201ee6;
+  color: #f7faf9;
+  font-size: 0.75rem;
+  font-variant-numeric: tabular-nums;
+  pointer-events: none;
+}
+.ow-map-context-menu {
+  position: absolute;
+  z-index: 5;
+  max-width: calc(100% - 8px);
+  width: max-content;
+  padding: 4px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--surface);
+  box-shadow: 0 4px 14px #14201930;
+  cursor: default;
+}
+.ow-map-context-menu button {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 32px;
+  padding: 4px 10px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: inherit;
+  font-size: 0.85rem;
+}
+.ow-map-context-menu button:hover,
+.ow-map-context-menu button:focus-visible {
+  background: color-mix(in srgb, var(--ow-primary) 9%, var(--surface));
+  outline: 2px solid var(--ow-primary);
+  outline-offset: -2px;
+}
+.ow-map-context-check {
+  width: 1em;
+  color: var(--ow-primary);
+}
 .ow-atlas-pins > [hidden] {
   display: none;
 }
