@@ -94,8 +94,12 @@ reported day length and the rate of completed simulation ticks. New readings adj
 its speed gradually. A snapshot shows the recorded time. Openworld a1.2.9 reported a
 default day of 1,500 seconds. In an isolated run one real second advanced the game
 by about 57.4 seconds at 19.96 ticks/s and 9.2 seconds at 3.20 ticks/s.
-**Performance** adds tick timings, the game's
-recent metric history, chunks and storage. Both use the Openworld performance read
+**Performance** shows how the latest measured tick time is divided among phases and
+how much of the tick budget they used. Select a point in the recent history to compare
+metrics at the same instant, or zoom into a shorter interval. A pinned sample stays
+available as new readings arrive. The storage bar groups disk usage by category across
+worlds. Select a category to see its sizes and file counts by world.
+Overview and Performance use the Openworld performance read
 permission. **Players** opens a searchable directory with connected players first. The
 Online filter shows current connections. Select a player to open a dedicated page
 inside the server workspace. A verified account has a permanent profile link. The

@@ -1,6 +1,7 @@
 import { useState, useSyncExternalStore } from 'react';
 import { useT } from '../../app/i18n.js';
 import { HistoryChart } from './history.js';
+import { DiskBreakdown, TickPhases } from './performance-breakdowns.js';
 import {
   key,
   Metrics,
@@ -104,23 +105,17 @@ function Performance(props: TelemetryViewProps) {
                 [t(key('budget')), f.metric(s.tickBudgetMs, 'ms')],
               ]}
             />
-            <details className="ow-disclosure">
-              <summary>{t(key('phases'))}</summary>
-              <Metrics
-                items={[
-                  [t(key('tickMax')), f.metric(s.tickMs?.max, 'ms', 2)],
-                  [t(key('gameTick')), f.metric(s.tick)],
-                ]}
-              />
-              <Metrics
-                items={Object.entries(s.phasesMs ?? {})
-                  .filter(([, v]) => numeric(v))
-                  .map(([name, v]) => [t(key(`phase.${name}`)), f.metric(v, 'ms', 3)])}
-              />
-              {!Object.values(s.phasesMs ?? {}).some(numeric) && (
-                <p className="muted">{t(key('detailedMetricsUnavailable'))}</p>
-              )}
-            </details>
+            <TickPhases status={s} />
+            <dl className="ow-tick-context">
+              <div>
+                <dt>{t(key('tickMax'))}</dt>
+                <dd>{f.metric(s.tickMs?.max, 'ms', 2)}</dd>
+              </div>
+              <div>
+                <dt>{t(key('gameTick'))}</dt>
+                <dd>{f.metric(s.tick)}</dd>
+              </div>
+            </dl>
             <details className="ow-disclosure">
               <summary>{t(key('terrainCache'))}</summary>
               <Metrics
@@ -138,7 +133,9 @@ function Performance(props: TelemetryViewProps) {
         )}
       </TelemetryPanel>
       <TelemetryPanel secondary title={t(key('history'))} query={history}>
-        {(data) => <HistoryChart history={data} />}
+        {(data, observation) => (
+          <HistoryChart history={data} isLive={observation.source === 'live'} />
+        )}
       </TelemetryPanel>
       <TelemetryPanel secondary title={t(key('worlds'))} query={chunks}>
         {(data) => (
@@ -190,6 +187,7 @@ function Performance(props: TelemetryViewProps) {
                 [t(key('files')), f.metric(s.totalFiles)],
               ]}
             />
+            <DiskBreakdown storage={s} />
             {s.worlds.length > 0 && (
               <details className="ow-disclosure">
                 <summary>{t(key('stored'))}</summary>
@@ -206,30 +204,6 @@ function Performance(props: TelemetryViewProps) {
                     ],
                   }))}
                 />
-              </details>
-            )}
-            {s.parts.length > 0 && (
-              <details className="ow-disclosure">
-                <summary>{t(key('storageParts'))}</summary>
-                <dl className="ow-breakdown">
-                  {s.parts.map((p) => {
-                    const split = p.key.lastIndexOf('.');
-                    const category = split === -1 ? p.key : p.key.slice(split + 1);
-                    const world = split === -1 ? null : p.key.slice(0, split);
-                    const name = s.worlds.find((w) => w.key === world)?.name || world;
-                    const label = ['logs', 'state', 'other', 'map', 'regions', 'chunks'].includes(
-                      category,
-                    )
-                      ? t(key(`part.${category}`))
-                      : category;
-                    return (
-                      <div key={p.key}>
-                        <dt>{name ? `${name} · ${label}` : label}</dt>
-                        <dd>{bytes(p.bytes)}</dd>
-                      </div>
-                    );
-                  })}
-                </dl>
               </details>
             )}
           </>

@@ -1,0 +1,192 @@
+.ow-history {
+  container-type: inline-size;
+}
+.ow-history-toolbar,
+.ow-history-zoom,
+.ow-history-readout {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+}
+.ow-history-toolbar {
+  justify-content: space-between;
+  margin-bottom: 22px;
+}
+.ow-history-toolbar .ow-metric-select {
+  min-width: 0;
+  max-width: 100%;
+  margin: 0;
+}
+.ow-history-toolbar select {
+  min-width: 0;
+}
+.ow-history-zoom {
+  gap: 6px;
+}
+.ow-history button.secondary {
+  min-height: 34px;
+  padding: 4px 10px;
+  font-size: 0.83rem;
+}
+.ow-history button:disabled {
+  cursor: default;
+}
+.ow-history-chart {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 8px 10px;
+  margin-right: 5px;
+  font-variant-numeric: tabular-nums;
+}
+.ow-history-y,
+.ow-history-x {
+  color: var(--muted);
+  font-size: 0.75rem;
+  line-height: 1.25;
+}
+.ow-history-y {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  align-items: end;
+  margin-block: -0.625em;
+}
+.ow-history-plot {
+  position: relative;
+  height: clamp(170px, 23cqw, 240px);
+  background: #fbfcfb;
+}
+.ow-history-plot:focus-within {
+  outline: 2px solid var(--field-focus);
+  outline-offset: 4px;
+}
+.ow-history-plot svg,
+.ow-history-control {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+.ow-history-plot svg {
+  overflow: visible;
+}
+.ow-history-plot :is(line, path) {
+  vector-effect: non-scaling-stroke;
+}
+.ow-history-grid {
+  stroke: #d7dfdd;
+}
+.ow-history-grid.ow-vertical {
+  stroke: #e4e9e7;
+}
+.ow-history-line {
+  fill: none;
+  stroke: var(--ow-primary);
+  stroke-width: 2.25px;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.ow-history-line.ow-alt {
+  stroke: var(--ow-secondary);
+  stroke-dasharray: 6 3;
+}
+.ow-history-crosshair {
+  stroke: #4a615b;
+  stroke-dasharray: 3 3;
+}
+.ow-history-brush {
+  fill: rgb(37 100 83 / 12%);
+}
+.ow-history-dot {
+  position: absolute;
+  width: 9px;
+  height: 9px;
+  border: 2px solid white;
+  outline: 1px solid var(--ow-primary);
+  border-radius: 50%;
+  transform: translate(-50%, -50%);
+  background: var(--ow-primary);
+}
+.ow-history-dot.ow-alt {
+  outline-color: var(--ow-secondary);
+  background: var(--ow-secondary);
+}
+.ow-history-control {
+  cursor: crosshair;
+  opacity: 0;
+  margin: 0;
+  touch-action: pan-y;
+  user-select: none;
+}
+.ow-history-x {
+  grid-column: 2;
+  position: relative;
+  height: 1.5em;
+  container: history-axis / inline-size;
+}
+.ow-history-x span {
+  position: absolute;
+  transform: translateX(-50%);
+}
+.ow-history-x span:first-child:not(:only-child) {
+  transform: none;
+}
+.ow-history-x span:last-child:not(:only-child) {
+  transform: translateX(-100%);
+}
+.ow-history-hint {
+  margin: 10px 0 0;
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+.ow-history-readout {
+  min-height: 50px;
+  margin-top: 12px;
+  border-top: 1px solid var(--line);
+  padding-top: 12px;
+  font-variant-numeric: tabular-nums;
+}
+.ow-history-at {
+  display: grid;
+  line-height: 1.3;
+}
+.ow-history-at span {
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+.ow-history-at time {
+  font-size: 0.95rem;
+  font-weight: 650;
+}
+.ow-history-readout .ow-legend {
+  margin: 0;
+  gap: 6px 16px;
+}
+.ow-history-readout .ow-legend i.ow-alt {
+  background: transparent;
+  border-bottom: 3px dashed var(--ow-secondary);
+}
+.ow-history-resume {
+  margin-left: auto;
+}
+@container history-axis (max-width: 540px) {
+  .ow-history-x span:nth-child(even) {
+    display: none;
+  }
+}
+@container history-axis (max-width: 270px) {
+  .ow-history-x span:not(:first-child):not(:last-child) {
+    display: none;
+  }
+}
+@container history-axis (max-width: 170px) {
+  .ow-history-x span:first-child:not(:last-child) {
+    display: none;
+  }
+}
+@container (max-width: 560px) {
+  .ow-history-resume {
+    margin-left: 0;
+  }
+}

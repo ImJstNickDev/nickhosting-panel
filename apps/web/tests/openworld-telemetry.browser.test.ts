@@ -43,6 +43,20 @@ afterAll(async () => {
   await vite?.close();
 });
 const instant = '2026-01-20T10:34:49.000Z';
+function performanceHistory(offset = 0, retained = 49) {
+  const indices = Array.from({ length: retained }, (_, i) => i + offset + 49 - retained);
+  const wave = (i: number) => Math.sin(i / 2) + Math.sin(i / 6) + Math.cos(i * 1.8) / 2;
+  return {
+    t: indices.map((i) => Date.parse(instant) + (i - 48) * 5000),
+    tickMean: indices.map((i) => (i === 10 ? null : Math.round(120 + 13 * wave(i)) / 10)),
+    tickP99: indices.map((i) => Math.round(214 + 28 * wave(i) + (i === 34 ? 75 : 0)) / 10),
+    recvKbps: indices.map((i) => (i === 48 ? 10000 : Math.round(7600 + 810 * wave(i)))),
+    sentKbps: indices.map((i) => Math.round(2400 + 240 * wave(i + 4))),
+    tps: indices.map((i) => Math.round(198 + Math.sin(i / 3)) / 10),
+    players: indices.map((i) => (i < 7 ? 1 : 2)),
+  };
+}
+const MiB = 1024 ** 2;
 const person = {
   id: 23,
   name: 'Solstice',
@@ -60,7 +74,18 @@ const sample = {
     tickMs: { mean: 12, p99: 25, max: 36 },
     tickBudgetMs: 50,
     worldTime: { dayFraction: 0.65625, dayLengthS: 1200 },
-    phasesMs: { net: 0.4, chunks: 6.5, sim: 3.1 },
+    phasesMs: {
+      net: 0.38,
+      chunks: 6.5,
+      players: 0.21,
+      edits: 0.14,
+      sim: 3.1,
+      snapshot: 0.48,
+      projectiles: 0.09,
+      entities: 0.73,
+      chests: 0.12,
+      send: 0.25,
+    },
     memory: { rssMB: 140 },
     uptimeS: 7250,
     net: { sentKbps: 2680, recvKbps: 10000, lossPct: 0 },
@@ -90,13 +115,7 @@ const sample = {
     inventoryKnown: false,
     record: { joins: 9, blocksPlaced: 25 },
   },
-  history: {
-    t: [0, 1000, 2000, 3000].map((v) => Date.parse(instant) + v),
-    tickMean: [10, 11, 9, 12],
-    tickP99: [18, 25, 20, 25],
-    recvKbps: [1150, 1520, 2030, 10000],
-    sentKbps: [320, 1800, 2130, 2680],
-  },
+  history: performanceHistory(),
   chunks: {
     worlds: [
       { key: 'earth', name: 'Earth', live: 24, dirty: 7, generatedColumns: 1200, savedColumns: 10 },
@@ -105,19 +124,36 @@ const sample = {
     hot: [{ world: 'earth', face: 2, i: 1, j: -3, editsPerS: 0.3, simWritesPerS: 1.1, score: 81 }],
   },
   storage: {
-    totalBytes: 729168,
-    totalFiles: 23,
+    totalBytes: 640 * MiB,
+    totalFiles: 1000,
     worlds: [
       {
         key: 'earth',
         name: 'Earth',
-        generatedBytes: 8192,
-        savedBytes: 4096,
+        generatedBytes: 320 * MiB,
+        savedBytes: 64 * MiB,
         pendingFlush: 4,
         dirtyLive: 2,
       },
+      {
+        key: 'moon',
+        name: 'Moon',
+        generatedBytes: 64 * MiB,
+        savedBytes: 32 * MiB,
+        pendingFlush: 0,
+        dirtyLive: 0,
+      },
     ],
-    parts: [{ key: 'logs', label: 'Journaux', bytes: 8820, files: 2 }],
+    parts: [
+      { key: 'earth.chunks', bytes: 320 * MiB, files: 512 },
+      { key: 'moon.chunks', bytes: 64 * MiB, files: 172 },
+      { key: 'earth.regions', bytes: 64 * MiB, files: 120 },
+      { key: 'moon.regions', bytes: 32 * MiB, files: 50 },
+      { key: 'earth.map', bytes: 64 * MiB, files: 96 },
+      { key: 'moon.map', bytes: 32 * MiB, files: 42 },
+      { key: 'logs', label: 'Journaux', bytes: 48 * MiB, files: 6 },
+      { key: 'state', bytes: 16 * MiB, files: 2 },
+    ],
   },
 };
 function viewer(id: string, assisted = false) {
@@ -153,7 +189,7 @@ function viewer(id: string, assisted = false) {
     subject: account,
   };
 }
-async function serve(page: Page, offline = false) {
+async function serve(page: Page, offline = false, liveStatusTime?: string) {
   await page.route('**/v1/web/session', (route) => route.fulfill({ json: viewer('reader') }));
   await page.route('**/openworld/players/saved/search', (r) =>
     r.fulfill({
@@ -178,7 +214,8 @@ async function serve(page: Page, offline = false) {
         data: sample[name as keyof typeof sample],
         source: offline ? 'snapshot' : 'live',
         ...(!offline && name === 'players' ? { processRef: 'a'.repeat(64) } : {}),
-        observedAt: name === 'status' && !offline ? new Date().toISOString() : instant,
+        observedAt:
+          name === 'status' && !offline ? (liveStatusTime ?? new Date().toISOString()) : instant,
         reason: offline ? 'offline' : null,
       },
     });
@@ -240,20 +277,19 @@ it('opens live roster and pinned read-only details in English; a roster-only rea
     await context.close();
   }
 });
-it('displays independent performance resources and current bitrates on mobile Italian', async () => {
+it('displays independent performance resources and pins history by touch on mobile Italian', async () => {
   const context = await browser.newContext({
       locale: 'it-IT',
       viewport: { width: 390, height: 844 },
+      hasTouch: true,
+      isMobile: true,
     }),
     page = await context.newPage();
   try {
-    await serve(page);
-    let unblock!: () => void;
-    const gate = new Promise<void>((ok) => {
-      unblock = ok;
-    });
+    await serve(page, false, instant);
+    const historyReady = Promise.withResolvers<void>();
     await page.route('**/telemetry/history', async (route) => {
-      await gate;
+      await historyReady.promise;
       await route.fallback();
     });
     await page.goto(`${url}telemetry-fixture?section=performance`);
@@ -262,24 +298,48 @@ it('displays independent performance resources and current bitrates on mobile It
     await world.selectOption('moon');
     await check(page.getByText('32', { exact: true })).toBeVisible();
     await world.selectOption('earth');
-    unblock();
-    await page.getByRole('combobox', { name: 'Metrica' }).selectOption('network');
+    historyReady.resolve();
+    const metric = page.getByRole('combobox', { name: 'Metrica' });
+    await metric.selectOption('network');
+    const graph = page.getByRole('slider', { name: 'Campione' });
     await check(page.getByRole('img', { name: /Rete/ })).toBeVisible();
     await check(page.locator('.ow-legend')).toContainText('10.000 kb/s');
-    await page.getByText('Tempo per fase del tick', { exact: true }).click();
-    await check(page.getByText('6,5 ms', { exact: true })).toBeVisible();
+    await graph.tap({ position: { x: 58, y: 42 } });
+    const stamp = page.locator('.ow-history-readout time');
+    const pinned = await stamp.getAttribute('datetime');
+    expect(pinned).toBeTruthy();
+    expect(pinned).not.toBe(instant);
+    await metric.selectOption('timing');
+    await check(stamp).toHaveAttribute('datetime', pinned ?? '');
+    await check(page.getByText('Campione fissato', { exact: true })).toBeVisible();
+
+    const phases = page.locator('.ow-tick-phases .ow-composition-legend');
+    await check(phases.getByRole('button')).toHaveCount(10);
+    await check(phases.getByRole('button', { name: /Chunk/ })).toContainText('6,5 ms');
     await check(page.getByText('36 ms', { exact: true })).toBeVisible();
-    await page.getByText('Generazione del terreno e cache', { exact: true }).click();
+    const terrain = page.getByText('Generazione del terreno e cache', { exact: true });
+    await terrain.click();
     await check(page.getByText('Coda di generazione', { exact: true })).toBeVisible();
-    await page.getByText('Archiviazione del mondo', { exact: true }).click();
-    await check(page.getByText('4 KiB', { exact: true })).toBeVisible();
-    await page.getByText('Spazio per categoria', { exact: true }).click();
-    await check(page.getByText('Log', { exact: true })).toBeVisible();
-    await check(page.getByText('Journaux', { exact: true })).toHaveCount(0);
-    await page.getByText('Chunk più attivi', { exact: true }).click();
+    await terrain.click();
+    const stored = page.getByText('Archiviazione del mondo', { exact: true });
+    await stored.click();
+    const storagePanel = page.locator('.ow-panel').filter({ has: stored });
+    await storagePanel.getByRole('combobox', { name: 'Mondo' }).selectOption('moon');
+    await check(storagePanel.getByText('32 MiB', { exact: true })).toBeVisible();
+    await stored.click();
+    const hot = page.getByText('Chunk più attivi', { exact: true });
+    await hot.click();
     await check(page.getByText('1, -3', { exact: true })).toBeVisible();
+    await hot.click();
+    const disk = page.locator('.ow-disk-breakdown');
+    await disk.locator('.ow-composition-legend').getByRole('button', { name: /Chunk/ }).tap();
+    await check(disk.getByRole('row', { name: /Earth.*320 MiB.*512/ })).toBeVisible();
+    await check(disk.getByRole('row', { name: /Moon.*64 MiB.*172/ })).toBeVisible();
+    await check(disk.getByText('Journaux', { exact: true })).toHaveCount(0);
+    await disk.getByRole('heading').tap();
     await fits(page);
     await page.screenshot({ path: `${shots}/telemetry-performance-it.png`, fullPage: true });
+    await page.clock.setFixedTime(new Date(instant));
     await page.goto(`${url}telemetry-fixture?section=overview`);
     await check(page.getByText('2 / 12', { exact: true })).toBeVisible();
     await check(page.getByText('10 Mb/s', { exact: true })).toBeVisible();
@@ -296,6 +356,223 @@ it('displays independent performance resources and current bitrates on mobile It
     await context.close();
   }
 });
+it('inspects and zooms cached performance samples across metric changes and a rolling refresh', async () => {
+  const context = await browser.newContext({
+    locale: 'en-GB',
+    viewport: { width: 1280, height: 900 },
+  });
+  const page = await context.newPage();
+  try {
+    await serve(page, false, instant);
+    const requests: string[] = [];
+    page.on('request', (request) => {
+      const path = new URL(request.url()).pathname.split('/telemetry/')[1];
+      if (path) requests.push(path);
+    });
+    let historyReads = 0;
+    await page.route('**/telemetry/history', (route) => {
+      const data = historyReads++ === 0 ? sample.history : performanceHistory(3, 36);
+      return route.fulfill({
+        json: {
+          data,
+          source: 'live',
+          reason: null,
+          observedAt: new Date(data.t.at(-1) ?? 0).toISOString(),
+        },
+      });
+    });
+    await page.clock.install({ time: new Date(instant) });
+    await page.goto(`${url}telemetry-fixture?section=performance`);
+    const slider = page.getByRole('slider', { name: 'Sample' });
+    const metric = page.getByRole('combobox', { name: 'Metric' });
+    const stamp = page.locator('.ow-history-readout time');
+    const chart = page.locator('.ow-history').getByRole('img');
+    const phases = page.locator('.ow-tick-phases');
+    const disk = page.locator('.ow-disk-breakdown');
+    await check(stamp).toHaveAttribute('datetime', instant);
+    await check(disk.getByText('640 MiB in reported categories')).toBeVisible();
+    await check(phases.getByRole('heading')).toBeVisible();
+    await page.clock.pauseAt(await page.evaluate(() => Date.now() + 300));
+    expect([...requests].sort()).toEqual(['chunks', 'history', 'status', 'storage']);
+
+    await slider.hover({ position: { x: 120, y: 30 } });
+    await check(stamp).not.toHaveAttribute('datetime', instant);
+    await metric.hover();
+    await check(stamp).toHaveAttribute('datetime', instant);
+    await slider.click({ position: { x: 240, y: 50 } });
+    await check(page.getByText('Pinned sample', { exact: true })).toBeVisible();
+    const clicked = await stamp.getAttribute('datetime');
+    await slider.press('ArrowRight');
+    await check(stamp).toHaveAttribute(
+      'datetime',
+      new Date(Date.parse(clicked ?? '') + 5000).toISOString(),
+    );
+    await slider.press('Home');
+    const origin = sample.history.t[0] ?? 0;
+    await check(stamp).toHaveAttribute('datetime', new Date(origin).toISOString());
+    for (let i = 0; i < 10; i++) await slider.press('ArrowRight');
+    const pinned = new Date(origin + 50000).toISOString();
+    await check(stamp).toHaveAttribute('datetime', pinned);
+    const legend = page.locator('.ow-legend');
+    await check(legend).toContainText('—');
+    await metric.selectOption('network');
+    await check(stamp).toHaveAttribute('datetime', pinned);
+    await check(legend).not.toContainText('—');
+    const values = await legend.innerText();
+    const fullRange = await chart.getAttribute('aria-label');
+    await page.getByRole('button', { name: 'Zoom in' }).click();
+    await check(chart).not.toHaveAttribute('aria-label', fullRange ?? '');
+    await check(stamp).toHaveAttribute('datetime', pinned);
+    const resetZoom = page.getByRole('button', { name: 'Reset zoom' });
+    await resetZoom.click();
+    await check(chart).toHaveAttribute('aria-label', fullRange ?? '');
+    await slider.scrollIntoViewIfNeeded();
+    const box = await slider.boundingBox();
+    if (!box) throw Error('Expected the sample control to be visible');
+    const y = box.y + box.height / 2;
+    await page.mouse.move(box.x + box.width * 0.1, y);
+    await page.mouse.down();
+    await page.mouse.move(box.x + box.width * 0.6, y, { steps: 8 });
+    await page.mouse.up();
+    await check(chart).not.toHaveAttribute('aria-label', fullRange ?? '');
+    await check(stamp).toHaveAttribute('datetime', pinned);
+    await resetZoom.click();
+
+    const phaseList = phases.locator('.ow-composition-legend');
+    const phaseBar = phases.locator('.ow-composition-bar');
+    const simulation = phaseList.getByRole('button', { name: /Simulation/ });
+    await simulation.focus();
+    await check(phaseBar.getByRole('button', { name: /Simulation/ })).toHaveAttribute(
+      'data-highlighted',
+      'true',
+    );
+    const segment = disk.locator('.ow-composition-bar').getByRole('button', { name: /Chunks/ });
+    const row = disk.locator('.ow-composition-legend').getByRole('button', { name: /Chunks/ });
+    await segment.hover();
+    await check(row).toHaveAttribute('data-highlighted', 'true');
+    await row.press('Enter');
+    await check(row).toHaveAttribute('aria-pressed', 'true');
+    await check(disk.getByRole('row', { name: /Earth.*320 MiB.*512/ })).toBeVisible();
+    await check(disk.getByRole('row', { name: /Moon.*64 MiB.*172/ })).toBeVisible();
+    await fits(page);
+    expect(requests).toHaveLength(4);
+
+    await page.clock.fastForward(15001);
+    await page.clock.resume();
+    await check.poll(() => historyReads).toBe(2);
+    const historyPanel = page.locator('.ow-panel').filter({ has: chart });
+    await check(historyPanel.locator('.ow-stamp time')).toHaveAttribute(
+      'datetime',
+      new Date(Date.parse(instant) + 15000).toISOString(),
+    );
+    await check(chart).toHaveAttribute('aria-label', fullRange ?? '');
+    await check(stamp).toHaveAttribute('datetime', pinned);
+    expect(await legend.innerText()).toBe(values);
+    await metric.selectOption('timing');
+    await slider.press('ArrowRight');
+    await page.getByRole('heading', { name: 'Recent history' }).click();
+    await page.screenshot({ path: `${shots}/telemetry-performance-en.png`, fullPage: true });
+    await page.getByRole('button', { name: 'Return to live' }).click();
+    await check(stamp).toHaveAttribute(
+      'datetime',
+      new Date(Date.parse(instant) + 15000).toISOString(),
+    );
+  } finally {
+    await context.close();
+  }
+});
+
+it('preserves zero and missing performance readings in partial snapshots', async () => {
+  const page = await browser.newPage({ locale: 'en-GB', viewport: { width: 320, height: 720 } });
+  try {
+    await serve(page, true);
+    let empty = false;
+    const data = () => ({
+      status: { ...sample.status, phasesMs: empty ? {} : { net: 0, sim: null } },
+      storage: {
+        ...sample.storage,
+        parts: empty
+          ? []
+          : [
+              { key: 'earth.chunks', bytes: 64 * MiB, files: 72 },
+              { key: 'moon.chunks', bytes: null, files: null },
+              { key: 'logs', bytes: 0, files: 0 },
+              { key: 'tiles', label: 'Elevation tiles', bytes: 0, files: 1 },
+            ],
+      },
+    });
+    await page.route('**/telemetry/{status,storage}', (route) => {
+      const resource = route.request().url().endsWith('/status') ? 'status' : 'storage';
+      return route.fulfill({
+        json: {
+          data: data()[resource],
+          source: 'snapshot',
+          reason: 'offline',
+          observedAt: instant,
+        },
+      });
+    });
+    await page.route('**/telemetry/history', (route) =>
+      route.fulfill({
+        json: {
+          data: {
+            t: [231, 1231].map((offset) => Date.parse(instant) + offset),
+            recvKbps: [9347.56, 12345.23],
+          },
+          source: 'snapshot',
+          observedAt: instant,
+          reason: 'offline',
+        },
+      }),
+    );
+    await page.goto(`${url}telemetry-fixture?section=performance&offline`);
+    const phases = page.locator('.ow-tick-phases');
+    const disk = page.locator('.ow-disk-breakdown');
+    const categories = disk.locator('.ow-composition-legend');
+    await check(phases.getByRole('button', { name: /Network receive/ })).toContainText('0 ms');
+    await check(phases.getByRole('button', { name: /Simulation/ })).toContainText('—');
+    await check(phases.locator('.ow-composition-bar button')).toHaveCount(0);
+    const partialTotal = '≥ 64 MiB in reported categories · percentages use measured bytes only';
+    await check(disk.getByText(partialTotal, { exact: true })).toBeVisible();
+    await check(categories.getByRole('button', { name: /Chunks/ })).toHaveAccessibleDescription(
+      partialTotal,
+    );
+    await check(categories.getByRole('button', { name: /Chunks/ })).toContainText('≥ 64 MiB');
+    await categories.getByRole('button', { name: /Chunks/ }).click();
+    await check(disk.getByRole('row', { name: 'Moon — —' })).toBeVisible();
+    await categories.getByRole('button', { name: /Logs/ }).click();
+    await check(disk.getByRole('row', { name: 'Server-wide 0 B 0' })).toBeVisible();
+    await check(categories.getByRole('button', { name: /Elevation tiles/ })).toBeVisible();
+    await page.getByRole('combobox', { name: 'Metric' }).selectOption('network');
+    const times = await page.locator('.ow-history-x span:visible').evaluateAll((labels) =>
+      labels.map((label) => {
+        const { left, right } = label.getBoundingClientRect();
+        return { left, right };
+      }),
+    );
+    expect(times.length).toBeGreaterThanOrEqual(2);
+    let previousRight = 0;
+    for (const { left, right } of times) {
+      expect(left).toBeGreaterThanOrEqual(previousRight);
+      previousRight = right;
+    }
+    const slider = page.getByRole('slider', { name: 'Sample' });
+    await slider.press('Home');
+    await check(page.getByRole('button', { name: 'Return to latest sample' })).toBeVisible();
+    await page.getByRole('combobox', { name: 'Metric' }).selectOption('pingMean');
+    await check(page.getByText('No samples for this metric yet.')).toBeVisible();
+    await fits(page);
+    empty = true;
+    await page.reload();
+    await check(disk.getByText('No storage categories reported.')).toBeVisible();
+    await check(phases.getByText('No metrics reported yet.')).toBeVisible();
+    await check(page.getByRole('heading', { name: 'Terrain by world' })).toBeVisible();
+    await fits(page);
+  } finally {
+    await page.close();
+  }
+});
+
 async function expectWorldTime(page: Page, expected: string) {
   const clock = page.locator('.ow-world-clock');
   await expect

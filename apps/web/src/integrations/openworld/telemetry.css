@@ -233,18 +233,22 @@
 .ow-table tbody tr:last-child > * {
   border-bottom: 0;
 }
-.ow-breakdown {
-  margin: 0;
-  display: grid;
-  gap: 4px;
-}
-.ow-breakdown > div {
+.ow-tick-context {
   display: flex;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 4px;
+  flex-wrap: wrap;
+  gap: 6px 20px;
+  margin: 14px 0 0;
+  font-size: 0.8rem;
 }
-.ow-breakdown dd {
+.ow-tick-context > div {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+}
+.ow-tick-context dt {
+  color: var(--muted);
+}
+.ow-tick-context dd {
   margin: 0;
   font-variant-numeric: tabular-nums;
 }
@@ -275,34 +279,6 @@
 .ow-disclosure summary:focus-visible {
   outline: 2px solid var(--field-focus);
   outline-offset: 2px;
-}
-.ow-graph {
-  display: flex;
-  height: 112px;
-  align-items: stretch;
-  gap: 10px;
-}
-.ow-graph svg {
-  flex: 1;
-  min-width: 0;
-}
-.ow-y-labels {
-  display: flex;
-  flex-direction: column;
-  justify-content: space-between;
-  width: 71px;
-  flex-shrink: 0;
-  font-size: 0.75rem;
-  color: var(--muted);
-  text-align: right;
-  font-variant-numeric: tabular-nums;
-}
-.ow-x-labels {
-  display: flex;
-  margin: 4px 0 0 80px;
-  justify-content: space-between;
-  font-size: 0.75rem;
-  color: var(--muted);
 }
 .ow-legend {
   margin: 12px 0 0;
