@@ -1,5 +1,11 @@
-import { randomUUID } from 'node:crypto';
-import { authSessionId, createLogger, DomainError, type LogRecord } from '@nickhosting/core';
+import { randomBytes, randomUUID } from 'node:crypto';
+import {
+  authSessionId,
+  createLogger,
+  DomainError,
+  type LogRecord,
+  SecretCodec,
+} from '@nickhosting/core';
 import { createDatabase, type Database } from '@nickhosting/database';
 import { createTestDatabase } from '@nickhosting/database/testing';
 import { commandDigest, enqueueCommand } from '@nickhosting/jobs';
@@ -16,7 +22,7 @@ import {
 } from '@nickhosting/pterodactyl-adapter';
 import type { Kysely } from 'kysely';
 import { sql } from 'kysely';
-import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, onTestFinished, vi } from 'vitest';
 import { uploadNotPublished } from '../../pterodactyl-adapter/src/upload-dispatch.js';
 import type { BackendAllocationPool } from './allocation-pool.js';
 import { removeFilemanDirectory } from './fileman-directory.js';
@@ -33,6 +39,7 @@ import {
   wakeInstallationOperation,
 } from './provider-installation-events.js';
 import { enqueueServerOperation } from './registry.js';
+import { createManagementRuntime } from './runtime.js';
 import { pendingUploadFixture } from './test-fixtures.js';
 
 let providerSequence = 0;
@@ -3088,6 +3095,75 @@ describe('durable provider lifecycle with real PostgreSQL', () => {
     expect((await f.server()).runtime_state).toBe('offline');
     expect(f.adapter.power).toHaveBeenCalledTimes(1);
   });
+  it.each(['running', 'stopped', 'reassigned', 'reassigned-during-slow-resources'] as const)(
+    'reuses the observed identity and verifies the final external stop receipt: %s',
+    async (condition) => {
+      const f = await fixture('start');
+      expect(await f.run()).toBe('waiting');
+      f.tick();
+      expect(await f.run()).toBe('succeeded');
+      const at = Math.floor(Date.now() / 1000) * 1000 - 2000;
+      const terminal = {
+        containerId: 'a'.repeat(64),
+        startedAt: new Date(at - 10_000).toISOString(),
+        finishedAt: new Date(at + 500).toISOString(),
+      };
+      const activity = vi.fn(async () => {
+        if (condition === 'reassigned') f.remote.external_id = 'different-managed-server';
+        return [
+          {
+            id: 'a'.repeat(40),
+            event: 'server:power.stop' as const,
+            timestamp: new Date(at).toISOString(),
+            is_api: false,
+          },
+        ];
+      });
+      const adapter = { ...f.options.adapter, listPowerActivity: activity };
+      if (condition === 'reassigned-during-slow-resources') {
+        const clock = vi.spyOn(performance, 'now').mockReturnValue(100);
+        onTestFinished(() => clock.mockRestore());
+        adapter.getResources = async () => {
+          const sample = await f.adapter.getResources();
+          f.remote.external_id = 'different-managed-server';
+          clock.mockReturnValue(6100);
+          return sample;
+        };
+      }
+      const observer = {
+        preflight: async () => {},
+        stopped: async () => condition !== 'running',
+        terminalProcess: vi.fn(async () => (condition === 'running' ? null : terminal)),
+      };
+      const runtime = await createManagementRuntime({
+        db: f.db,
+        adapter,
+        codec: new SecretCodec({ activeKeyId: 'test', keys: { test: randomBytes(32) } }),
+        containerObserver: observer,
+        env: { NH_OBSERVER_ID: 'fixture' },
+      });
+      f.adapter.getApplicationServer.mockClear();
+      const reconciliation = reconcileManagedServer(f.db, f.serverId, runtime.lifecycle);
+      if (condition === 'reassigned' || condition === 'reassigned-during-slow-resources') {
+        await expect(reconciliation).rejects.toMatchObject({ code: 'provenance_mismatch' });
+      } else {
+        await expect(reconciliation).resolves.toBe('observed');
+      }
+      expect(f.adapter.getApplicationServer).toHaveBeenCalledTimes(condition === 'running' ? 1 : 2);
+      expect(activity).toHaveBeenCalledTimes(
+        condition === 'stopped' || condition === 'reassigned' ? 1 : 0,
+      );
+      if (condition === 'reassigned-during-slow-resources')
+        expect(observer.terminalProcess).not.toHaveBeenCalled();
+      if (condition === 'stopped') {
+        expect(await f.reservation()).toBeUndefined();
+        expect((await f.server()).intent).toBe('manually_stopped');
+      } else {
+        expect(await f.reservation()).toBeDefined();
+        expect((await f.server()).runtime_state).toBe('running');
+      }
+    },
+  );
   it('retains accepted start reservations through a long offline preboot and does not replay power', async () => {
     for (const action of ['start', 'provision'] as const) {
       const f = await fixture(action, { autoStart: true });

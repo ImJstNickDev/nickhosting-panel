@@ -54,7 +54,7 @@ import {
   createLifecycleProcessor,
   type ExternalStopReceipt,
   type LifecycleOptions,
-  reconcileManagedServer,
+  reconcileManagedServers,
   verifyManagedIdentity,
 } from './lifecycle.js';
 import { minecraftContentAllowsOnline } from './minecraft-content-contracts.js';
@@ -994,6 +994,7 @@ export async function createManagementRuntime(options: ManagementOptions) {
     observeExternalStop: async (
       serverId: string,
       connection: Kysely<Database>,
+      remote?: ApplicationServer,
     ): Promise<ExternalStopReceipt | null> => {
       await verifyObservationHost(serverId, connection);
       const server = await connection
@@ -1012,7 +1013,7 @@ export async function createManagementRuntime(options: ManagementOptions) {
       await verifyManagedIdentity(
         connection,
         server,
-        await adapter.getApplicationServer(server.pterodactyl_id),
+        remote ?? (await adapter.getApplicationServer(server.pterodactyl_id)),
       );
       const before = await containerObserver.terminalProcess(server.pterodactyl_uuid);
       if (!before) return null;
@@ -1260,23 +1261,7 @@ export async function createManagementRuntime(options: ManagementOptions) {
   const process = createLifecycleProcessor(db, lifecycle);
 
   async function reconcile() {
-    const servers = await db
-      .selectFrom('managed_servers')
-      .select(['id'])
-      .where('deleted_at', 'is', null)
-      .where('pterodactyl_id', 'is not', null)
-      .execute();
-    const failures: string[] = [];
-    const deferred: string[] = [];
-    let observed = 0;
-    for (const server of servers) {
-      try {
-        if ((await reconcileManagedServer(db, server.id, lifecycle)) === 'observed') observed++;
-        else deferred.push(server.id);
-      } catch {
-        failures.push(server.id);
-      }
-    }
+    const result = await reconcileManagedServers(db, lifecycle);
     const external = options.reconcileExternal
       ? await options.reconcileExternal(db)
       : await reconcileExternalServices(db, externalOptions);
@@ -1285,7 +1270,7 @@ export async function createManagementRuntime(options: ManagementOptions) {
       .deleteFrom('server_metrics')
       .where('observed_at', '<', new Date(Date.now() - 30 * 86400000))
       .execute();
-    return { observed, deferred, unavailable: failures, external };
+    return { ...result, external };
   }
   /** Streaming transfers must not retain a session/role snapshot. Uploads use
    * their already-pinned lock connection; downloads borrow only for each check. */

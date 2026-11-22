@@ -69,6 +69,17 @@ without an open database transaction. The last accepted observation remains
 available with its original timestamp; an in-flight refresh does not extend its
 freshness or relax resource-admission limits.
 
+The reconciliation worker reads provider metadata for groups of up to 48 managed
+server UUIDs, including their allocations. It captures local revisions before
+requesting the group and verifies each returned identity before reading that
+server's resources. A missing server or mismatched identity retains its last
+accepted observation and its reservations. If the list is malformed or exceeds
+the response size limit, the worker discards it and checks the members of that
+group individually. An Application API rate limit stops further identity
+requests for that pass. External-stop detection can reuse
+the initial identity check, then reads the provider identity again before
+accepting a confirmed stop.
+
 Applying an observation is a short, database-only transaction. It checks that the
 captured server state, lifecycle history and relevant provider/resource bindings
 have not changed while collecting. An operation that started and finished during

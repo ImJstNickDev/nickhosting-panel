@@ -244,6 +244,7 @@ export interface LifecycleOptions {
   observeExternalStop?: (
     serverId: string,
     connection: Kysely<Database>,
+    remote?: ApplicationServer,
   ) => Promise<ExternalStopReceipt | null>;
   /** Fresh host- and current registry/provider-identity-bound physical stopped proof.
    * Recovering a lost stop receipt requires the exact prepared process, not just absence. */
@@ -3811,7 +3812,7 @@ export function createLifecycleProcessor(db: Kysely<Database>, options: Lifecycl
  * timestamps. A lifecycle may begin and finish during provider I/O (ABA); its
  * server revision still changes even when active_operation_id is null again.
  * No history is loaded: only the latest power receipt participates. */
-function reconciliationSnapshot(db: Kysely<Database>, serverId: string) {
+function reconciliationSnapshots(db: Kysely<Database>) {
   return db
     .selectFrom('managed_servers as server')
     .selectAll('server')
@@ -3860,9 +3861,107 @@ function reconciliationSnapshot(db: Kysely<Database>, serverId: string) {
     (select account.xmin::text from provider_accounts account where account.user_id = server.owner_id)
   )::text`.as('revision'),
     )
-    .where('server.id', '=', serverId)
-    .where('server.deleted_at', 'is', null)
-    .executeTakeFirst();
+    .where('server.deleted_at', 'is', null);
+}
+
+function reconciliationSnapshot(db: Kysely<Database>, serverId: string) {
+  return reconciliationSnapshots(db).where('server.id', '=', serverId).executeTakeFirst();
+}
+
+type ReconciliationSnapshot = NonNullable<Awaited<ReturnType<typeof reconciliationSnapshot>>>;
+const reconciliationBatchLifetimeMs = 5000;
+
+async function readReconciliationBatch(
+  db: Kysely<Database>,
+  ids: string[],
+  options: LifecycleOptions,
+) {
+  // Capture local revisions before provider I/O, including when renewing a slow batch.
+  const snapshots = await reconciliationSnapshots(db).where('server.id', 'in', ids).execute();
+  const uuids = snapshots.flatMap((row) => (row.pterodactyl_uuid ? [row.pterodactyl_uuid] : []));
+  // The adapter validates exact UUID membership and rejects duplicate UUIDs or numeric IDs.
+  let remotes: ApplicationServer[];
+  try {
+    remotes = uuids.length ? await options.adapter.getApplicationServers(uuids) : [];
+  } catch (error) {
+    // A malformed member or an oversized list can make the whole page unreadable.
+    // Discard it. A fresh, individually verified GET can still observe a healthy peer.
+    if (error instanceof PterodactylError && error.reason === 'invalid_response') return null;
+    throw error;
+  }
+  return {
+    local: new Map(snapshots.map((row) => [row.id, row])),
+    remote: new Map(remotes.map((row) => [row.uuid, row])),
+  };
+}
+
+async function reconcileBatchMember(
+  db: Kysely<Database>,
+  options: LifecycleOptions,
+  batch: NonNullable<Awaited<ReturnType<typeof readReconciliationBatch>>>,
+  id: string,
+  received: number,
+) {
+  const server = batch.local.get(id);
+  if (!server?.pterodactyl_id) return 'deferred';
+  const remote = server.pterodactyl_uuid && batch.remote.get(server.pterodactyl_uuid);
+  if (!remote) throw new DomainError('provenance_mismatch');
+  await verifyManagedIdentity(db, server, remote);
+  return reconcileVerifiedServer(db, server, remote, options, received);
+}
+
+function applicationRateLimit(error: unknown) {
+  return (
+    error instanceof PterodactylError &&
+    error.scope === 'application' &&
+    error.reason === 'rate_limited'
+  );
+}
+
+/** Fleet observations share only their initial Application read. Client reads stay serial. */
+export async function reconcileManagedServers(db: Kysely<Database>, options: LifecycleOptions) {
+  const servers = await db
+    .selectFrom('managed_servers')
+    .select('id')
+    .where('deleted_at', 'is', null)
+    .where('pterodactyl_id', 'is not', null)
+    .orderBy('id')
+    .execute();
+  const unavailable: string[] = [];
+  const deferred: string[] = [];
+  let observed = 0;
+  let offset = 0;
+  fleet: while (offset < servers.length) {
+    const ids = servers.slice(offset, offset + 48).map((server) => server.id);
+    let batch: Awaited<ReturnType<typeof readReconciliationBatch>>;
+    try {
+      batch = await readReconciliationBatch(db, ids, options);
+    } catch (error) {
+      if (applicationRateLimit(error)) break;
+      unavailable.push(...ids);
+      offset += ids.length;
+      continue;
+    }
+    // A slow resource/backup read must not leave later servers using queued
+    // identities beyond one worker polling interval. Re-batch the remainder.
+    const received = performance.now();
+    for (const id of ids) {
+      try {
+        const outcome = batch
+          ? await reconcileBatchMember(db, options, batch, id, received)
+          : await reconcileManagedServer(db, id, options);
+        if (outcome === 'observed') observed++;
+        else deferred.push(id);
+      } catch (error) {
+        if (!batch && applicationRateLimit(error)) break fleet;
+        unavailable.push(id);
+      }
+      offset++;
+      if (batch && performance.now() - received >= reconciliationBatchLifetimeMs) break;
+    }
+  }
+  for (const server of servers.slice(offset)) unavailable.push(server.id);
+  return { observed, deferred, unavailable };
 }
 
 /** Read reconciliation never imports or changes a remote server. It errs toward retaining capacity. */
@@ -3873,7 +3972,16 @@ export async function reconcileManagedServer(
 ): Promise<'observed' | 'deferred'> {
   const server = await reconciliationSnapshot(db, serverId);
   if (!server?.pterodactyl_id) return 'deferred';
-  const remote = await ownedRemote(db, server, options);
+  return reconcileVerifiedServer(db, server, await ownedRemote(db, server, options), options);
+}
+
+async function reconcileVerifiedServer(
+  db: Kysely<Database>,
+  server: ReconciliationSnapshot,
+  remote: ApplicationServer,
+  options: LifecycleOptions,
+  receivedAt = performance.now(),
+): Promise<'observed' | 'deferred'> {
   const state = ['install_failed', 'reinstall_failed'].includes(remote.status ?? '')
     ? 'failed'
     : installationPending(remote)
@@ -3913,7 +4021,12 @@ export async function reconcileManagedServer(
       .executeTakeFirst();
     if (reserved || (server.intent === 'manually_stopped' && current.current_state !== 'offline')) {
       try {
-        externalStop = await options.observeExternalStop(server.id, db);
+        const recent = performance.now() - receivedAt < reconciliationBatchLifetimeMs;
+        externalStop = await options.observeExternalStop(
+          server.id,
+          db,
+          recent ? remote : undefined,
+        );
       } catch (error) {
         // Missing activity permission/observer evidence is not proof of a stop.
         // Continue conservative state reconciliation without releasing capacity.
