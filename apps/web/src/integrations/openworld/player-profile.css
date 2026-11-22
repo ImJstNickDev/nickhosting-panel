@@ -161,9 +161,6 @@
   .ow-profile-tabs button {
     flex: 1 1 auto;
   }
-  .ow-profile .ow-receipt {
-    flex-wrap: wrap;
-  }
   .ow-people-list .ow-roster-stats {
     margin-inline-start: 50px;
   }
@@ -291,4 +288,68 @@
 }
 .ow-profile {
   container-type: inline-size;
+}
+
+.ow-action-toast {
+  position: fixed;
+  z-index: 40;
+  inset-inline: 1rem;
+  inset-block-end: max(1.5rem, env(safe-area-inset-bottom));
+  margin-inline: auto;
+  box-sizing: border-box;
+  width: max-content;
+  max-width: min(25rem, calc(100% - 2rem));
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.15rem 0.6rem;
+  padding: 0.5rem 0.5rem 0.5rem 0.8rem;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  box-shadow: 0 4px 20px #00000012;
+  font-size: 0.875rem;
+  line-height: 1.35;
+}
+.ow-action-toast > svg {
+  color: #24684e;
+}
+.ow-action-toast [role="status"] {
+  overflow-wrap: anywhere;
+}
+.ow-action-toast button {
+  background: transparent;
+  border: 0;
+  font: inherit;
+  min-height: 2rem;
+}
+.ow-action-toast-close {
+  grid-column: 3;
+  grid-row: 1;
+  display: grid;
+  place-items: center;
+  width: 2rem;
+  height: 2rem;
+  padding: 0;
+  color: var(--muted);
+}
+.ow-action-toast-gallery {
+  grid-column: 2;
+  justify-self: start;
+  padding: 0.2rem 0;
+  color: var(--blue);
+  text-decoration: underline;
+  text-underline-offset: 0.18em;
+}
+@media (prefers-reduced-motion: no-preference) {
+  .ow-action-toast {
+    animation: ow-toast-arrive 150ms ease-out;
+  }
+  @keyframes ow-toast-arrive {
+    from {
+      opacity: 0;
+      transform: translateY(4px);
+    }
+  }
 }

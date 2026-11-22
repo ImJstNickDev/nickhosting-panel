@@ -11,7 +11,7 @@ import { playersBase, usePlayerResource } from './player-workspace.js';
 import { key, type ServerView } from './telemetry.js';
 
 type Kind = OpenworldPlayerAction['kind'];
-export type ActionReceipt = { kind: Kind; playerName: string };
+export type ActionReceipt = { requestId: string; kind: Kind; playerName: string };
 type ActionTarget = { player: OpenworldActionPlayer; processRef: string };
 type Props = {
   server: ServerView;
@@ -214,7 +214,7 @@ function ActionEditor({
         throw new ApiError('operation_uncertain', 'errors.operation_uncertain');
       setPrepared(null);
       setMessage('');
-      onAccepted({ kind, playerName: player.name });
+      onAccepted({ requestId, kind, playerName: player.name });
     } catch (e) {
       setError(
         e instanceof ApiError && !(e.code === 'internal_error' && e.status >= 500)

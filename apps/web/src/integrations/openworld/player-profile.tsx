@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, useState } from 'react';
+import { useCallback, useEffect, useId, useRef, useState } from 'react';
 import { Link } from 'react-router';
 import { z } from 'zod';
 import type { OpenworldSavedPlayerDetail } from '../../../../../games/openworld/src/offline-players.js';
@@ -8,6 +8,7 @@ import { ApiError } from '../../api/client.js';
 import { useT } from '../../app/i18n.js';
 import { ErrorNotice, Loading, Select } from '../../components/ui.js';
 import { mapHref } from './map-players.js';
+import { PlayerActionToast } from './player-action-toast.js';
 import { type ActionReceipt, PlayerActions } from './player-actions.js';
 import { PlayerGallery } from './player-gallery.js';
 import {
@@ -86,6 +87,7 @@ export function PlayerProfile({
   const [requested, setTab] = useState<Pane>('character');
   const [preferredSource, setSource] = useState<'live' | 'saved'>('live');
   const [receipt, setReceipt] = useState<ActionReceipt | null>(null);
+  const dismissReceipt = useCallback(() => setReceipt(null), []);
   const session = selected.connection;
   const live = !!connected && !!session;
   const account = inspect ? selected.account || (connected && verifiedAccount(connected)) : null;
@@ -257,33 +259,6 @@ export function PlayerProfile({
             ))}
           </fieldset>
         )}
-        {receipt && (
-          <div role="status" className="ow-receipt">
-            <span>
-              {t(key(receipt.kind === 'screenshot' ? 'screenshotRequested' : 'actionAccepted'), {
-                name: receipt.playerName,
-                action: t(key(`action.${receipt.kind}`)),
-              })}
-            </span>
-            {receipt.kind === 'screenshot' && screenshots && (
-              <button
-                className="secondary"
-                type="button"
-                onClick={canShowShots ? () => setTab('gallery') : onServerGallery}
-              >
-                {t(key('openGallery'))}
-              </button>
-            )}
-            <button
-              type="button"
-              className="ow-dismiss"
-              aria-label={t('web.close')}
-              onClick={() => setReceipt(null)}
-            >
-              ×
-            </button>
-          </div>
-        )}
         {resourcePane && (
           <div className="ow-source-row">
             {live && account && (
@@ -334,6 +309,13 @@ export function PlayerProfile({
             content()
           )}
         </div>
+        <PlayerActionToast
+          receipt={receipt}
+          onDismiss={dismissReceipt}
+          onOpenGallery={
+            screenshots ? (canShowShots ? () => setTab('gallery') : onServerGallery) : undefined
+          }
+        />
       </section>
     </>
   );

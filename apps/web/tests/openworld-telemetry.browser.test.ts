@@ -690,6 +690,7 @@ it('lets a moderator act on a pinned live session without reading player details
   }[] = [];
   try {
     const paths = await serve(page);
+    await page.clock.install();
     await page.route('**/openworld/players/actions', (r) => {
       const body = r.request().postDataJSON();
       sent.push(body);
@@ -701,11 +702,28 @@ it('lets a moderator act on a pinned live session without reading player details
     const profile = page.locator('section.ow-profile');
     await check(profile.getByRole('button', { name: 'Inventory' })).toHaveCount(0);
     await check(profile.getByRole('button', { name: 'Request screenshot' })).toHaveCount(0);
-    await profile.getByRole('button', { name: 'Send message' }).click();
+    const sendMessage = profile.getByRole('button', { name: 'Send message' });
+    const commandTop = () => sendMessage.evaluate((el) => el.getBoundingClientRect().top + scrollY);
+    const initialTop = await commandTop();
+    const toast = page.locator('.ow-action-toast');
+    await sendMessage.click();
     const editor = page.getByRole('dialog');
     await editor.getByLabel('Private message').fill('Welcome back');
     await editor.getByRole('button', { name: 'Send message' }).click();
-    await check(page.getByRole('status')).toContainText('Request accepted for Solstice');
+    await check(toast.getByRole('status')).toContainText('Request accepted for Solstice');
+    await check(toast).toHaveCSS('position', 'fixed');
+    expect(await toast.evaluate((el) => el.getBoundingClientRect().width)).toBeLessThan(480);
+    expect(await commandTop()).toBeCloseTo(initialTop, 0);
+    expect(await toast.evaluate((el) => el.contains(document.activeElement))).toBe(false);
+    await page.screenshot({
+      path: `${shots}/player-action-notice-desktop.png`,
+      animations: 'disabled',
+    });
+    await toast.hover();
+    await page.clock.fastForward(7000);
+    await check(toast).toBeVisible();
+    await page.mouse.move(0, 0);
+    await page.clock.fastForward(3500);
     expect(sent).toHaveLength(1);
     expect(sent[0]).toMatchObject({
       processRef: 'a'.repeat(64),
@@ -724,7 +742,11 @@ it('lets a moderator act on a pinned live session without reading player details
     expect(sent).toHaveLength(1);
     await editor.getByRole('button', { name: 'Continue' }).click();
     await editor.getByRole('button', { name: 'Kick player' }).click();
-    await check(profile.getByRole('status')).toContainText('Kick player');
+    await check(toast.getByRole('status')).toContainText('Kick player');
+    await page.clock.fastForward(3500);
+    await check(toast).toBeVisible();
+    await page.clock.fastForward(3100);
+    await check(toast).toHaveCount(0);
     expect(sent[1]?.action).toEqual({
       kind: 'kick',
       reason: 'Please reconnect after the server update.',
@@ -784,6 +806,7 @@ it('validates teleport coordinates and prevents repeating an uncertain write', a
     await check(editor.getByRole('button', { name: 'Teletrasporta' })).toBeEnabled();
     await editor.getByRole('button', { name: 'Teletrasporta' }).click();
     await check(editor.getByRole('button', { name: 'Teletrasporta' })).toBeDisabled();
+    await check(page.locator('.ow-action-toast')).toHaveCount(0);
     expect(sent).toHaveLength(2);
     expect(sent[0]).toMatchObject({
       action: {
@@ -889,6 +912,7 @@ it('opens linked history using the verified account id and keeps screenshot perm
     await page.getByRole('button', { name: 'Last save', exact: true }).click();
     await check(page.locator('section.ow-profile')).toContainText('No save found for this UUID.');
     await check(page.getByRole('button', { name: 'Send message', exact: true })).toBeDisabled();
+    await page.clock.install();
     await page.goto(`${url}telemetry-fixture?section=players&reader&screenshots`);
     const files = Array.from({ length: 9 }, (_, i) => ({
       name: `capture-${i}.png`,
@@ -924,9 +948,33 @@ it('opens linked history using the verified account id and keeps screenshot perm
     await page.getByRole('link', { name: /Solstice/ }).click();
     const profile = page.locator('section.ow-profile');
     await check(profile.getByRole('button', { name: 'Kick player' })).toHaveCount(0);
-    await profile.getByRole('button', { name: 'Request screenshot' }).click();
-    await page.getByRole('dialog').getByRole('button', { name: 'Request screenshot' }).click();
-    await page.getByRole('button', { name: 'Open screenshots' }).click();
+    const toast = page.locator('.ow-action-toast');
+    const requestScreenshot = async () => {
+      await profile.getByRole('button', { name: 'Request screenshot' }).click();
+      await page.getByRole('dialog').getByRole('button', { name: 'Request screenshot' }).click();
+      await check(toast.getByRole('status')).toContainText('Solstice');
+      await page.mouse.move(0, 0);
+    };
+    await requestScreenshot();
+    await page.clock.fastForward(7500);
+    await check(toast).toBeInViewport({ ratio: 1 });
+    await fits(page);
+    await page.screenshot({
+      path: `${shots}/player-action-notice-mobile.png`,
+      animations: 'disabled',
+    });
+    await page.clock.fastForward(3200);
+    await check(toast).toHaveCount(0);
+    await requestScreenshot();
+    await toast.getByRole('button', { name: 'Close', exact: true }).click();
+    await check(toast).toHaveCount(0);
+    await requestScreenshot();
+    const galleryShortcut = toast.getByRole('button', { name: 'Open screenshots' });
+    await galleryShortcut.focus();
+    await page.clock.fastForward(11000);
+    await check(galleryShortcut).toBeFocused();
+    await galleryShortcut.click();
+    await check(toast).toHaveCount(0);
     await check(page.getByRole('button', { name: /capture-7/ })).toBeVisible();
     await check(page.getByRole('button', { name: /capture-8/ })).toHaveCount(0);
     expect(imgs).toHaveLength(0);
@@ -940,7 +988,7 @@ it('opens linked history using the verified account id and keeps screenshot perm
       mtimeMs: String(Date.parse(instant)),
       bytes: '1200000',
     });
-    expect(shotsRequested).toBe(1);
+    expect(shotsRequested).toBe(3);
     await fits(page);
   } finally {
     await context.close();
