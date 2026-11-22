@@ -161,7 +161,7 @@ describe('signed backup outcomes', () => {
           completion({ server: { ...event.server, providerId: event.server.providerId + 100 } }),
         )
       ).status,
-    ).toBe(409);
+    ).toBe(410);
     const value = completion();
     expect((await send(value)).status).toBe(200);
     expect((await send({ ...value, backup: { ...value.backup, bytes: 999 } })).status).toBe(409);

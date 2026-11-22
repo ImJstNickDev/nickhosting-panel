@@ -1,6 +1,6 @@
 # NickHosting Blueprint bridge
 
-Version **1.9.0**, targeting Pterodactyl **1.15.1** and Blueprint
+Version **1.10.0**, targeting Pterodactyl **1.15.1** and Blueprint
 **beta-2026-08**. Native PHP contracts retain compatibility with Panel **1.11.11**
 for coordinated rollback; the framework target and live deployment evidence are
 separate from that library-level compatibility. The monorepo is the source of truth; `.blueprint/dev` is optional
@@ -430,7 +430,7 @@ uses Laravel fakes. It exercises transaction rollback, idempotency, encryption,
 authorization, identity invalidation, delivery retry and configuration transforms.
 It is not a MySQL lock-concurrency or real HTTP middleware test. Packaging uses
 an explicit file allowlist, excludes secrets/tests/docs, rejects symlinks and
-existing output, and defaults to ignored `build/blueprint/1.9.0/nickhosting.blueprint`.
+existing output, and defaults to ignored `build/blueprint/1.10.0/nickhosting.blueprint`.
 
 The [extension-only update procedure](UPDATE-INSTALLED.md) supports the reviewed
 1.5.0 → 1.6.0 and 1.6.0 → 1.6.1 transitions. Its default is a read-only plan;
@@ -609,4 +609,29 @@ capabilities route keeps the 1.8.2 property set for legacy readers. Both routes
 report the installed extension version. Older providers ignore the requested
 query option and return their existing capabilities. Use the native
 Blueprint package installation and retain the previous reviewed artifact for
-rollback. This release reuses the existing extension schema and dependencies.
+rollback. The 1.9.0 inventory endpoints use the existing extension schema.
+
+### Scoped feed health and Gateway topology (1.10.0)
+
+The bridge keeps a refused callback in the outbox for the Owner to inspect. A
+terminal refusal must identify the exact instance and event and have the
+`binding_rejected` disposition. Transport failures, an unlinked server still
+being provisioned and ordinary conflicts are retried. New consumers can request
+health for their linked server UUIDs. A healthy result is usable only with a
+matching local revision, binding and fresh snapshot. Earlier clients continue
+to receive the instance-wide pending count.
+
+Gateway topology tracking adds a database revision for changes to nodes, servers
+and allocations. A new snapshot and its revision are captured together. An
+authenticated reader can wait for a changed revision and recover through a fresh
+snapshot. Installing the extension requires reviewing its trigger migration on
+the provider database. If the required coverage is unavailable, the Gateway uses
+its existing inventory path. During rollout, apply the NickPanel migrations
+091 through 094 before switching NickPanel readers to the new protocol.
+
+During a downgrade to the previous package, run the installed 1.10.0 private
+`gateway-topology.php remove` hook from the Panel environment first. The hook
+disables the revision and removes only triggers whose stored and installed
+definitions match. Retain both databases and the quarantined delivery history.
+Restoring the previous consumers returns them to full inventory reads. Reinstalling
+1.10.0 enables a new topology epoch.

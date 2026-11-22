@@ -6,7 +6,12 @@ import {
   DomainError,
   type SecretCodec,
 } from '@nickhosting/core';
-import { type createDatabase, getSecret, getSettings } from '@nickhosting/database';
+import {
+  type createDatabase,
+  getSecret,
+  getSettings,
+  notifyGatewayChange,
+} from '@nickhosting/database';
 import {
   gatewayObservationSchema,
   gatewayPrivateStateMaxBytes,
@@ -14,7 +19,7 @@ import {
   gatewayWakeRequestSchema,
 } from '@nickhosting/game-sdk';
 import { gatewayReachabilityProofSchema } from '@nickhosting/gateway-safety';
-import type { GatewayInventoryServer } from '@nickhosting/pterodactyl-adapter';
+import { type GatewayInventoryServer, PterodactylError } from '@nickhosting/pterodactyl-adapter';
 import {
   authorizeServer,
   gatewayConfiguration,
@@ -36,10 +41,16 @@ import {
 } from '@nickhosting/server-management';
 import type { Context, Hono } from 'hono';
 import { bodyLimit } from 'hono/body-limit';
+import { sql } from 'kysely';
 import { z } from 'zod';
+import { observationIdentityRevision } from '../../../packages/server-management/src/managed-identity-receipts.js';
 import { resolveSatisfactoryApi } from '../../../packages/server-management/src/satisfactory-api.js';
 import type { Variables } from './app.js';
 import { createGatewayInventoryReader, gatewayEvidence } from './gateway-evidence.js';
+import {
+  createGatewayIdentityReceipts,
+  type GatewayIdentityReceipt,
+} from './gateway-identity-receipts.js';
 import {
   indexGatewayRemotes,
   readGatewayClaims,
@@ -142,16 +153,39 @@ export function registerGatewayRoutes(
   registerGatewaySleepRoutes(app, { ...options, authenticate: authenticateGateway });
   registerSatisfactoryOfflineApi(app, { ...options, route });
   registerSatisfactoryConsoleApi(app, { ...options, route });
-  const readInventory = createGatewayInventoryReader();
+  const readInventory = createGatewayInventoryReader(async () => {
+    identityReceipts.clear();
+    await notifyGatewayChange(db);
+  });
+  const identityReceipts = createGatewayIdentityReceipts();
+  const receiptBinding = (management: ManagementRuntime, c: Context) =>
+    hash(
+      JSON.stringify([management.consoleProviderBinding, c.req.header('authorization')]),
+    ).toString('hex');
   const prefix = '/internal/gateway/:gatewayId';
   app.get(`${prefix}/evidence`, async (c) => {
+    const management = await options.management().catch((error) => {
+      identityReceipts.clear();
+      throw error;
+    });
+    const attempt = identityReceipts.begin(receiptBinding(management, c));
     const evidence = await gatewayEvidence(
       db,
       env,
-      await options.management(),
+      management,
       safetyServer,
       readInventory,
-    );
+      attempt.publish,
+    ).catch((error) => {
+      attempt.discard();
+      if (
+        error instanceof PterodactylError &&
+        (error.reason === 'permission_denied' || error.upstreamStatus === 409)
+      ) {
+        throw new DomainError('provenance_mismatch');
+      }
+      throw error;
+    });
     c.header('Cache-Control', 'no-store');
     return c.json({
       ...evidence,
@@ -273,62 +307,117 @@ export function registerGatewayRoutes(
     const validationCompleted = performance.now();
     const management = await options.management();
     const configured = performance.now();
+    const binding = receiptBinding(management, c);
+    identityReceipts.bind(binding);
+    const candidate = management.consoleProviderBinding
+      ? identityReceipts.lookup(selected.serverId, binding)
+      : undefined;
     const managed = await db
       .selectFrom('managed_servers as server')
       .innerJoin('runtime_egg_mappings as mapping', 'mapping.id', 'server.mapping_id')
-      .select('mapping.game_id')
+      .select([
+        'mapping.game_id',
+        (candidate
+          ? observationIdentityRevision(selected.serverId, 'openworld')
+          : sql<null>`null`
+        ).as('identity_revision'),
+      ])
       .where('server.id', '=', selected.serverId)
       .where('server.deleted_at', 'is', null)
       .executeTakeFirstOrThrow();
     const providerReady =
       selected.mode === 'online' &&
       trustedGameModules.get(managed.game_id)?.readinessSource === 'provider_running';
-    const started = await (providerReady && management.lifecycle.observeProviderProcessStart
-      ? management.lifecycle.observeProviderProcessStart(selected.serverId, db)
-      : management.lifecycle.observeProcessStart(selected.serverId, db));
-    const processVerified = performance.now();
-    const result = await reportGatewayObservation(
-      db,
-      selected.serverId,
-      {
-        generation: value.generation,
-        wakeJobId: value.wakeJobId ?? null,
-        observedAt: value.observedAt,
-        processStartedAt: started,
-        ready: value.ready,
-        ...(value.idle === undefined ? {} : { idle: value.idle }),
-        ...(value.playerCount === undefined ? {} : { playerCount: value.playerCount }),
-        activeSessions: value.activeSessions,
-        ...(value.quiescenceUntil ? { quiescenceUntil: value.quiescenceUntil } : {}),
-      },
-      {
-        env,
-        validateObservation: async (tx) => {
-          // The provider probe above may wait. Serialize this final membership
-          // check with route changes so one omitted/new role cannot claim readiness.
-          const current = await tx
-            .selectFrom('gateway_routes')
-            .select(['id', 'revision', 'lease_expires_at'])
-            .where('gateway_id', '=', snapshot.gatewayId)
-            .where('server_id', '=', selected.serverId)
-            .where('enabled', '=', true)
-            .execute();
-          if (!matches(current)) throw new DomainError('conflict');
-          if (value.quiescenceUntil) {
-            const deadline = Date.parse(value.quiescenceUntil);
-            if (
-              deadline <= Date.now() ||
-              deadline > Date.parse(value.observedAt) + 30000 ||
-              current.some(
-                (route) =>
-                  !route.lease_expires_at || deadline > route.lease_expires_at.getTime() - 1000,
-              )
-            )
-              throw new DomainError('conflict');
-          }
+    const receipt =
+      candidate &&
+      candidate.gatewayId === snapshot.gatewayId &&
+      candidate.snapshotRevision === snapshot.revision &&
+      candidate.revision === managed.identity_revision &&
+      candidate.observedAt <= Date.parse(value.observedAt)
+        ? candidate
+        : undefined;
+    const receiptChanged = new Error('gateway inventory receipt changed');
+    let processVerified = configured;
+    const observe = async (runtime: ManagementRuntime, proof?: GatewayIdentityReceipt) => {
+      const started = await (providerReady && runtime.lifecycle.observeProviderProcessStart
+        ? runtime.lifecycle.observeProviderProcessStart(selected.serverId, db)
+        : managed.game_id === 'openworld'
+          ? runtime.lifecycle.observeProcessStart(selected.serverId, db, {
+              verifiedUuid: proof?.providerUuid,
+            })
+          : runtime.lifecycle.observeProcessStart(selected.serverId, db));
+      processVerified = performance.now();
+      return reportGatewayObservation(
+        db,
+        selected.serverId,
+        {
+          generation: value.generation,
+          wakeJobId: value.wakeJobId ?? null,
+          observedAt: value.observedAt,
+          processStartedAt: started,
+          ready: value.ready,
+          ...(value.idle === undefined ? {} : { idle: value.idle }),
+          ...(value.playerCount === undefined ? {} : { playerCount: value.playerCount }),
+          activeSessions: value.activeSessions,
+          ...(value.quiescenceUntil ? { quiescenceUntil: value.quiescenceUntil } : {}),
         },
-      },
-    );
+        {
+          env,
+          validateLiveReadiness: () => {
+            if (proof && identityReceipts.lookup(selected.serverId, binding) !== proof)
+              throw receiptChanged;
+          },
+          validateObservation: async (tx) => {
+            // The provider probe above may wait. Serialize this final membership
+            // check with route changes so one omitted/new role cannot claim readiness.
+            const current = await tx
+              .selectFrom('gateway_routes')
+              .select(['id', 'revision', 'lease_expires_at'])
+              .where('gateway_id', '=', snapshot.gatewayId)
+              .where('server_id', '=', selected.serverId)
+              .where('enabled', '=', true)
+              .execute();
+            if (!matches(current)) throw new DomainError('conflict');
+            if (proof) {
+              const currentIdentity = await tx
+                .selectFrom('gateway_control_state')
+                .select([
+                  'revision',
+                  observationIdentityRevision(selected.serverId, 'openworld').as(
+                    'identity_revision',
+                  ),
+                ])
+                .where('gateway_id', '=', snapshot.gatewayId)
+                .executeTakeFirst();
+              if (
+                identityReceipts.lookup(selected.serverId, binding) !== proof ||
+                currentIdentity?.identity_revision !== proof.revision ||
+                Number(currentIdentity.revision) !== proof.snapshotRevision
+              )
+                throw receiptChanged;
+            }
+            if (value.quiescenceUntil) {
+              const deadline = Date.parse(value.quiescenceUntil);
+              if (
+                deadline <= Date.now() ||
+                deadline > Date.parse(value.observedAt) + 30000 ||
+                current.some(
+                  (route) =>
+                    !route.lease_expires_at || deadline > route.lease_expires_at.getTime() - 1000,
+                )
+              )
+                throw new DomainError('conflict');
+            }
+          },
+        },
+      );
+    };
+    const result = await observe(management, receipt).catch(async (error) => {
+      if (error !== receiptChanged) throw error;
+      // The transaction rolled back. Re-resolve provider credentials and repeat both
+      // the Application check and real process observation outside the resource lock.
+      return observe(await options.management());
+    });
     // A snapshot-to-result change is diagnostic, not a second state authority.
     // Regular identical idle/readiness samples deliberately emit no log records.
     if (result.state !== selected.mode) {

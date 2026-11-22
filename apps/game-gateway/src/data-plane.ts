@@ -22,6 +22,7 @@ import { GatewaySafetyError } from '@nickhosting/gateway-safety';
 import { NetworkObservationError } from '@nickhosting/pterodactyl-adapter';
 import { z } from 'zod';
 import {
+  GatewayEvidenceRejectedError,
   GatewayProviderRateLimitedError,
   GatewayRouteRevisionStaleError,
 } from './control-client.js';
@@ -1713,8 +1714,16 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
         }
       }
     })()
-      .catch((error: unknown) => {
+      .catch(async (error: unknown) => {
         controlAvailable = false;
+        if (error instanceof GatewayEvidenceRejectedError) {
+          // Retain the monotonic revision fence while closing already accepted traffic.
+          const revokedAt = new Date(now()).toISOString();
+          if (snapshot) snapshot = { ...snapshot, expiresAt: revokedAt };
+          if (candidateSnapshot) candidateSnapshot = { ...candidateSnapshot, expiresAt: revokedAt };
+          syncStartupWatches();
+          await expire();
+        }
         if (error instanceof GatewayProviderRateLimitedError) deferProvider(error);
         counters.snapshotErrors++;
         options.logger?.log('warn', 'gateway.snapshot_unavailable', {
@@ -2074,7 +2083,60 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
       // Expiring idle windows must not queue behind unrelated slow probes.
       // Non-due servers keep their stable snapshot order; effects stay serialized.
       const orderedServers = [...servers.values()].sort((a, b) => dueAt(a) - dueAt(b));
-      for (const routes of orderedServers) {
+      // A running-provider route already has independent listener safety. Overlap only
+      // opt-in, read-only status probes on independent nodes. Neither certificate
+      // writes, role dependencies, quiescence nor lifecycle reports are reordered.
+      const prepared = new Map<
+        string,
+        {
+          observedAt: number;
+          work: Promise<{ sample: GatewayProtocolObservation } | { error: unknown }>;
+        }
+      >();
+      const pendingNodes = new Set<string>();
+      function prepareStatus(routes: GatewayRoute[] | undefined) {
+        const route = routes?.[0];
+        if (
+          !route ||
+          routes?.length !== 1 ||
+          route.mode !== 'online' ||
+          prepared.has(route.id) ||
+          pendingNodes.has(route.nodeId) ||
+          stopping ||
+          providerRetryAt > now() ||
+          !leased() ||
+          !candidates ||
+          observationAuthority()?.revision !== candidates.revision ||
+          observationEpochs.get(route.serverId) !== epochs.get(route.serverId) ||
+          Date.parse(candidates.expiresAt) <= now()
+        )
+          return;
+        const listener = listeners.get(route.id);
+        const handler = protocol(route);
+        if (
+          !listener?.backendReady ||
+          listener.statusOnly ||
+          !isDeepStrictEqual(listener.route, route) ||
+          handler?.readinessSource !== 'provider_running' ||
+          !handler.readOnlyStatusProbe ||
+          !handler.observe
+        )
+          return;
+        const observe = handler.observe.bind(handler);
+        pendingNodes.add(route.nodeId);
+        prepared.set(route.id, {
+          observedAt: now(),
+          work: bounded((signal) => observe({ route, signal }))
+            .then(
+              (sample) => ({ sample }),
+              (error: unknown) => ({ error }),
+            )
+            .finally(() => pendingNodes.delete(route.nodeId)),
+        });
+      }
+      for (const [index, routes] of orderedServers.entries()) {
+        for (let ahead = index; ahead < Math.min(orderedServers.length, index + 4); ahead++)
+          prepareStatus(orderedServers[ahead]);
         routes.sort(
           (a, b) => validationPriority(a) - validationPriority(b) || a.id.localeCompare(b.id),
         );
@@ -2111,7 +2173,9 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
         let ready = true;
         let idle = true;
         let readinessUnknown = false;
-        const observedAt = new Date(now()).toISOString();
+        const preparedStatus = prepared.get(anchor.id);
+        prepared.delete(anchor.id);
+        const observedAt = new Date(preparedStatus?.observedAt ?? now()).toISOString();
         if (anchor.sleepEligibleAt && Date.parse(anchor.sleepEligibleAt) <= Date.parse(observedAt))
           sampledIdleDeadlines.set(
             anchor.serverId,
@@ -2141,12 +2205,34 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
               async (signal) => {
                 if (providerOnline) {
                   probeStage = 'idle';
-                  const sample = handler.observe
-                    ? await handler.observe(observationContext(route, signal))
-                    : {
-                        ...(await handler.probeReadiness(observationContext(route, signal))),
-                        idle: false,
-                      };
+                  let prefetched: GatewayProtocolObservation | undefined;
+                  if (
+                    preparedStatus &&
+                    now() - preparedStatus.observedAt <= policy.probeTimeoutMs
+                  ) {
+                    const result = await preparedStatus.work;
+                    signal.throwIfAborted();
+                    const current = listeners.get(route.id);
+                    if (
+                      !current?.backendReady ||
+                      current.statusOnly ||
+                      !leased() ||
+                      !isDeepStrictEqual(current.route, route)
+                    )
+                      throw new DomainError('integration_unavailable');
+                    if (now() - preparedStatus.observedAt > policy.probeTimeoutMs)
+                      throw new DomainError('integration_unavailable');
+                    if ('error' in result) throw result.error;
+                    prefetched = result.sample;
+                  }
+                  const sample =
+                    prefetched ??
+                    (handler.observe
+                      ? await handler.observe(observationContext(route, signal))
+                      : {
+                          ...(await handler.probeReadiness(observationContext(route, signal))),
+                          idle: false,
+                        });
                   return {
                     ready: true,
                     coherent: true,

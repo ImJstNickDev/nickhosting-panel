@@ -68,7 +68,11 @@ export type {
 export type { GatewayInventoryServer } from './gateway-inventory.js';
 export * from './network-observer.js';
 export { supportsStopConfirmation } from './power.js';
-export { type ProviderReadCaller, withProviderReadCaller } from './provider-read-attribution.js';
+export {
+  assertProviderReadActive,
+  type ProviderReadCaller,
+  withProviderReadCaller,
+} from './provider-read-attribution.js';
 export type { TransferOptions } from './transfer-guard.js';
 export type { CredentialScope, RemoteOutcome } from './transport.js';
 export { createTransportCoordinator, PterodactylError, relativePath } from './transport.js';

@@ -34,6 +34,7 @@ $validator->setPresenceVerifier($presence);
 Request::macro('validate', function (array $rules) use ($validator) { return $validator->make($this->all(), $rules)->validate(); });
 \Laravel\Sanctum\Sanctum::usePersonalAccessTokenModel(\Pterodactyl\Models\ApiKey::class);
 $schemaMigration->up();
+$quarantineMigration->up();
 $backupMigration->up();
 $fileOperationMigration->up();
 DB::table('nickhosting_file_operations')->insert(['operation_id'=>'12345678-1234-4234-8234-000000000000',
@@ -172,6 +173,44 @@ $http->fake(fn () => Illuminate\Support\Facades\Http::response('',204));
 check(DB::table('nickhosting_outbox')->whereNull('delivered_at')->count()===0, 'successful retry acknowledges durable delivery');
 $health=$controller->health(req([],'GET'),$instance)->getData(true);
 check($health['pendingEvents']===0 && $health['lastDeliveredAt']!==null,'health reports delivery recovery');
+$sample = [
+    'instance_id'=>$instance, 'server_uuid'=>$userUuid, 'created_at'=>now(), 'updated_at'=>now(),
+    'attempts'=>3400, 'available_at'=>now()->subSecond(),
+];
+$terminal = (string) Illuminate\Support\Str::uuid();
+$uncorrelated = (string) Illuminate\Support\Str::uuid();
+$ambiguous = (string) Illuminate\Support\Str::uuid();
+$testEvents = [$terminal, $uncorrelated, $ambiguous];
+foreach ($testEvents as $id) {
+    DB::table('nickhosting_outbox')->insert($sample+['id'=>$id, 'payload'=>json_encode(['eventId'=>$id])]);
+}
+$attempts = [];
+$http = new Illuminate\Http\Client\Factory();
+Illuminate\Support\Facades\Http::swap($http);
+$http->fake(function ($request) use ($terminal, $uncorrelated, $instance, &$attempts) {
+    $id = $request->header('X-NickHosting-Event-Id')[0];
+    $attempts[] = $id;
+    return Illuminate\Support\Facades\Http::response(
+        ['received'=>false, 'disposition'=>'binding_rejected', 'instanceId'=>$instance,
+        'eventId'=>$id === $uncorrelated ? $terminal : $id], $id === $terminal || $id === $uncorrelated ? 410 : 409);
+});
+$delivery = new Pterodactyl\BlueprintFramework\Extensions\nickhosting\Jobs\DeliverChanges();
+$delivery->handle();
+$quarantine = DB::table('nickhosting_outbox')->whereNotNull('quarantined_at')->first();
+check($quarantine && $quarantine->id === $terminal && $quarantine->attempts === 3401 && $quarantine->delivered_at === null,
+    'a correlated terminal rejection durably quarantines the original receipt without acknowledgment');
+DB::table('nickhosting_outbox')->whereIn('id',$testEvents)->update(['available_at'=>now()->subSecond()]);
+$delivery->handle();
+check(count($attempts)===5 && count(array_keys($attempts,$terminal,true))===1,
+    'the next scheduler tick retries ambiguous 409 and uncorrelated 410 only');
+$legacy=$controller->health(req([], 'GET'),$instance)->getData(true);
+$scoped=$controller->health(req(['scopes'=>$uuid.','.$userUuid], 'GET'),$instance)->getData(true);
+$link=DB::table('nickhosting_servers')->where('uuid',$uuid)->first();
+check(!isset($legacy['scopes']) && $legacy['pendingEvents']===3, 'legacy health retains its global outbox fence');
+check($scoped['scopes'] === [['providerUuid'=>$uuid, 'revision'=>(int)$link->revision,
+    'ownerId'=>(int)$link->owner_id,'valid'=>(bool)$link->valid,'pending'=>false]],'only a linked scope supplies the current revision, validity and pending state');
+denied(fn()=>$controller->health(req(['scopes'=>$uuid.','.$uuid], 'GET'),$instance),422,'duplicate scoped health request rejected');
+DB::table('nickhosting_outbox')->whereIn('id',$testEvents)->delete();
 $configuration = "<?php return ['providers' => [\n        Pterodactyl\\Providers\\AppServiceProvider::class,\n    ]];\n";
 $registered = nickhostingProviderConfig($configuration, false);
 check(str_contains($registered, 'nickhosting-provider-begin'), 'provider registration added');
@@ -268,13 +307,14 @@ $renderRequest = Request::create('/'); $renderRequest->setLaravelSession($sessio
 $errors = new Illuminate\Support\ViewErrorBag();
 $operational = $settings->operational(); $operationalDefinitions = $settingsClass::OPERATIONAL;
 $origin = 'https://review.example'; $root = '/admin/extensions/nickhosting';
-$instances = collect([['callback'=>'https://review.example/v1/events','allowed'=>true,'pending'=>2,'lastDelivered'=>null]]);
+$instances = collect([['callback'=>'https://review.example/v1/events','allowed'=>true,'pending'=>2,'quarantined'=>1,'lastRejectedServer'=>$uuid,'lastRejectedEvent'=>$terminal,'lastDelivered'=>null]]);
 $__env = $views;
 foreach (['en','it'] as $locale) {
     $app->setLocale($locale);
     ob_start(); eval('?>' . $compiler->compileString($settingsView)); $html=ob_get_clean();
     check(str_contains($html, 'name="_token"') && str_contains($html, 'value="PATCH"'), 'Blade CSRF and method fields ' . $locale);
     check(str_contains($html, $locale==='it' ? 'Ultima consegna confermata' : 'Last acknowledged delivery'), 'Blade status localized ' . $locale);
+    check(str_contains($html, $terminal) && str_contains($html, $locale==='it' ? 'Ultimo server rifiutato' : 'Last rejected server'), 'Blade shows rejected scope and event ' . $locale);
     check(str_contains($html, 'https://review.example'), 'Blade origin visible ' . $locale);
     check(substr_count($html, '<li>') === 12 && str_contains($html, $locale==='it' ? 'più upload' : 'multiple uploads'), 'Blade concise feature bullets ' . $locale);
     check(str_contains($html, 'name="downloadBatchLimit"') && str_contains($html, 'value="2500"') && str_contains($html, $locale === 'it' ? 'Durata URL firmati' : 'Signed URL lifetime'), 'Blade operational settings localized ' . $locale);

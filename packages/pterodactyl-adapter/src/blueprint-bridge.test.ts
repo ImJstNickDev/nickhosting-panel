@@ -143,6 +143,40 @@ describe('Blueprint administrative transport', () => {
       ).rejects.toMatchObject({ reason: 'invalid_response' });
     }
   });
+  it('accepts legacy health and rejects unrequested, duplicate or malformed scope proofs', async () => {
+    const id = event.server.providerUuid;
+    const legacy = {
+      schemaVersion: 1,
+      instanceId,
+      pendingEvents: 1,
+      lastDeliveredAt: null,
+      checkedAt: event.occurredAt,
+    };
+    const proof = { providerUuid: id, ownerId: 7, revision: 2, valid: true, pending: false };
+    const fetcher = vi.fn<typeof fetch>(async () => Response.json(legacy));
+    const bridge = createNickHostingBridge({ ...options, fetcher });
+    expect(await bridge.health(instanceId, [id])).toEqual(legacy);
+    expect(new URL(String(fetcher.mock.calls[0]?.[0])).searchParams.get('scopes')).toBe(id);
+    expect(() => bridge.health(instanceId, [id, id])).toThrow();
+    expect(() =>
+      bridge.health(
+        instanceId,
+        Array.from({ length: 101 }, () => randomUUID()),
+      ),
+    ).toThrow();
+    for (const patch of [
+      { scopes: [proof, proof] },
+      { scopes: [{ ...proof, providerUuid: randomUUID() }] },
+      { scopes: [{ ...proof, revision: 0 }] },
+      { scopes: [proof], instanceId: randomUUID() },
+    ]) {
+      fetcher.mockResolvedValueOnce(Response.json({ ...legacy, ...patch }));
+      await expect(bridge.health(instanceId, [id, randomUUID()])).rejects.toMatchObject({
+        reason: 'invalid_response',
+      });
+    }
+  });
+
   it('sends an explicit owner pin only on a reviewed relink', async () => {
     const fetcher = vi.fn<typeof fetch>(async () => Response.json(event));
     await createNickHostingBridge({ ...options, fetcher }).linkServer(instanceId, event.server, 9);

@@ -79,6 +79,7 @@ export function createMinecraftGatewayModuleAdapter(
     id: 'minecraft-java',
     startupHint: 'provider_running',
     readinessSource: minecraftReadinessSource,
+    readOnlyStatusProbe: true,
     supports: (route) => !!select(route),
     classify: () => ({ kind: 'unsupported' }),
     response: () => undefined,

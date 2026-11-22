@@ -304,15 +304,14 @@ export function createApp(options: Options) {
   app.post(PROVIDER_EVENTS_PATH, async (c) => {
     if (!c.req.header('content-type')?.startsWith('application/json'))
       throw new DomainError('validation_failed');
-    return c.json(
-      await receiveProviderEvent({
-        db,
-        codec: options.codec,
-        env,
-        raw: await c.req.text(),
-        headers: c.req.raw.headers,
-      }),
-    );
+    const result = await receiveProviderEvent({
+      db,
+      codec: options.codec,
+      env,
+      raw: await c.req.text(),
+      headers: c.req.raw.headers,
+    });
+    return c.json(result, result.received ? 200 : 410);
   });
   app.post(SFTP_EVENTS_PATH, async (c) => {
     if (!c.req.header('content-type')?.startsWith('application/json'))

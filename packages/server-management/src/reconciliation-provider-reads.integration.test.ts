@@ -1,5 +1,6 @@
 import { randomBytes, randomUUID } from 'node:crypto';
 import { SecretCodec } from '@nickhosting/core';
+import { createDatabase } from '@nickhosting/database';
 import { createTestDatabase } from '@nickhosting/database/testing';
 import {
   type ApplicationServer,
@@ -7,6 +8,7 @@ import {
   type Resources,
 } from '@nickhosting/pterodactyl-adapter';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
+import { pollFleet } from '../../../apps/worker/src/reconcile.js';
 import { createManagementRuntime } from './runtime.js';
 import { managementFixture } from './test-fixtures.js';
 
@@ -307,25 +309,124 @@ it('isolates a persistently malformed server while observing its peers and the n
   const bad = f.servers.find((s) => s.remote.nest === 0);
   expect(result.unavailable).toEqual([bad?.localId]);
   expect(result.observed).toBe(48);
-  expect(f.list).toHaveBeenCalledTimes(2);
-  expect(f.detail).toHaveBeenCalledTimes(48);
+  expect(f.list.mock.calls.length).toBeLessThanOrEqual(14);
+  expect(f.detail).not.toHaveBeenCalled();
   expect(f.resources).toHaveBeenCalledTimes(48);
   expect(f.resources).not.toHaveBeenCalledWith(bad?.remote.identifier);
+  if (!bad) throw new Error('fixture incomplete');
+  await f.db
+    .updateTable('fleet_reconciliation_retries')
+    .set({ retry_at: new Date(0) })
+    .execute();
+  expect((await f.runtime.reconcile()).unavailable).toEqual([bad.localId]);
+  expect(f.detail).toHaveBeenCalledExactlyOnceWith(bad.remote.id);
+  expect(
+    await f.db.selectFrom('fleet_reconciliation_retries').select('read_detail').execute(),
+  ).toEqual([{ read_detail: false }]);
+  // A detail which is also broken cannot strand the member when its filter recovers.
+  bad.remote.nest = 1;
+  await f.db
+    .updateTable('fleet_reconciliation_retries')
+    .set({ retry_at: new Date(0) })
+    .execute();
+  expect((await f.runtime.reconcile()).observed).toBe(49);
+  expect(f.detail).toHaveBeenCalledTimes(1);
 });
 
-it('stops individual recovery and later batches when the first recovered read hits the Application quota', async () => {
-  const f = await fleet(49);
+it('fences a local ABA change during a subdivision before reading Client resources', async () => {
+  const f = await fleet(4);
+  const normalList = f.list.getMockImplementation();
+  if (!normalList) throw new Error('fixture incomplete');
+  let changed: (typeof f.servers)[number] | undefined;
   f.list.mockResolvedValueOnce(Response.json({ object: 'list', data: [{}] }));
-  f.detail.mockResolvedValueOnce(
+  f.list.mockImplementationOnce(async (ids) => {
+    changed = f.servers.find((s) => s.remote.uuid === ids[0]);
+    if (!changed) throw new Error('fixture incomplete');
+    const response = await normalList(ids);
+    for (const name of ['intermediate', changed.remote.name]) {
+      await f.db
+        .updateTable('managed_servers')
+        .set({ name })
+        .where('id', '=', changed.localId)
+        .execute();
+    }
+    return response;
+  });
+  const result = await f.runtime.reconcile();
+  expect(f.list.mock.calls.map(([ids]) => ids.length)).toEqual([4, 2, 2]);
+  expect(result).toMatchObject({ observed: 3, deferred: [changed?.localId], unavailable: [] });
+  expect(f.resources).not.toHaveBeenCalledWith(changed?.remote.identifier);
+  expect(f.detail).not.toHaveBeenCalled();
+});
+
+it('stops subdivision at an Application 429 without individual reads', async () => {
+  const f = await fleet(48);
+  f.list.mockResolvedValueOnce(Response.json({ object: 'list', data: [{}] }));
+  f.list.mockResolvedValueOnce(
     new Response(null, { status: 429, headers: { 'Retry-After': '5' } }),
   );
   const result = await f.runtime.reconcile();
   expect(result.observed).toBe(0);
   expect(result.unavailable.sort()).toEqual(f.servers.map(({ localId }) => localId).sort());
-  expect(f.batches).toHaveBeenCalledTimes(1);
-  expect(f.individual).toHaveBeenCalledTimes(1);
-  expect(f.detail).toHaveBeenCalledTimes(1);
+  expect(f.list.mock.calls.map(([uuids]) => uuids.length)).toEqual([48, 24]);
+  expect(f.detail).not.toHaveBeenCalled();
   expect(f.resources).not.toHaveBeenCalled();
+});
+
+it('bounds widespread malformed responses and resumes unfinished subdivisions on later sweeps', async () => {
+  const f = await fleet(48);
+  const normalList = f.list.getMockImplementation();
+  if (!normalList) throw new Error('fixture incomplete');
+  // A legacy provider accepts at most one UUID in this filter.
+  f.list.mockImplementation(async (ids) =>
+    ids.length > 1
+      ? Response.json({
+          object: 'list',
+          data: [],
+          meta: { pagination: { current_page: 1, total_pages: 999 } },
+        })
+      : normalList(ids),
+  );
+  const recovered = new Set<string>();
+  for (let tick = 0; tick < 16 && recovered.size < 48; tick++) {
+    f.list.mockClear();
+    f.resources.mockClear();
+    await f.runtime.reconcile();
+    expect(f.list.mock.calls.length).toBeLessThanOrEqual(13);
+    for (const [id] of f.resources.mock.calls) recovered.add(id);
+  }
+  expect(recovered.size).toBe(48);
+  expect(f.detail).not.toHaveBeenCalled();
+});
+
+it('observes transitions and Gateway wakes before stable members that have never been sampled', async () => {
+  const f = await fleet(49);
+  const transitioning = f.servers[47];
+  const waking = f.servers[48];
+  if (!transitioning || !waking) throw new Error('fixture incomplete');
+  await f.db
+    .updateTable('managed_servers')
+    .set({ last_observed_at: new Date() })
+    .where('id', 'in', [transitioning.localId, waking.localId])
+    .execute();
+  await f.db
+    .updateTable('managed_servers')
+    .set({ runtime_state: 'starting' })
+    .where('id', '=', transitioning.localId)
+    .execute();
+  await database.pool.query(
+    `insert into gateway_server_states
+    (server_id,generation,enabled,protocol_id,game_version,state,readiness_timeout_seconds,readiness_max_age_seconds,estimate_max_age_seconds,wake_retry_seconds)
+    values ($1,gen_random_uuid(),true,'fixture','1','waking',30,15,60,1)`,
+    [waking.localId],
+  );
+  await f.runtime.reconcile();
+  expect(
+    f.resources.mock.calls
+      .slice(0, 2)
+      .map(([identifier]) => identifier)
+      .sort(),
+  ).toEqual([transitioning.remote.identifier, waking.remote.identifier].sort());
 });
 
 it.each(['batch revision', 'member identity'] as const)(
@@ -384,5 +485,146 @@ it('refreshes queued identities if a slow resource read outlives the batch', asy
     expect(f.individual).not.toHaveBeenCalled();
   } finally {
     clock.mockRestore();
+  }
+});
+
+it('uses a durable, deferred detail only for the malformed singleton when the filter route stays broken', async () => {
+  const f = await fleet(4);
+  const bad = f.servers[0];
+  const normalList = f.list.getMockImplementation();
+  if (!bad || !normalList) throw new Error('fixture incomplete');
+  f.list.mockImplementation(async (ids) =>
+    ids.includes(bad.remote.uuid) ? Response.json({ object: 'list', data: [{}] }) : normalList(ids),
+  );
+  expect(await f.runtime.reconcile()).toMatchObject({ observed: 3, unavailable: [bad.localId] });
+  expect(f.detail).not.toHaveBeenCalled();
+  const due = await f.db.selectFrom('fleet_reconciliation_retries').selectAll().execute();
+  expect(due).toMatchObject([{ server_id: bad.localId, batch_size: 1, read_detail: true }]);
+  await f.runtime.reconcile();
+  expect(f.detail).not.toHaveBeenCalled();
+  await f.db
+    .updateTable('fleet_reconciliation_retries')
+    .set({ retry_at: new Date(0) })
+    .execute();
+  f.list.mockClear();
+  expect(await f.runtime.reconcile()).toMatchObject({ observed: 4, unavailable: [], deferred: [] });
+  expect(f.list.mock.calls.map(([ids]) => ids.length)).toEqual([3]);
+  expect(f.detail).toHaveBeenCalledExactlyOnceWith(bad.remote.id);
+  expect(await f.db.selectFrom('fleet_reconciliation_retries').selectAll().execute()).toEqual([]);
+});
+
+it('charges isolated details to the shared subdivision cap and fences reassignment and ABA before Client I/O', async () => {
+  const f = await fleet(16);
+  await f.db
+    .insertInto('fleet_reconciliation_retries')
+    .values(
+      f.servers.map((s) => ({
+        server_id: s.localId,
+        batch_size: 1,
+        read_detail: true,
+        retry_at: new Date(0),
+      })),
+    )
+    .execute();
+  const detail = f.detail.getMockImplementation();
+  if (!detail) throw new Error('fixture incomplete');
+  const rejected: string[] = [];
+  f.detail.mockImplementationOnce(async (id) => {
+    const server = f.servers.find((s) => s.remote.id === id);
+    if (!server) throw new Error('fixture incomplete');
+    rejected.push(server.remote.identifier);
+    return Response.json({ attributes: { ...server.remote, user: server.remote.user + 1 } });
+  });
+  f.detail.mockImplementationOnce(async (id) => {
+    const server = f.servers.find((s) => s.remote.id === id);
+    if (!server) throw new Error('fixture incomplete');
+    rejected.push(server.remote.identifier);
+    for (const name of ['intermediate', server.remote.name])
+      await f.db
+        .updateTable('managed_servers')
+        .set({ name })
+        .where('id', '=', server.localId)
+        .execute();
+    return detail(id);
+  });
+  const result = await f.runtime.reconcile();
+  expect(result.observed).toBe(10);
+  expect(result.deferred).toHaveLength(1);
+  expect(f.list).not.toHaveBeenCalled();
+  expect(f.detail).toHaveBeenCalledTimes(12);
+  for (const identifier of rejected) expect(f.resources).not.toHaveBeenCalledWith(identifier);
+  f.detail.mockClear();
+  f.detail.mockResolvedValueOnce(
+    new Response(null, { status: 429, headers: { 'Retry-After': '1' } }),
+  );
+  await f.runtime.reconcile();
+  expect(f.detail).toHaveBeenCalledTimes(1);
+  expect(await f.db.selectFrom('fleet_reconciliation_retries').selectAll().execute()).toHaveLength(
+    4,
+  );
+});
+
+it('retires an active fleet observer when its own PostgreSQL session dies during Client I/O', async () => {
+  const f = await fleet(2);
+  const url = process.env.NH_TEST_DATABASE_URL;
+  if (!url) throw new Error('Missing isolated fixture database');
+  const applicationName = `fleet-test-${randomUUID()}`;
+  const replica = createDatabase(url, {
+    options: `-c search_path=${database.schema}`,
+    application_name: applicationName,
+    max: 1,
+  });
+  const started = Promise.withResolvers<void>();
+  const releaseRead = Promise.withResolvers<void>();
+  const lost = Promise.withResolvers<void>();
+  f.resources.mockImplementationOnce(async () => {
+    started.resolve();
+    await releaseRead.promise;
+    return offline;
+  });
+  let old: Promise<unknown> | undefined;
+  try {
+    const pid = (await replica.pool.query<{ pid: number }>('select pg_backend_pid() as pid'))
+      .rows[0]?.pid;
+    old = pollFleet(replica.pool, async (signal) => {
+      signal.addEventListener('abort', () => lost.resolve(), { once: true });
+      try {
+        await f.runtime.reconcile();
+      } finally {
+        if (signal.aborted)
+          await expect(f.runtime.adapter.getApplicationServer(1)).rejects.toThrow(
+            'connection lost',
+          );
+      }
+    }).catch((e) => e);
+    await started.promise;
+    // This test's single-connection pool owns both the PID and its random application name.
+    const termination = await database.pool.query<{ killed: boolean }>(
+      `select pg_terminate_backend(pid) as killed
+      from pg_stat_activity where pid=$1 and application_name=$2 and datname=current_database()`,
+      [pid, applicationName],
+    );
+    expect(termination.rows).toEqual([{ killed: true }]);
+    await lost.promise;
+    const clock = () =>
+      database.pool.query<{ at: string }>(
+        'select next_poll_at::text as at from fleet_reconciliation_clock',
+      );
+    expect((await clock()).rows[0]?.at).toBe('-infinity');
+    await pollFleet(database.pool, async () => {
+      expect(await f.runtime.reconcile()).toMatchObject({ observed: 2 });
+    });
+    const watermark = (await clock()).rows;
+    releaseRead.resolve();
+    expect(await old).toMatchObject({ message: 'Fleet reconciliation connection lost' });
+    expect((await clock()).rows).toEqual(watermark);
+    expect(f.detail).not.toHaveBeenCalled();
+    expect(f.list).toHaveBeenCalledTimes(2);
+    expect(f.resources).toHaveBeenCalledTimes(3);
+    expect(await f.db.selectFrom('server_metrics').selectAll().execute()).toHaveLength(2);
+  } finally {
+    releaseRead.resolve();
+    await old;
+    await replica.db.destroy();
   }
 });

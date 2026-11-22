@@ -22,7 +22,18 @@ export interface ProviderFeedTables {
     backup_events: Generated<boolean>;
     capabilities_checked_at: Generated<Date | null>;
   };
+  provider_feed_link_retries: {
+    instance_id: string;
+    server_id: string;
+    binding: string;
+    attempts: number;
+    retry_at: Date;
+  };
   provider_server_projections: {
+    scope_healthy_at: Generated<Date | null>;
+    scope_owner_id: Generated<string | null>;
+    scope_provider_user_id: Generated<number | null>;
+    scope_credential: Generated<string | null>;
     server_id: string;
     instance_id: string;
     revision: string;

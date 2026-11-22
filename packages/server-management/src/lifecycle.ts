@@ -12,6 +12,7 @@ import type { FilemanJobServices, GameBackupPolicy } from '@nickhosting/game-sdk
 import { parseCommand, processJob } from '@nickhosting/jobs';
 import {
   type ApplicationServer,
+  assertProviderReadActive,
   type BuildUpdate,
   isUploadNotDispatched,
   isUploadNotPublished,
@@ -47,6 +48,11 @@ import {
   managedIdentityClaims,
   readManagedIdentity,
 } from './managed-identity.js';
+import {
+  beginFleetIdentityReceipts,
+  observationIdentityRevision,
+  type WorldIdentityReceipt,
+} from './managed-identity-receipts.js';
 import {
   minecraftContentAllowsOnline,
   minecraftContentChangesOnlyMetadata,
@@ -133,6 +139,7 @@ export interface ExternalStopReceipt {
   action: 'stop' | 'kill';
 }
 export interface LifecycleOptions {
+  observationProviderBinding?: string;
   /** True only when the first-party file bridge checks managed ownership inside
    * every provider mutation. Capability discovery itself grants no authority. */
   supportsManagedFileOperations?: (serverId: string, db: Kysely<Database>) => Promise<boolean>;
@@ -3880,27 +3887,40 @@ function reconciliationSnapshot(db: Kysely<Database>, serverId: string) {
 
 type ReconciliationSnapshot = NonNullable<Awaited<ReturnType<typeof reconciliationSnapshot>>>;
 const reconciliationBatchLifetimeMs = 5000;
+type FleetRead = 'batch' | 'subdivision' | 'detail';
 
 async function readReconciliationBatch(
   db: Kysely<Database>,
   ids: string[],
   options: LifecycleOptions,
+  mode: FleetRead,
 ) {
   // Capture local revisions before provider I/O, including when renewing a slow batch.
+  const requestedAt = performance.now();
+  const worldRevision = options.observationProviderBinding
+    ? observationIdentityRevision(sql.ref('server.id'), 'minecraft')
+    : sql<null>`null`;
   const snapshots = await reconciliationVersions(db)
-    .select(['server.id', 'server.pterodactyl_id', 'server.pterodactyl_uuid'])
+    .select([
+      'server.id',
+      'server.pterodactyl_id',
+      'server.pterodactyl_uuid',
+      worldRevision.as('world_revision'),
+    ])
     .where('server.id', 'in', ids)
     .execute();
   const uuids = snapshots.flatMap((row) => (row.pterodactyl_uuid ? [row.pterodactyl_uuid] : []));
   // The adapter validates exact UUID membership and rejects duplicate UUIDs or numeric IDs.
-  let remotes: ApplicationServer[];
-  try {
-    remotes = uuids.length ? await options.adapter.getApplicationServers(uuids) : [];
-  } catch (error) {
-    // A malformed member or an oversized list can make the whole page unreadable.
-    // Discard it. A fresh, individually verified GET can still observe a healthy peer.
-    if (error instanceof PterodactylError && error.reason === 'invalid_response') return null;
-    throw error;
+  // A filtered fleet group fits within per_page=100. If a provider limits the
+  // page size further, split the scope and charge each HTTP page to the sweep.
+  let remotes: ApplicationServer[] = [];
+  if (mode === 'detail') {
+    const member = snapshots[0];
+    if (ids.length !== 1) throw new Error('Expected one isolated fleet member');
+    if (member?.pterodactyl_uuid && member.pterodactyl_id)
+      remotes = [await options.adapter.getApplicationServer(member.pterodactyl_id)];
+  } else if (uuids.length) {
+    remotes = await options.adapter.getApplicationServers(uuids, { singlePage: true });
   }
   const receivedAt = performance.now();
   // Reject changes during the collective provider read. A later change, while this
@@ -3912,6 +3932,8 @@ async function readReconciliationBatch(
   const completed = new Map(after.map((row) => [row.id, row]));
   return {
     receivedAt,
+    requestedAt,
+    mode,
     local: new Map(
       snapshots
         .filter((row) => {
@@ -3927,8 +3949,9 @@ async function readReconciliationBatch(
 async function reconcileBatchMember(
   db: Kysely<Database>,
   options: LifecycleOptions,
-  batch: NonNullable<Awaited<ReturnType<typeof readReconciliationBatch>>>,
+  batch: Awaited<ReturnType<typeof readReconciliationBatch>>,
   id: string,
+  receipts: Map<string, WorldIdentityReceipt>,
 ) {
   const server = batch.local.get(id);
   if (!server?.pterodactyl_id) return 'deferred';
@@ -3936,7 +3959,20 @@ async function reconcileBatchMember(
   if (!remote) throw new DomainError('provenance_mismatch');
   const current = await reconciliationSnapshots(db)
     .innerJoin('managed_nodes as identity_node', 'identity_node.id', 'server.node_id')
-    .select(['identity_node.pterodactyl_node_id', managedIdentityClaims(id).as('claims')])
+    .innerJoin(
+      'runtime_egg_mappings as identity_mapping',
+      'identity_mapping.id',
+      'server.mapping_id',
+    )
+    .select([
+      'identity_node.pterodactyl_node_id',
+      'identity_mapping.nest_id',
+      'identity_mapping.egg_id',
+      managedIdentityClaims(id).as('claims'),
+      (server.world_revision ? observationIdentityRevision(id, 'minecraft') : sql<null>`null`).as(
+        'world_revision',
+      ),
+    ])
     .where('server.id', '=', id)
     .executeTakeFirst();
   if (!current?.pterodactyl_id || current.provider_revision !== server.provider_revision)
@@ -3945,6 +3981,9 @@ async function reconcileBatchMember(
     current.revision !== server.revision ||
     performance.now() - batch.receivedAt >= reconciliationBatchLifetimeMs
   ) {
+    // A recovery request has spent its slot. Retry on a new sweep under the
+    // current version instead of issuing an additional unbudgeted detail GET.
+    if (batch.mode !== 'batch') return 'deferred';
     // The gateway may update the row several times while earlier members are
     // sampled. Discard the queued proof and start once under the current revision.
     return reconcileVerifiedServer(db, current, await ownedRemote(db, current, options), options);
@@ -3953,7 +3992,25 @@ async function reconcileBatchMember(
     pterodactyl_node_id: current.pterodactyl_node_id,
     allocations: current.claims ?? [],
   });
-  return reconcileVerifiedServer(db, current, remote, options, batch.receivedAt);
+  const result = await reconcileVerifiedServer(db, current, remote, options, batch.receivedAt);
+  assertProviderReadActive();
+  if (
+    result === 'observed' &&
+    options.observationProviderBinding &&
+    current.world_revision &&
+    current.world_revision === server.world_revision &&
+    remote.egg === current.egg_id &&
+    remote.nest === current.nest_id &&
+    !remote.suspended &&
+    performance.now() - batch.requestedAt < reconciliationBatchLifetimeMs
+  ) {
+    receipts.set(id, {
+      provider: options.observationProviderBinding,
+      revision: current.world_revision,
+      expiresAt: batch.requestedAt + reconciliationBatchLifetimeMs,
+    });
+  }
+  return result;
 }
 
 function applicationRateLimit(error: unknown) {
@@ -3964,50 +4021,131 @@ function applicationRateLimit(error: unknown) {
   );
 }
 
+const fleetBatchSize = 48;
+// Six binary splits isolate one malformed member of a 48-server request.
+// Across a badly damaged fleet the remaining branches resume on later polls.
+const fleetRecoveryReads = 12;
+
+async function queueMalformedMembers(
+  db: Kysely<Database>,
+  ids: string[],
+  size: number,
+  mode: FleetRead,
+  delaySeconds = 0,
+) {
+  await sql`insert into fleet_reconciliation_retries (server_id, batch_size, read_detail, retry_at)
+    select id, ${size}, ${mode === 'detail'}, clock_timestamp() + ${delaySeconds} * interval '1 second'
+    from managed_servers where id = any(${ids}::uuid[]) and deleted_at is null
+    on conflict (server_id) do update set batch_size = excluded.batch_size, read_detail = excluded.read_detail,
+      retry_at = excluded.retry_at`.execute(db);
+}
+
 /** Fleet observations share only their initial Application read. Client reads stay serial. */
 export async function reconcileManagedServers(db: Kysely<Database>, options: LifecycleOptions) {
+  const receipts = beginFleetIdentityReceipts(db);
   const servers = await db
-    .selectFrom('managed_servers')
-    .select('id')
-    .where('deleted_at', 'is', null)
-    .where('pterodactyl_id', 'is not', null)
-    .orderBy('last_observed_at', (order) => order.asc().nullsFirst())
-    .orderBy('id')
+    .selectFrom('managed_servers as s')
+    .leftJoin('fleet_reconciliation_retries as retry', 'retry.server_id', 's.id')
+    .select(['s.id', 'retry.batch_size', 'retry.read_detail'])
+    .where('s.deleted_at', 'is', null)
+    .where('s.pterodactyl_id', 'is not', null)
+    .where((eb) =>
+      eb.or([
+        eb('retry.retry_at', 'is', null),
+        eb('retry.retry_at', '<=', sql<Date>`clock_timestamp()`),
+      ]),
+    )
+    .orderBy(
+      sql`(s.active_operation_id is not null or s.runtime_state in ('starting', 'stopping')
+      or s.installation_state in ('pending', 'installing') or exists (
+        select 1 from gateway_server_states g where g.server_id = s.id and g.state = 'waking'))`,
+      'desc',
+    )
+    .orderBy('retry.retry_at', (order) => order.asc().nullsFirst())
+    .orderBy('s.last_observed_at', (order) => order.asc().nullsFirst())
+    .orderBy('s.id')
     .execute();
-  const unavailable: string[] = [];
+  const groups: { ids: string[]; mode: FleetRead }[] = [];
+  let lastSize: number | null | undefined;
+  for (const { id, batch_size, read_detail } of servers) {
+    const last = groups.at(-1);
+    if (last && lastSize === batch_size && last.ids.length < (batch_size ?? fleetBatchSize))
+      last.ids.push(id);
+    else
+      groups.push({
+        ids: [id],
+        mode: read_detail ? 'detail' : batch_size === null ? 'batch' : 'subdivision',
+      });
+    lastSize = batch_size;
+  }
+  const pending = new Set(servers.map((s) => s.id));
   const deferred: string[] = [];
   let observed = 0;
-  let offset = 0;
-  fleet: while (offset < servers.length) {
-    const ids = servers.slice(offset, offset + 48).map((server) => server.id);
+  let recoveryReads = 0;
+  fleet: for (const group of groups) {
+    assertProviderReadActive();
+    const { ids, mode } = group;
+    const recovery = mode !== 'batch';
+    if (recovery) {
+      if (recoveryReads >= fleetRecoveryReads) continue;
+      recoveryReads++;
+    }
     let batch: Awaited<ReturnType<typeof readReconciliationBatch>>;
     try {
-      batch = await readReconciliationBatch(db, ids, options);
+      batch = await readReconciliationBatch(db, ids, options, mode);
     } catch (error) {
+      assertProviderReadActive();
       if (applicationRateLimit(error)) break;
-      unavailable.push(...ids);
-      offset += ids.length;
+      if (
+        mode !== 'detail' &&
+        error instanceof PterodactylError &&
+        error.reason === 'invalid_response'
+      ) {
+        if (ids.length === 1) {
+          // Only a malformed singleton filter qualifies for the numeric-ID route.
+          // Persist this work for a later sweep, even when the provider is entirely broken.
+          await queueMalformedMembers(db, ids, 1, 'detail', 5);
+        } else {
+          const half = Math.ceil(ids.length / 2);
+          await queueMalformedMembers(db, ids, half, 'subdivision');
+          groups.push({ ids: ids.slice(0, half), mode: 'subdivision' });
+          groups.push({ ids: ids.slice(half), mode: 'subdivision' });
+        }
+      } else if (recovery) {
+        // Re-probe the bounded filter after backoff. Either provider route may
+        // recover independently, and a failed detail cannot monopolize the queue.
+        await queueMalformedMembers(db, ids, ids.length, 'subdivision', 60);
+      }
       continue;
     }
-    // A slow resource/backup read must not leave later servers using queued
-    // identities beyond one worker polling interval. Re-batch the remainder.
+    let consumed = 0;
     for (const id of ids) {
+      assertProviderReadActive();
       try {
-        const outcome = batch
-          ? await reconcileBatchMember(db, options, batch, id)
-          : await reconcileManagedServer(db, id, options);
+        const outcome = await reconcileBatchMember(db, options, batch, id, receipts);
         if (outcome === 'observed') observed++;
         else deferred.push(id);
+        pending.delete(id);
       } catch (error) {
+        assertProviderReadActive();
         if (applicationRateLimit(error)) break fleet;
-        unavailable.push(id);
       }
-      offset++;
-      if (batch && performance.now() - batch.receivedAt >= reconciliationBatchLifetimeMs) break;
+      consumed++;
+      if (performance.now() - batch.receivedAt >= reconciliationBatchLifetimeMs) break;
     }
+    assertProviderReadActive();
+    if (recovery && consumed) {
+      // Only the list parsing fault was isolated. Member identity checks (including
+      // omissions), MVCC fences and resource failures keep their usual outcome.
+      await db
+        .deleteFrom('fleet_reconciliation_retries')
+        .where('server_id', 'in', ids.slice(0, consumed))
+        .execute();
+    }
+    if (consumed < ids.length) groups.push({ ids: ids.slice(consumed), mode });
   }
-  for (const server of servers.slice(offset)) unavailable.push(server.id);
-  return { observed, deferred, unavailable };
+  assertProviderReadActive();
+  return { observed, deferred, unavailable: [...pending] };
 }
 
 /** Read reconciliation never imports or changes a remote server. It errs toward retaining capacity. */
@@ -4034,7 +4172,9 @@ async function reconcileVerifiedServer(
       ? 'installing'
       : server.installation_state;
   let suppressCachedRunning = false;
+  assertProviderReadActive();
   let current = await options.adapter.getResources(server.pterodactyl_identifier ?? '');
+  assertProviderReadActive();
   const now = nowOf(options);
   let backupBytes: number | null = null;
   if (server.limits.disk === 0) {
@@ -4337,6 +4477,7 @@ async function reconcileVerifiedServer(
       fresh.provider_revision !== server.provider_revision
     )
       return 'deferred' as const;
+    assertProviderReadActive();
     await tx
       .updateTable('managed_servers')
       .set({ installation_state: failedInstallationJob ? 'failed' : state })
@@ -4348,7 +4489,10 @@ async function reconcileVerifiedServer(
         .where('server_id', '=', server.id)
         .where('operation_id', '=', failedInstallationJob)
         .execute();
-    if (suppressCachedRunning) return 'observed' as const;
+    if (suppressCachedRunning) {
+      assertProviderReadActive();
+      return 'observed' as const;
+    }
     await observation(tx, server, current, now, backupBytes);
     const reservation = await tx
       .selectFrom('resource_reservations')
@@ -4381,6 +4525,7 @@ async function reconcileVerifiedServer(
             data: JSON.stringify({ source: 'provider_activity', receipt: externalStop }),
           })
           .execute();
+      assertProviderReadActive();
       return 'observed' as const;
     }
     const overhead = effectiveNodeOverhead(node, options.env);
@@ -4457,6 +4602,7 @@ async function reconcileVerifiedServer(
       await recoverProvisionGateway(tx, server.id, now, options.env);
     if (server.gateway_automation_candidate && installed(remote) && !locked.active_operation_id)
       await reconcileProvisionGatewayAutomation(tx, server.id, options.env);
+    assertProviderReadActive();
     return 'observed' as const;
   });
 }

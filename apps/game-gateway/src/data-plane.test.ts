@@ -33,6 +33,7 @@ import {
   encodeSatisfactoryState,
 } from '../../../games/satisfactory/src/protocol.js';
 import {
+  GatewayEvidenceRejectedError,
   GatewayProviderRateLimitedError,
   GatewayRouteRevisionStaleError,
 } from './control-client.js';
@@ -1024,6 +1025,46 @@ describe('persistent Gateway fixture forwarding', () => {
     await applying;
     expect(f.gateway.health().ready).toBe(true);
   });
+  it('withdraws bound listeners on explicit evidence rejection before the original lease expires', async () => {
+    const current = route((await tcpFixture()).port, 'tcp', 'online');
+    const f = plane([current]);
+    await f.gateway.applySnapshot(f.snapshot());
+    expect(f.gateway.health().routes).toBe(1);
+    vi.mocked(f.control.fetchSnapshot).mockRejectedValueOnce(new GatewayEvidenceRejectedError());
+    await expect(f.gateway.refresh()).rejects.toBeInstanceOf(GatewayEvidenceRejectedError);
+    expect(f.gateway.health().routes).toBe(0);
+  });
+  it('overlaps read-only status on independent nodes and reports in snapshot order', async () => {
+    const routes = [];
+    for (let i = 0; i < 5; i++) routes.push(route((await tcpFixture()).port, 'tcp', 'online'));
+    const pending = new Map<string, () => void>();
+    const adapter = fixtureProtocol({
+      readinessSource: 'provider_running',
+      readOnlyStatusProbe: true,
+      observe: async (context) => {
+        expect(context.persistState).toBeUndefined();
+        await new Promise<void>((resolve) => pending.set(context.route.id, resolve));
+        return { ready: true, idle: false, playerCount: 1 };
+      },
+    });
+    const f = plane(routes, { protocols: [adapter] });
+    await f.gateway.applySnapshot(f.snapshot());
+    const operation = f.gateway.observe();
+    await vi.waitFor(() => expect(pending.size).toBe(4));
+    for (const value of routes.slice(1, 4)) pending.get(value.id)?.();
+    expect(f.control.reportObservation).not.toHaveBeenCalled();
+    const first = routes[0],
+      last = routes[4];
+    if (!first || !last) throw new Error('Missing status fixture');
+    pending.get(first.id)?.();
+    await vi.waitFor(() => expect(pending.size).toBe(5));
+    pending.get(last.id)?.();
+    await operation;
+    expect(
+      vi.mocked(f.control.reportObservation).mock.calls.map(([input]) => input.routeId),
+    ).toEqual(routes.map((item) => item.id));
+  });
+
   it('awaits presentation hydration for a status reply without changing route authority or waking', async () => {
     const backend = await udpFixture();
     const current = route(backend.port, 'udp', 'sleeping');

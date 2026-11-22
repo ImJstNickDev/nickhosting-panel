@@ -4,6 +4,7 @@ import { type ApplicationServer, PterodactylError } from '@nickhosting/pterodact
 import { sql } from 'kysely';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { FilemanReadService } from '../../game-sdk/src/fileman-read.js';
+import { reconcileManagedServers } from './lifecycle.js';
 import {
   dueMinecraftWorldIndexes,
   readMinecraftWorldFilemanIndex,
@@ -73,6 +74,8 @@ async function fixture() {
     external_id: server.external_id,
     user: server.provider_user_id,
     node: f.providerNodeId,
+    egg: 1,
+    nest: 1,
     allocation: allocation.pterodactyl_allocation_id,
     relationships: {
       allocations: {
@@ -151,6 +154,74 @@ async function fixture() {
   };
 }
 describe('persistent Minecraft world inventory', () => {
+  it.each(['fresh', 'expired', 'credential', 'egg', 'scan-revision', 'during-sftp'] as const)(
+    'reuses a matching fleet identity only within the scheduled world scan (%s)',
+    async (scenario) => {
+      const f = await fixture();
+      let elapsed = 1;
+      const timer = vi.spyOn(performance, 'now').mockImplementation(() => elapsed);
+      try {
+        f.remote.container = { installed: true, image: '', startup_command: '' };
+        f.runtime.adapter.getApplicationServers = vi.fn(async () => [f.remote]);
+        f.runtime.adapter.getResources = vi.fn(async () => ({
+          current_state: 'offline' as const,
+          is_suspended: false,
+          resources: {
+            memory_bytes: 0,
+            cpu_absolute: 0,
+            disk_bytes: 0,
+            network_rx_bytes: 0,
+            network_tx_bytes: 0,
+            uptime: 0,
+          },
+        }));
+        expect(
+          await reconcileManagedServers(f.db, {
+            adapter: f.runtime.adapter,
+            observationProviderBinding: 'isolated',
+            authorizeEffect: async () => {},
+          }),
+        ).toEqual({ observed: 1, deferred: [], unavailable: [] });
+        const files = vi.spyOn(f.files, 'list');
+        if (scenario === 'expired') elapsed += 5000;
+        if (scenario === 'credential') f.runtime.consoleProviderBinding = 'rotated';
+        if (scenario === 'scan-revision') await f.dirty();
+        if (scenario === 'egg')
+          await sql`UPDATE runtime_egg_mappings SET egg_id=egg_id+1 WHERE id=(SELECT mapping_id FROM managed_servers WHERE id=${f.serverId})`.execute(
+            f.db,
+          );
+        if (scenario === 'during-sftp')
+          files.mockImplementationOnce(async () => {
+            elapsed += 5000;
+            return [...f.dirs].map((name) => ({ name, kind: 'directory' as const, size: 0 }));
+          });
+        await sql`UPDATE minecraft_world_indexes SET next_scan_at=now() WHERE server_id=${f.serverId}`.execute(
+          f.db,
+        );
+        const run = reconcileDueMinecraftWorldIndex(
+          f.db,
+          f.serverId,
+          f.runtime,
+          {},
+          new AbortController().signal,
+        );
+        if (scenario === 'egg') await expect(run).rejects.toThrow('provenance_mismatch');
+        else {
+          await run;
+          expect(files).toHaveBeenCalled();
+        }
+        expect(f.runtime.adapter.getApplicationServers).toHaveBeenCalledOnce();
+        expect(f.provider).toHaveBeenCalledTimes(scenario === 'fresh' ? 0 : 1);
+        if (scenario === 'fresh') {
+          expect((await f.cached())?.snapshot.worlds).toHaveLength(2);
+          await f.refresh();
+          expect(f.provider).toHaveBeenCalledOnce();
+        }
+      } finally {
+        timer.mockRestore();
+      }
+    },
+  );
   it('shows a newly discovered partial world with recognizable save data', async () => {
     const f = await fixture();
     f.dirs.add('Adventure');

@@ -30,8 +30,15 @@ export interface GatewayControlClient extends GatewayControl {
   requestJson(action: string, body?: unknown, signal?: AbortSignal): Promise<unknown>;
   close(): void;
 }
-/** Only minted from Core's authenticated, bounded explicit revision precondition.
- * It grants no routing authority or lease extension. */
+/** Explicit denial of ownership or credentials from the evidence endpoint. */
+export class GatewayEvidenceRejectedError extends Error {
+  constructor() {
+    super('gateway_evidence_rejected');
+    this.name = 'GatewayEvidenceRejectedError';
+  }
+}
+
+/** An authenticated precondition failure calls for a new snapshot. */
 export class GatewayRouteRevisionStaleError extends Error {
   constructor() {
     super('gateway_route_revision_stale');
@@ -174,6 +181,21 @@ export function createGatewayControlClient(
         )
           throw new GatewayProviderRateLimitedError(cooldown.data.error.details.retryAfterMs);
 
+        // Core has positively rejected the provider ownership proof or service
+        // credential. Retaining forwarding until the previous expiry is unsafe.
+        if (
+          action === 'evidence' &&
+          ((response.status === 409 &&
+            z
+              .object({ error: z.object({ code: z.literal('provenance_mismatch') }) })
+              .safeParse(parsed).success) ||
+            (response.status === 401 &&
+              z
+                .object({ error: z.object({ code: z.literal('unauthenticated') }) })
+                .safeParse(parsed).success))
+        )
+          throw new GatewayEvidenceRejectedError();
+
         const precondition = z
           .object({
             error: z.object({
@@ -237,6 +259,7 @@ export function createGatewayControlClient(
     } catch (error) {
       if (response?.body && !response.body.locked) await response.body.cancel().catch(() => {});
       if (
+        error instanceof GatewayEvidenceRejectedError ||
         error instanceof GatewayRouteRevisionStaleError ||
         error instanceof GatewayProviderRateLimitedError
       )

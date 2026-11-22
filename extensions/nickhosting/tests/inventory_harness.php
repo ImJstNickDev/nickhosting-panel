@@ -97,6 +97,63 @@ DB::table('allocations')->where('id',2001)->update(['node_id'=>20]);
 denied(fn () => $controller->gatewayInventory($inventoryRequest($scope)),409,'cross-node server allocation fails closed');
 DB::table('allocations')->where('id',2001)->update(['node_id'=>10]);
 
+denied(fn () => $controller->gatewayTopologySnapshot($inventoryRequest($scope)),501,'missing topology migration offers v1 fallback');
+$topologyMigration->up();
+Schema::table('api_keys', function ($table) {
+    foreach (['r_servers','r_nodes','r_allocations'] as $col) { $table->integer($col)->default(0); }
+});
+$keyId=79001;
+DB::table('api_keys')->insert(['id'=>$keyId, 'user_id'=>1, 'key_type'=>2, 'identifier'=>'testreceipt1',
+    'token'=>'test', 'memo'=>'', 'allowed_ips'=>'[]', 'r_nodes'=>1, 'r_allocations'=>1, 'r_servers'=>1]);
+$confirmRequest = static function (array $receipt) use ($keyId,$scope) {
+    $r = req($scope + ['epoch'=>$receipt['epoch'], 'revision'=>$receipt['revision'], 'waitMs'=>0]);
+    $key = Pterodactyl\Models\ApiKey::findOrFail($keyId);
+    $r->setUserResolver(fn () => new class($key) {
+        public function __construct(private $key) {}
+        public function currentAccessToken() { return $this->key; }
+    });
+    return $r;
+};
+$topologyRead = static function () use ($controller, $inventoryRequest, $scope, $keyId) {
+    $r=$inventoryRequest($scope);
+    $key=Pterodactyl\Models\ApiKey::findOrFail($keyId);
+    $r->setUserResolver(fn () => new class($key) {
+        public function __construct(private $key) {}
+        public function currentAccessToken() { return $this->key; }
+    });
+    return $controller->gatewayTopologySnapshot($r)->getData(true);
+};
+$first=$topologyRead();
+$confirm = fn ($receipt) => array_diff_key($controller->gatewayRevision($confirmRequest($receipt))->getData(true), ['waitedMs'=>true]);
+check($first['receipt'] === $confirm($first['receipt']), 'unchanged topology returns compact epoch/revision');
+DB::beginTransaction();
+DB::table('allocations')->whereBetween('id',[2001,2004])->update(['server_id'=>null]);
+DB::rollBack();
+check($confirm($first['receipt']) === $first['receipt'], 'rolled back bulk allocation edits do not move watermark');
+DB::table('allocations')->whereBetween('id',[2002,2004])->update(['server_id'=>1101]);
+$advanced = $confirm($first['receipt']);
+check((int)$advanced['revision'] === (int)$first['receipt']['revision'] + 1
+    && $topologyRead()['receipt'] === $advanced, 'committed foreign bulk assignments invalidate exact-snapshot receipt');
+DB::table('servers')->whereBetween('id',[1001,1002])->update(['owner_id'=>12]);
+DB::table('nodes')->where('id',30)->update(['uuid'=>$fixtureUuid(300)]);
+DB::table('nodes')->where('id',20)->delete();
+$advancedAgain = $confirm($advanced);
+check((int)$advancedAgain['revision'] === (int)$advanced['revision'] + 4, 'bulk owner and node update/delete change the revision');
+DB::table('servers')->whereBetween('id',[1001,1002])->update(['owner_id'=>1]);
+$authorizedAtStart = $confirmRequest($advancedAgain);
+DB::table('api_keys')->where('id',$keyId)->update(['r_allocations'=>0]);
+denied(fn () => $controller->gatewayRevision($authorizedAtStart),403,'receipt rechecks revoked allocation permission at delivery');
+$trigger = DB::table('sqlite_master')->where('type','trigger')->where('tbl_name','allocations')->value('name');
+DB::statement('DROP TRIGGER "' . $trigger . '"');
+DB::table('api_keys')->where('id',$keyId)->update(['r_allocations'=>1]);
+denied($topologyRead,501,'incomplete trigger coverage refuses revisioned snapshot');
+check(!isset($controller->gatewayInventory($inventoryRequest($scope))->getData(true)['receipt']), 'unversioned inventory remains available after trigger loss');
+DB::statement('CREATE TRIGGER "' . $trigger . '" AFTER INSERT ON allocations BEGIN SELECT 1; END');
+$topologyMigration->down();
+check(DB::table('sqlite_master')->where('name',$trigger)->exists(), 'uninstall preserves externally replaced trigger with same name');
+DB::statement('DROP TRIGGER "' . $trigger . '"');
+DB::table('api_keys')->where('id',$keyId)->delete();
+
 $batch = fn ($ids) => $controller->serverSnapshots(req(['serverUuids'=>$ids], 'POST', 2, 1),$instanceId)->getData(true);
 denied(fn () => $controller->serverSnapshots(req(['serverUuids'=>$uuids], 'POST',2,1,2),$instanceId),403,'batch checks instance key ownership');
 denied(fn () => $batch(array_merge($uuids, [$fixtureUuid(7000)])),422,'batch rejects more than 100 selectors');

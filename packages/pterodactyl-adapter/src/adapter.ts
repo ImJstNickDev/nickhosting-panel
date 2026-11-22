@@ -24,7 +24,7 @@ import {
   inspectFileOperation,
   publishStagedUpload,
 } from './file-operations.js';
-import { readGatewayInventory } from './gateway-inventory.js';
+import { createGatewayTopology, readGatewayInventory } from './gateway-inventory.js';
 import { confirmInstallation, type InstallationConfirmationOptions } from './installation.js';
 import { type StopConfirmationOptions, stopWithConfirmation } from './power.js';
 import { createPreparedFileWrites } from './prepared-file-writes.js';
@@ -71,6 +71,7 @@ import {
 import { createUploadProxy, type UploadProxyOptions } from './uploads.js';
 
 export interface PterodactylOptions extends TransportOptions {
+  gatewayInventoryDiscovery?: () => Promise<{ supported: boolean; checkedAt: Date }>;
   /** Exact trusted Wings origins; never supplied by a browser. */
   webSocketOrigins?: string[];
   /** Exact trusted Wings/S3 origins used only by the backend download proxy. */
@@ -396,8 +397,15 @@ export function createPterodactylAdapter(options: PterodactylOptions) {
     }
   }
   const adapter = {
-    supportsGatewayInventory: async () =>
-      (await discoverNickHostingExtension(options))?.capabilities.gatewayInventory === true,
+    gatewayTopology: createGatewayTopology(transport),
+    async supportsGatewayInventory(observed?: (checkedAt: Date) => void) {
+      if (options.gatewayInventoryDiscovery) {
+        const discovery = await options.gatewayInventoryDiscovery();
+        observed?.(discovery.checkedAt);
+        return discovery.supported;
+      }
+      return (await discoverNickHostingExtension(options))?.capabilities.gatewayInventory === true;
+    },
     readGatewayInventory: (nodeIds: number[], uuids: string[]) =>
       readGatewayInventory(transport, nodeIds, uuids),
     getAccount: () =>
@@ -430,7 +438,10 @@ export function createPterodactylAdapter(options: PterodactylOptions) {
         `${appServer(id)}?include=allocations`,
         applicationServerSchema,
       ),
-    async getApplicationServers(uuids: string[]): Promise<ApplicationServer[]> {
+    async getApplicationServers(
+      uuids: string[],
+      options?: { singlePage: true },
+    ): Promise<ApplicationServer[]> {
       const selected = [...new Set(parseInput(z.array(z.uuid()).max(1000), uuids))];
       const pages: ApplicationServer[][] = [];
       const seen = new Set<string>();
@@ -454,6 +465,7 @@ export function createPterodactylAdapter(options: PterodactylOptions) {
               'application',
               `servers?${query}`,
               applicationServerSchema,
+              options?.singlePage ? 1 : undefined,
             );
             for (const server of found) {
               if (!chunk.has(server.uuid) || seen.has(server.uuid) || seenIds.has(server.id))
@@ -1207,4 +1219,9 @@ export function createPterodactylAdapter(options: PterodactylOptions) {
   };
   return adapter;
 }
-export type PterodactylAdapter = ReturnType<typeof createPterodactylAdapter>;
+export type PterodactylAdapter = Omit<
+  ReturnType<typeof createPterodactylAdapter>,
+  'gatewayTopology'
+> & {
+  gatewayTopology?: ReturnType<typeof createGatewayTopology>;
+};

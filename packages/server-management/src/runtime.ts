@@ -70,6 +70,7 @@ import {
   providerBackupEventsEnabled,
   readProviderBackupCompletion,
 } from './provider-backup-events.js';
+import { providerCapabilities, providerCredentialBinding } from './provider-capabilities.js';
 import { cachedProviderStartLimits } from './provider-change-feed.js';
 import { supportsProviderFileOperations } from './provider-file-operations.js';
 import { type InstallationTranscript, installationLogKey } from './provisioning.js';
@@ -476,7 +477,13 @@ export async function createManagementRuntime(options: ManagementOptions) {
   const rawAdapter =
     options.adapter ??
     createScopedProviderAdapter(
-      createPterodactylAdapter(adapterOptions),
+      createPterodactylAdapter({
+        ...adapterOptions,
+        async gatewayInventoryDiscovery() {
+          const { extension, checkedAt } = await providerCapabilities(db, adapterOptions);
+          return { supported: extension?.capabilities.gatewayInventory === true, checkedAt };
+        },
+      }),
       async (identifier, timing) => {
         const read = () =>
           db
@@ -743,11 +750,12 @@ export async function createManagementRuntime(options: ManagementOptions) {
     authorizeJob: (connection, jobId, serverId) =>
       authorizeQueuedEffect(connection, jobId, serverId, env, adapter),
   });
+  const openworldRuntime = createOpenworldModuleRuntime(options.codec, env);
   const gameRuntime = createGameRuntimeDispatcher(
     trustedGameModules,
     new Map<string, import('./game-modules.js').GameRuntimeHooks>([
       [minecraft.id, minecraft],
-      ['openworld', createOpenworldModuleRuntime(options.codec, env)],
+      ['openworld', openworldRuntime],
       ['satisfactory', createSatisfactoryModuleRuntime(options.codec, env)],
     ]),
   );
@@ -793,6 +801,7 @@ export async function createManagementRuntime(options: ManagementOptions) {
     await reserveInstallation(connection, serverId, jobId, env);
   }
   const lifecycle = {
+    observationProviderBinding: consoleProviderBinding,
     onInstallationAvailable: options.onInstallationAvailable,
     supportsManagedFileOperations: async (serverId: string, connection: Kysely<Database>) => {
       const server = await connection
@@ -850,7 +859,13 @@ export async function createManagementRuntime(options: ManagementOptions) {
       await (await gameRuntime(context.db, context.server.id))?.cleanupBackup?.(context, mode);
     },
     cachedStartLimits: (serverId: string, connection: Kysely<Database>) =>
-      cachedProviderStartLimits(connection, serverId, values.pterodactylBaseUrl ?? ''),
+      cachedProviderStartLimits(
+        connection,
+        serverId,
+        values.pterodactylBaseUrl ?? '',
+        new Date(),
+        providerCredentialBinding(values.pterodactylBaseUrl ?? '', applicationKey),
+      ),
     env,
     logger: options.logger,
     installationRetry: async (
@@ -1088,12 +1103,18 @@ export async function createManagementRuntime(options: ManagementOptions) {
         throw new DomainError('configuration_invalid');
       return containerObserver.processStartedAt(server.pterodactyl_uuid);
     },
-    observeProcessStart: async (serverId: string, connection: Kysely<Database>) => {
+    observeProcessStart: async (
+      serverId: string,
+      connection: Kysely<Database>,
+      openworldObservation?: { verifiedUuid?: string },
+    ) => {
       const server = await connection
         .selectFrom('managed_servers')
-        .selectAll()
-        .where('id', '=', serverId)
-        .where('deleted_at', 'is', null)
+        .innerJoin('runtime_egg_mappings as mapping', 'mapping.id', 'managed_servers.mapping_id')
+        .selectAll('managed_servers')
+        .select(['mapping.nest_id', 'mapping.egg_id', 'mapping.game_id'])
+        .where('managed_servers.id', '=', serverId)
+        .where('managed_servers.deleted_at', 'is', null)
         .executeTakeFirst();
       if (
         !server?.pterodactyl_uuid ||
@@ -1106,23 +1127,34 @@ export async function createManagementRuntime(options: ManagementOptions) {
       const observerPreflight = verifyObservationHost(serverId, connection);
       const processStartedAt = containerObserver.processStartedAt.bind(containerObserver);
       const uuid = server.pterodactyl_uuid;
-      const remote = adapter.getApplicationServer(server.pterodactyl_id).then(async (value) => {
-        await verifyManagedIdentity(connection, server, value);
-        return value;
-      });
       const module = gameRuntime(connection, serverId);
+      const readRemote = async () => {
+        const value = await adapter.getApplicationServer(server.pterodactyl_id as number);
+        await verifyManagedIdentity(connection, server, value);
+        if (openworldObservation && (value.nest !== server.nest_id || value.egg !== server.egg_id))
+          throw new DomainError('provenance_mismatch');
+        return value;
+      };
+      const reusable =
+        openworldObservation?.verifiedUuid === uuid && server.game_id === 'openworld';
+      // Minecraft's epoch hook also needs the full Application server to verify its
+      // runtime image. Only Openworld's double epoch read takes an inventory receipt.
+      const direct = reusable ? undefined : readRemote();
+      const fallback = reusable
+        ? module.then((selected) => (selected === openworldRuntime ? undefined : readRemote()))
+        : undefined;
       // Bind Docker inspection to the host first, but do not serialize it behind
       // the provider round trip. The same in-flight remote proof is consumed by
       // the module; neither an image nor an epoch alone grants readiness.
       const before = observerPreflight.then(() => processStartedAt(uuid));
-      const verification = Promise.all([module, before]).then(([runtime, epoch]) =>
+      const verification = Promise.all([module, before]).then(async ([runtime, epoch]) =>
         runtime
           ? runtime.verifyProcessEpoch(
               serverId,
               connection,
               epoch,
               () => processStartedAt(uuid),
-              remote,
+              direct ?? (await fallback),
               observerPreflight,
             )
           : epoch,
@@ -1131,7 +1163,7 @@ export async function createManagementRuntime(options: ManagementOptions) {
       // no database/observer work may outlive the caller's connection lease.
       const proofs = await Promise.allSettled([
         observerPreflight,
-        remote,
+        direct ?? fallback,
         module,
         before,
         verification,

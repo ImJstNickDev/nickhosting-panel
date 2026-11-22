@@ -48,12 +48,16 @@ FILES = (
     'app/Providers/BridgeServiceProvider.php',
     'app/Services/ChangeFeed.php',
     'app/Services/GatewayInventory.php',
+    'app/Services/GatewayTopology.php',
+    'private/migrations/2026_11_22_000007_nickhosting_outbox_quarantine.php',
+    'private/migrations/2026_11_22_000008_nickhosting_gateway_topology.php',
     'app/Services/BackupEvents.php',
     'private/migrations/2026_10_17_000004_nickhosting_backup_events.php',
     'app/Services/Protocol.php',
     'app/Services/Settings.php',
     'private/configure.php',
     'private/install.sh',
+    'private/gateway-topology.php',
     'private/migrations/2026_10_11_000001_nickhosting_bridge.php',
     'private/remove.sh',
     'private/migrations/2026_10_11_000002_nickhosting_settings.php',
@@ -101,6 +105,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--output", type=Path,
-        default=ROOT.parent.parent / "build/blueprint/1.9.0/nickhosting.blueprint",
+        default=ROOT.parent.parent / "build/blueprint/1.10.0/nickhosting.blueprint",
     )
     print(build(ROOT, parser.parse_args().output))

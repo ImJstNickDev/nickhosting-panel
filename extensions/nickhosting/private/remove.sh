@@ -2,6 +2,7 @@
 set -euo pipefail
 : "${PTERODACTYL_DIRECTORY:?Panel directory required}"
 cd "$PTERODACTYL_DIRECTORY"
+php .blueprint/extensions/nickhosting/private/gateway-topology.php remove
 php .blueprint/extensions/nickhosting/private/configure.php remove
 php artisan config:clear
 # Retain our audit/outbox/link/key tables and callback allowlist deliberately.

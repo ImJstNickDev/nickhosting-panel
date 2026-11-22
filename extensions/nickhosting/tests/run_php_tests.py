@@ -15,6 +15,8 @@ sources.append("eval(base64_decode('"+base64.b64encode((root/'admin/controller.p
 migration=root/'private/migrations/2026_10_11_000001_nickhosting_bridge.php'
 script="<?php require '/app/vendor/autoload.php';\n"+'\n'.join(sources)
 script+="\n$schemaMigration=eval(base64_decode('"+base64.b64encode(migration.read_bytes().removeprefix(b'<?php')).decode()+"'));\n"
+quarantine=root/'private/migrations/2026_11_22_000007_nickhosting_outbox_quarantine.php'
+script+="\n$quarantineMigration=eval(base64_decode('"+base64.b64encode(quarantine.read_bytes().removeprefix(b'<?php')).decode()+"'));\n"
 technical=root/'private/migrations/2026_10_12_000003_nickhosting_technical_users.php'
 script+="\n$technicalMigration=eval(base64_decode('"+base64.b64encode(technical.read_bytes().removeprefix(b'<?php')).decode()+"'));\n"
 backup=root/'private/migrations/2026_10_17_000004_nickhosting_backup_events.php'
@@ -30,5 +32,7 @@ recovery=root/'private/migrations/2026_10_19_000006_nickhosting_file_operation_r
 script+="\n$fileOperationRecoveryMigration=eval(base64_decode('"+base64.b64encode(recovery.read_bytes().removeprefix(b'<?php')).decode()+"'));\n"
 script+="\n$fileOperationHarness=base64_decode('"+base64.b64encode((root/'tests/file_operations_harness.php').read_bytes().removeprefix(b'<?php')).decode()+"');\n"
 script+="\n$inventoryHarness=base64_decode('"+base64.b64encode((root/'tests/inventory_harness.php').read_bytes().removeprefix(b'<?php')).decode()+"');\n"
+topology=root/'private/migrations/2026_11_22_000008_nickhosting_gateway_topology.php'
+script+="\n$topologyMigration=eval(base64_decode('"+base64.b64encode(topology.read_bytes().removeprefix(b'<?php')).decode()+"'));\n"
 script+=(root/'tests/php_harness.php').read_text().removeprefix('<?php')
 subprocess.run(['docker','exec','-i',args.container,'php'],input=script,text=True,check=True)

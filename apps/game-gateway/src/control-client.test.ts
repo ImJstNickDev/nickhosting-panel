@@ -4,6 +4,7 @@ import { createServer } from 'node:http';
 import { describe, expect, it, vi } from 'vitest';
 import {
   createGatewayControlClient,
+  GatewayEvidenceRejectedError,
   GatewayProviderRateLimitedError,
   GatewayRouteRevisionStaleError,
 } from './control-client.js';
@@ -26,6 +27,21 @@ const snapshot = {
 };
 
 describe('authenticated bounded Gateway control client', () => {
+  it.each([
+    [409, 'provenance_mismatch'],
+    [401, 'unauthenticated'],
+  ] as const)('withdraws explicitly rejected evidence (%i)', async (status, code) => {
+    const client = createGatewayControlClient({
+      ...settings,
+      fetcher: async () => Response.json({ error: { code } }, { status }),
+    });
+    await expect(client.requestJson('evidence')).rejects.toBeInstanceOf(
+      GatewayEvidenceRejectedError,
+    );
+    await expect(client.requestJson('configuration')).rejects.not.toBeInstanceOf(
+      GatewayEvidenceRejectedError,
+    );
+  });
   it('cancels an individual evidence read without closing the control client', async () => {
     const controller = new AbortController();
     const started = Promise.withResolvers<void>();

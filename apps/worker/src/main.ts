@@ -3,7 +3,12 @@ import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createLogger, DomainError, encryptionKeyFromBase64, SecretCodec } from '@nickhosting/core';
 import { createDatabase, getSecret, getSettings } from '@nickhosting/database';
-import { createPrivateTransferCache, processJob, startJobWorker } from '@nickhosting/jobs';
+import {
+  createPrivateTransferCache,
+  createProviderRequestBudget,
+  processJob,
+  startJobWorker,
+} from '@nickhosting/jobs';
 import {
   createDirectoryIdentityCache,
   createInstallationCollector,
@@ -35,7 +40,8 @@ export async function main(env: NodeJS.ProcessEnv = process.env) {
   if (!env.DATABASE_URL || !env.REDIS_URL || !env.NH_JOB_PREFIX)
     throw new DomainError('configuration_invalid');
   const { db, pool } = createDatabase(env.DATABASE_URL);
-  const transportCoordinator = createManagementTransportCoordinator('worker');
+  const budget = createProviderRequestBudget(env.REDIS_URL, env.NH_JOB_PREFIX);
+  const transportCoordinator = createManagementTransportCoordinator('worker', budget);
   let directoryIdentityCache: ReturnType<typeof createDirectoryIdentityCache> | undefined;
   let transferCache: ReturnType<typeof createPrivateTransferCache> | undefined;
   try {
@@ -210,7 +216,9 @@ export async function main(env: NodeJS.ProcessEnv = process.env) {
           activeKeyId: keyId,
           keys: { [keyId]: encryptionKeyFromBase64(env.NH_SECRETS_MASTER_KEY) },
         });
-        await refreshProviderFeeds(db, codec, env, transportCoordinator);
+        await withProviderReadCaller('worker-feed', () =>
+          refreshProviderFeeds(db, codec, env, transportCoordinator),
+        );
       },
       () => logger.log('warn', 'provider.feed_unavailable'),
     );
@@ -219,8 +227,10 @@ export async function main(env: NodeJS.ProcessEnv = process.env) {
         logger.log('warn', 'openworld.capture_index_unavailable', { serverId }),
       ),
     );
-    const worldIndexes = startMinecraftWorldIndexLoop(db, management, env, (serverId) =>
-      logger.log('warn', 'minecraft.world_index_unavailable', { serverId }),
+    const worldIndexes = withProviderReadCaller('worker-minecraft-worlds', () =>
+      startMinecraftWorldIndexLoop(db, management, env, (serverId) =>
+        logger.log('warn', 'minecraft.world_index_unavailable', { serverId }),
+      ),
     );
     const modpacks = startMinecraftModpackLoop({
       notificationPool: pool,
@@ -257,7 +267,7 @@ export async function main(env: NodeJS.ProcessEnv = process.env) {
       try {
         await recoverInstallations();
         await withProviderReadCaller('worker-reconcile', () =>
-          reconcileServers(db, management, logger, env),
+          reconcileServers(db, management, logger, env, pool),
         );
         successful =
           schedulesHealthy &&
@@ -314,6 +324,7 @@ export async function main(env: NodeJS.ProcessEnv = process.env) {
           await transferCache?.close();
           await heartbeat('stopped');
           stopReadReporting();
+          budget.close();
           await db.destroy();
         }
         logger.log('info', 'worker.stopped');
@@ -336,6 +347,7 @@ export async function main(env: NodeJS.ProcessEnv = process.env) {
       },
     };
   } catch (error) {
+    budget.close();
     directoryIdentityCache?.close();
     await transferCache?.close();
     await db.destroy();

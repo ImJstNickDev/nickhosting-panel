@@ -61,11 +61,11 @@ class PackageTests(unittest.TestCase):
         with zipfile.ZipFile(self.output) as archive:
             for name in ('app/Services/TechnicalAccounts.php', 'app/Http/Middleware/TechnicalAccountAccess.php', 'private/migrations/2026_10_12_000003_nickhosting_technical_users.php'):
                 self.assertIn(name, archive.namelist())
-            self.assertIn(b'version: 1.9.0\n', archive.read('conf.yml'))
+            self.assertIn(b'version: 1.10.0\n', archive.read('conf.yml'))
             self.assertIn(b'target: beta-2026-08\n', archive.read('conf.yml'))
-            self.assertIn(b"'extensionVersion' => '1.9.0'", archive.read('app/Http/Controllers/CapabilitiesController.php'))
+            self.assertIn(b"'extensionVersion' => '1.10.0'", archive.read('app/Http/Controllers/CapabilitiesController.php'))
             self.assertIn(b"'panel' => '1.15.1'", archive.read('app/Http/Controllers/CapabilitiesController.php'))
-            self.assertIn(b'<small>1.9.0</small>', archive.read('admin/view.blade.php'))
+            self.assertIn(b'<small>1.10.0</small>', archive.read('admin/view.blade.php'))
 
     def test_gateway_and_linked_snapshot_capabilities_match_packaged_routes(self):
         packager.build(self.source, self.output)
@@ -125,7 +125,8 @@ class PackageTests(unittest.TestCase):
             self.assertIn(b"'installationConsole' => true", archive.read('app/Http/Controllers/CapabilitiesController.php'))
             self.assertIn(b'/installation-websocket', archive.read('routes/client.php'))
             self.assertNotIn(b'Server\\Installed', archive.read('app/Providers/BridgeServiceProvider.php'))
-            self.assertEqual(sum(name.startswith('private/migrations/') for name in archive.namelist()), 6)
+            self.assertIn('private/migrations/2026_11_22_000007_nickhosting_outbox_quarantine.php', archive.namelist())
+            self.assertIn('private/migrations/2026_11_22_000008_nickhosting_gateway_topology.php', archive.namelist())
 
     def test_scoped_file_operations_and_durable_receipts_packaged(self):
         packager.build(self.source, self.output)
@@ -162,7 +163,8 @@ class PackageTests(unittest.TestCase):
                          'Http/Controllers/DirectorySettingsController.php'):
                 self.assertIn('app/' + name, archive.namelist())
             self.assertIn(b"'bulkDirectoryListings' => true", archive.read('app/Http/Controllers/CapabilitiesController.php'))
-            self.assertEqual(sum(name.startswith('private/migrations/') for name in archive.namelist()), 6)
+            self.assertIn('private/migrations/2026_11_22_000007_nickhosting_outbox_quarantine.php', archive.namelist())
+            self.assertIn('private/migrations/2026_11_22_000008_nickhosting_gateway_topology.php', archive.namelist())
 
     def test_rejects_source_symlink(self):
         config = self.source / "conf.yml"

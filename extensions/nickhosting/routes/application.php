@@ -10,6 +10,8 @@ Route::pattern('instance', '[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-f
 Route::pattern('uuid', '[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}');
 Route::pattern('nickUser', '[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}');
 Route::pattern('keyIdentifier', 'ptlc_[a-zA-Z0-9]{11}');
+Route::post('/gateway-topology/snapshot', [BridgeController::class, 'gatewayTopologySnapshot']);
+Route::post('/gateway-topology/revision', [BridgeController::class, 'gatewayRevision']);
 Route::post('/gateway-inventory', [BridgeController::class, 'gatewayInventory']);
 Route::post('/instances/{instance}/server-snapshots', [BridgeController::class, 'serverSnapshots']);
 Route::post('/instances/{instance}', [BridgeController::class, 'register']);

@@ -27,9 +27,13 @@ class {identifier}ExtensionController extends Controller
         $this->authorizeAdmin($request);
         $origin = $this->settings->origin();
         $instances = DB::table('nickhosting_instances')->select('id', 'callback_url')->get()->map(function ($instance) use ($origin) {
+            $pending = DB::table('nickhosting_outbox')->where('instance_id', $instance->id)->whereNull('delivered_at');
+            $latest = (clone $pending)->whereNotNull('quarantined_at')->orderByDesc('quarantined_at')->first(['server_uuid','id']);
             return ['callback' => $instance->callback_url,
                 'allowed' => Protocol::callbackAllowed($instance->callback_url, $origin === '' ? [] : [$origin]),
-                'pending' => DB::table('nickhosting_outbox')->where('instance_id', $instance->id)->whereNull('delivered_at')->count(),
+                'pending' => (clone $pending)->whereNull('quarantined_at')->count(),
+                'quarantined' => (clone $pending)->whereNotNull('quarantined_at')->count(),
+                'lastRejectedServer' => $latest?->server_uuid, 'lastRejectedEvent' => $latest?->id,
                 'lastDelivered' => ($date = DB::table('nickhosting_outbox')->where('instance_id', $instance->id)->max('delivered_at'))
                     ? \Illuminate\Support\Carbon::parse($date)->utc()->toIso8601String() : null];
         });

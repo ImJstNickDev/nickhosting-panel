@@ -3,20 +3,93 @@ import type { SecretCodec } from '@nickhosting/core';
 import { type Database, getSecret, getSettings } from '@nickhosting/database';
 import {
   createNickHostingBridge,
-  discoverNickHostingExtension,
-  type NickHostingExtension,
   PROVIDER_SNAPSHOT_BATCH_SIZE,
   type ProviderChange,
   PterodactylError,
 } from '@nickhosting/pterodactyl-adapter';
 import { type Kysely, sql } from 'kysely';
 import { backupSchemaAvailable } from './provider-backup-events.js';
+import { providerCapabilities, providerCredentialBinding } from './provider-capabilities.js';
 import {
   invalidateProviderFeedHealth,
   linkProviderFeedServer,
   markProviderFeedHealth,
   refreshLinkedProviderSnapshots,
 } from './provider-change-feed.js';
+
+type LinkServer = {
+  id: string;
+  owner_id: string;
+  external_id: string;
+  pterodactyl_id: number | null;
+  pterodactyl_uuid: string | null;
+  pterodactyl_identifier: string | null;
+  pterodactyl_node_id: number;
+  provider_user_id: number | null;
+};
+
+type LinkRetry = { binding: string | null; attempts: number | null; retry_at: Date | null };
+const digest = (input: unknown) => createHash('sha256').update(JSON.stringify(input)).digest('hex');
+
+async function firstLink(
+  db: Kysely<Database>,
+  bridge: ReturnType<typeof createNickHostingBridge>,
+  instanceId: string,
+  credentialBinding: string,
+  server: LinkServer,
+  retry?: LinkRetry,
+) {
+  if (!server.pterodactyl_id || !server.pterodactyl_uuid || !server.pterodactyl_identifier)
+    return false;
+  const identity = {
+    providerId: server.pterodactyl_id,
+    providerUuid: server.pterodactyl_uuid,
+    identifier: server.pterodactyl_identifier,
+    externalId: server.external_id,
+    nodeId: server.pterodactyl_node_id,
+  };
+  const binding = digest([credentialBinding, identity, server.owner_id, server.provider_user_id]);
+  const sameBinding = retry?.binding === binding;
+  if (sameBinding && retry.retry_at && retry.retry_at.getTime() > Date.now()) return false;
+  try {
+    const snapshot = await bridge.linkServer(
+      instanceId,
+      identity,
+      server.provider_user_id ?? undefined,
+    );
+    await linkProviderFeedServer(db, instanceId, server.id, snapshot, new Date(), {
+      ownerId: server.owner_id,
+      providerUserId: server.provider_user_id,
+    });
+  } catch (error) {
+    if (
+      !(
+        error instanceof PterodactylError &&
+        (error.upstreamStatus === 404 || error.upstreamStatus === 409)
+      )
+    )
+      throw error;
+    const attempts = sameBinding ? Math.min(2_147_483_647, (retry.attempts ?? 0) + 1) : 1;
+    const record = {
+      binding,
+      attempts,
+      retry_at: new Date(Date.now() + Math.min(900, 60 * 2 ** Math.min(4, attempts - 1)) * 1000),
+    };
+    await db
+      .insertInto('provider_feed_link_retries')
+      .values({ instance_id: instanceId, server_id: server.id, ...record })
+      .onConflict((c) => c.columns(['instance_id', 'server_id']).doUpdateSet(record))
+      .execute();
+    return false;
+  }
+  if (retry?.binding)
+    await db
+      .deleteFrom('provider_feed_link_retries')
+      .where('instance_id', '=', instanceId)
+      .where('server_id', '=', server.id)
+      .execute();
+  return true;
+}
 
 /** Link one newly provisioned identity immediately so its first installer stream
  * need not wait for the shared feed maintenance interval. */
@@ -42,6 +115,7 @@ export async function ensureInstallationFeedLink(
       .innerJoin('managed_nodes as n', 'n.id', 's.node_id')
       .select([
         's.id',
+        's.owner_id',
         's.pterodactyl_id',
         's.pterodactyl_uuid',
         's.pterodactyl_identifier',
@@ -73,39 +147,23 @@ export async function ensureInstallationFeedLink(
     applicationKey,
     coordinator,
   });
-  const snapshot = await bridge.linkServer(
-    feed.instance_id,
-    {
-      providerId: server.pterodactyl_id,
-      providerUuid: server.pterodactyl_uuid,
-      identifier: server.pterodactyl_identifier,
-      externalId: server.external_id,
-      nodeId: server.pterodactyl_node_id,
-    },
-    server.provider_user_id ?? undefined,
-  );
-  await linkProviderFeedServer(db, feed.instance_id, serverId, snapshot);
-}
-
-const discoveryByDatabase = new WeakMap<
-  Kysely<Database>,
-  { binding: string; checkedAt: Date; extension: NickHostingExtension | null }
->();
-
-async function feedCapabilities(
-  db: Kysely<Database>,
-  options: Parameters<typeof discoverNickHostingExtension>[0],
-) {
-  const binding = createHash('sha256')
-    .update(JSON.stringify([options.baseURL, options.applicationKey]))
-    .digest('hex');
-  const previous = discoveryByDatabase.get(db);
-  if (previous?.binding === binding && Date.now() - previous.checkedAt.getTime() < 60_000)
-    return previous;
-  const extension = await discoverNickHostingExtension(options);
-  const discovery = { binding, checkedAt: new Date(), extension };
-  discoveryByDatabase.set(db, discovery);
-  return discovery;
+  const retry = await db
+    .selectFrom('provider_feed_link_retries')
+    .selectAll()
+    .where('instance_id', '=', feed.instance_id)
+    .where('server_id', '=', serverId)
+    .executeTakeFirst();
+  if (
+    !(await firstLink(
+      db,
+      bridge,
+      feed.instance_id,
+      digest([values.pterodactylBaseUrl, applicationKey]),
+      server,
+      retry,
+    ))
+  )
+    throw new Error('Provider feed link deferred');
 }
 
 async function refreshExistingLinks(
@@ -147,7 +205,9 @@ export async function refreshProviderFeeds(
   // Rolling upgrades may start the worker before the explicit migration command.
   const available = await sql<{
     present: string | null;
-  }>`select to_regclass(current_schema() || '.provider_change_feeds')::text as present`.execute(db);
+  }>`select to_regclass(current_schema() || '.provider_feed_link_retries')::text as present`.execute(
+    db,
+  );
   if (!available.rows[0]?.present) return;
   const { values } = await getSettings(db, env);
   const feeds = await db
@@ -179,8 +239,17 @@ export async function refreshProviderFeeds(
           .selectFrom('managed_servers as s')
           .innerJoin('managed_nodes as n', 'n.id', 's.node_id')
           .leftJoin('provider_server_projections as p', 'p.server_id', 's.id')
+          .leftJoin('provider_feed_link_retries as r', (join) =>
+            join.onRef('r.server_id', '=', 's.id').on('r.instance_id', '=', feed.instance_id),
+          )
           .select([
             's.id',
+            's.owner_id',
+            'r.binding',
+            'r.attempts',
+            'r.retry_at',
+            'p.synchronized_at',
+            'p.valid',
             's.pterodactyl_id',
             's.pterodactyl_uuid',
             's.pterodactyl_identifier',
@@ -195,16 +264,40 @@ export async function refreshProviderFeeds(
             eb.or([eb('p.instance_id', 'is', null), eb('p.instance_id', '=', feed.instance_id)]),
           )
           .where((eb) =>
-            eb.or([
-              eb('p.server_id', 'is', null),
-              eb.and([
-                eb('p.identity_invalidated', '=', false),
-                eb('p.synchronized_at', '<=', new Date(Date.now() - 60_000)),
-              ]),
-            ]),
+            eb.or([eb('p.server_id', 'is', null), eb('p.identity_invalidated', '=', false)]),
           )
           .execute();
-        const { checkedAt, extension } = await feedCapabilities(db, options);
+        const binding = providerCredentialBinding(options.baseURL, applicationKey);
+        const linked = [];
+        const healthTargets: string[] = [];
+        for (const server of servers) {
+          if (!server.pterodactyl_id || !server.pterodactyl_uuid || !server.pterodactyl_identifier)
+            continue;
+          if (server.revision !== null) {
+            healthTargets.push(server.pterodactyl_uuid);
+            if (
+              server.valid &&
+              server.synchronized_at &&
+              server.synchronized_at.getTime() > Date.now() - 60_000
+            )
+              continue;
+            linked.push({
+              id: server.id,
+              providerUuid: server.pterodactyl_uuid,
+              revision: server.revision,
+            });
+            continue;
+          }
+          if (await firstLink(db, bridge, feed.instance_id, binding, server, server))
+            healthTargets.push(server.pterodactyl_uuid);
+        }
+        // An empty scopes query is the legacy global-health endpoint. Retire
+        // all proofs locally; it cannot authorize any current or future link.
+        if (!healthTargets.length) {
+          await invalidateProviderFeedHealth(db, feed.instance_id);
+          return;
+        }
+        const { checkedAt, extension } = await providerCapabilities(db, options);
         if (
           (await backupSchemaAvailable(db)) &&
           (!feed.capabilities_checked_at || checkedAt > feed.capabilities_checked_at)
@@ -218,43 +311,6 @@ export async function refreshProviderFeeds(
             .where('instance_id', '=', feed.instance_id)
             .execute();
         }
-        const linked = [];
-        for (const server of servers) {
-          if (!server.pterodactyl_id || !server.pterodactyl_uuid || !server.pterodactyl_identifier)
-            continue;
-          if (server.revision !== null) {
-            linked.push({
-              id: server.id,
-              providerUuid: server.pterodactyl_uuid,
-              revision: server.revision,
-            });
-            continue;
-          }
-          // First links still require the complete managed identity and the expected owner.
-          try {
-            const snapshot = await bridge.linkServer(
-              feed.instance_id,
-              {
-                providerId: server.pterodactyl_id,
-                providerUuid: server.pterodactyl_uuid,
-                identifier: server.pterodactyl_identifier,
-                externalId: server.external_id,
-                nodeId: server.pterodactyl_node_id,
-              },
-              server.provider_user_id ?? undefined,
-            );
-            await linkProviderFeedServer(db, feed.instance_id, server.id, snapshot);
-          } catch (error) {
-            // A deleted or mismatched new identity has no projection and cannot poison its peers.
-            if (
-              !(
-                error instanceof PterodactylError &&
-                (error.upstreamStatus === 404 || error.upstreamStatus === 409)
-              )
-            )
-              throw error;
-          }
-        }
         await refreshExistingLinks(
           db,
           bridge,
@@ -267,9 +323,32 @@ export async function refreshProviderFeeds(
           .select('generation')
           .where('instance_id', '=', feed.instance_id)
           .executeTakeFirstOrThrow();
-        const health = await bridge.health(feed.instance_id);
-        if (health.instanceId !== feed.instance_id) throw new Error('identity mismatch');
-        await markProviderFeedHealth(db, { ...health, expectedGeneration: cursor.generation });
+        // An older extension ignores the query and supplies its single global drain fence.
+        // A newer one returns revision evidence only for these managed links.
+        const scopes = [];
+        for (let offset = 0; ; offset += PROVIDER_SNAPSHOT_BATCH_SIZE) {
+          const ids = healthTargets.slice(offset, offset + PROVIDER_SNAPSHOT_BATCH_SIZE);
+          const health = await bridge.health(feed.instance_id, ids);
+          if (!health.scopes) {
+            if (offset !== 0) throw new Error('Inconsistent provider health response');
+            await markProviderFeedHealth(db, {
+              ...health,
+              scopes: undefined,
+              expectedGeneration: cursor.generation,
+            });
+            break;
+          }
+          for (const scope of health.scopes) scopes.push({ ...scope, checkedAt: health.checkedAt });
+          if (offset + ids.length >= healthTargets.length) {
+            await markProviderFeedHealth(db, {
+              ...health,
+              scopes,
+              credentialBinding: binding,
+              expectedGeneration: cursor.generation,
+            });
+            break;
+          }
+        }
       });
     } catch {
       await invalidateProviderFeedHealth(db, feed.instance_id);

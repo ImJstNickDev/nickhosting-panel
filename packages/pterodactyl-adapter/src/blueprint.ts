@@ -234,11 +234,34 @@ export function createNickHostingBridge(options: TransportOptions) {
         readOnly: true,
       });
     },
-    health(instanceId: string) {
+    health(instanceId: string, serverUuids: string[] = []) {
+      const ids = z.array(uuid).max(PROVIDER_SNAPSHOT_BATCH_SIZE).parse(serverUuids);
+      const requested = new Set(ids);
+      if (requested.size !== ids.length) throw new DomainError('validation_failed');
+      const proof = z
+        .object({
+          providerUuid: uuid,
+          ownerId: z.number().int().positive(),
+          revision: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+          valid: z.boolean(),
+          pending: z.boolean(),
+        })
+        .strict();
+      const response = providerHealthSchema
+        .extend({
+          instanceId: z.literal(instanceId),
+          scopes: z.array(proof).max(ids.length).optional(),
+        })
+        .refine(
+          ({ scopes }) =>
+            !scopes ||
+            (scopes.every((scope) => requested.has(scope.providerUuid)) &&
+              new Set(scopes.map((scope) => scope.providerUuid)).size === scopes.length),
+        );
       return transport.json(
         'application',
-        `${instancePath(instanceId)}/health`,
-        providerHealthSchema,
+        `${instancePath(instanceId)}/health${ids.length ? `?scopes=${ids.join(',')}` : ''}`,
+        response,
       );
     },
     provisionUser(instanceId: string, userId: string) {

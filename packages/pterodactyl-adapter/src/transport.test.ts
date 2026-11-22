@@ -12,6 +12,29 @@ const schema = z.object({ value: z.number() });
 afterEach(() => vi.useRealTimers());
 
 describe('Pterodactyl request coordination', () => {
+  it('keeps the interactive reserve available when an identical background GET is awaiting admission', async () => {
+    const admission = Promise.withResolvers<number>();
+    const budget = {
+      acquire: vi.fn(async (_binding: string, background: boolean) =>
+        background ? admission.promise : 0,
+      ),
+      observe: vi.fn(async () => {}),
+    };
+    const fetcher = vi.fn(async () => Response.json({ value: 1 }));
+    const transport = createTransport({
+      ...config,
+      fetcher,
+      coordinator: createTransportCoordinator('api', budget),
+    });
+    const read = () => transport.json('application', 'servers/1', schema);
+    const deferred = withProviderReadCaller('worker-minecraft-worlds', read);
+    const interactive = read();
+    admission.resolve(3000);
+    await expect(deferred).rejects.toMatchObject({ reason: 'rate_limited' });
+    await expect(interactive).resolves.toEqual({ value: 1 });
+    expect(fetcher).toHaveBeenCalledOnce();
+  });
+
   it('counts wire dispatches once per initiating caller, including an upstream 429', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-11-22T12:00:00Z'));

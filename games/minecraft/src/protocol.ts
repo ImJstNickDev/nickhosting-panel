@@ -642,6 +642,7 @@ export function createMinecraftProtocolAdapter(
     id: 'minecraft-java',
     startupHint: 'provider_running',
     readinessSource: minecraftReadinessSource,
+    readOnlyStatusProbe: true,
     supports: (route) => !!selected(route),
     createSession,
     // Minecraft is TCP-only and requires a per-connection status/ping dialogue.

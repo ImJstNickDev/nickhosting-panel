@@ -13,7 +13,7 @@
     $italian = str_starts_with(app()->getLocale(), 'it');
 @endphp
 <div class="box box-primary">
-    <div class="box-header with-border"><h3 class="box-title">NickHosting <small>1.9.0</small></h3></div>
+    <div class="box-header with-border"><h3 class="box-title">NickHosting <small>1.10.0</small></h3></div>
     <div class="box-body">
         <ul>
             <li>{{ $italian ? 'Crea account tecnici Pterodactyl separati per gli utenti NickHosting.' : 'Creates separate Pterodactyl technical accounts for NickHosting users.' }}</li>
@@ -80,6 +80,11 @@
                     ? ($italian ? 'Destinazione consentita' : 'Destination allowed')
                     : ($italian ? 'Sospese: destinazione non consentita' : 'Paused: destination not allowed') }}</dd>
                 <dt>{{ $italian ? 'In attesa' : 'Pending' }}</dt><dd>{{ $instance['pending'] }}</dd>
+                <dt>{{ $italian ? 'In quarantena (collegamento rifiutato)' : 'Quarantined (binding rejected)' }}</dt><dd>{{ $instance['quarantined'] }}</dd>
+                @if ($instance['lastRejectedEvent'])
+                <dt>{{ $italian ? 'Ultimo server rifiutato' : 'Last rejected server' }}</dt><dd><code>{{ $instance['lastRejectedServer'] }}</code></dd>
+                <dt>{{ $italian ? 'Ultimo evento rifiutato' : 'Last rejected event' }}</dt><dd><code>{{ $instance['lastRejectedEvent'] }}</code></dd>
+                @endif
                 <dt>{{ $italian ? 'Ultima consegna confermata (UTC)' : 'Last acknowledged delivery (UTC)' }}</dt>
                 <dd>{{ $instance['lastDelivered'] ?? ($italian ? 'Nessuna' : 'None') }}</dd>
             </dl>

@@ -1247,6 +1247,7 @@ export async function reportGatewayObservation(
         .updateTable('managed_servers')
         .set({ readiness: 'loading' })
         .where('id', '=', serverId)
+        .where('readiness', '!=', 'loading')
         .execute();
       return getGatewayState(tx, serverId, options);
     }
@@ -1285,6 +1286,7 @@ export async function reportGatewayObservation(
       .updateTable('managed_servers')
       .set({ readiness: 'ready' })
       .where('id', '=', serverId)
+      .where('readiness', '!=', 'ready')
       .execute();
     if (state.wake_job_id && operation) {
       const duration = observed.getTime() - processStart.getTime();

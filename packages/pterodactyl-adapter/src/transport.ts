@@ -2,7 +2,11 @@ import { createHash } from 'node:crypto';
 import { DomainError } from '@nickhosting/core';
 import { z } from 'zod';
 import type { ContainerObserver } from './container-observer.js';
-import { createProviderReadAttribution } from './provider-read-attribution.js';
+import {
+  assertProviderReadActive,
+  createProviderReadAttribution,
+  isBackgroundProviderRead,
+} from './provider-read-attribution.js';
 
 export type CredentialScope = 'application' | 'client';
 export type RemoteOutcome = 'rejected' | 'unknown';
@@ -128,12 +132,20 @@ interface RequestScope {
   activeRequests: number;
   cooldownUntil: number;
   pendingJson: Map<string, Promise<string>>;
+  publishedRateLimit?: { limit: number; at: number };
 }
 /** Share between adapters for one application process. It stores no plaintext credentials. */
-export function createTransportCoordinator(runtime?: 'api' | 'worker') {
+export function createTransportCoordinator(
+  runtime?: 'api' | 'worker',
+  budget?: {
+    acquire(binding: string, background: boolean): Promise<number>;
+    observe(binding: string, limit: number, cooldownMs: number): Promise<void>;
+  },
+) {
   const scopes = new Map<string, RequestScope>();
   return {
     ...createProviderReadAttribution(runtime),
+    budget,
     scope(identity: string, credentialScope: CredentialScope): RequestScope {
       const existing = scopes.get(identity);
       if (existing) return existing;
@@ -194,12 +206,19 @@ export function createTransport(options: TransportOptions) {
   }
   const fetcher = options.fetcher ?? fetch;
   const coordinator = options.coordinator ?? createTransportCoordinator();
-  function state(scope: CredentialScope) {
+  function binding(scope: CredentialScope) {
     const credential = scope === 'application' ? options.applicationKey : options.clientKey;
-    const identity = createHash('sha256')
+    return createHash('sha256')
       .update(JSON.stringify([base.href, scope, credential]))
       .digest('hex');
-    return coordinator.scope(identity, scope);
+  }
+  const applicationBinding = binding('application');
+  const clientBinding = binding('client');
+  // NickPanel configures one Application principal per provider. Rotating its
+  // key does not reset Pterodactyl's user-level budget. Auth caches stay keyed by credential.
+  const providerBudgetBinding = createHash('sha256').update(base.href).digest('hex');
+  function state(scope: CredentialScope) {
+    return coordinator.scope(scope === 'application' ? applicationBinding : clientBinding, scope);
   }
   async function request(
     scope: CredentialScope,
@@ -209,6 +228,7 @@ export function createTransport(options: TransportOptions) {
     raw = false,
     requestOptions?: { timeoutMs?: number; readOnly?: true },
   ): Promise<Response> {
+    assertProviderReadActive();
     const key = scope === 'application' ? options.applicationKey : options.clientKey;
     if (!key) throw new PterodactylError('credential_missing', scope, 'rejected');
     const requestScope = state(scope);
@@ -226,6 +246,15 @@ export function createTransport(options: TransportOptions) {
     if (remaining > 0)
       throw new PterodactylError('rate_limited', scope, 'rejected', 429, remaining);
     const mutating = method !== 'GET' && !requestOptions?.readOnly;
+    const budget = scope === 'application' ? coordinator.budget : undefined;
+    if (budget) {
+      const delayMs = await budget.acquire(
+        providerBudgetBinding,
+        !mutating && isBackgroundProviderRead(),
+      );
+      if (delayMs > 0) throw new PterodactylError('rate_limited', scope, 'rejected', 429, delayMs);
+    }
+    assertProviderReadActive();
     const invalidatedReads = mutating
       ? [
           requestScope.pendingJson,
@@ -267,17 +296,26 @@ export function createTransport(options: TransportOptions) {
       requestScope.activeRequests--;
       for (const reads of invalidatedReads) reads.clear();
     }
-    if (!response.ok) {
-      const status = response.status;
-      const retryAfterMs =
-        status === 429 ? retryDelay(response.headers.get('retry-after'), Date.now()) : undefined;
-      if (retryAfterMs !== undefined) {
-        const limitedScope = resourceScope ?? requestScope;
-        limitedScope.cooldownUntil = Math.max(
-          limitedScope.cooldownUntil,
-          Date.now() + retryAfterMs,
-        );
+    const status = response.status;
+    const retryAfterMs =
+      status === 429 ? retryDelay(response.headers.get('retry-after'), Date.now()) : undefined;
+    if (retryAfterMs !== undefined) {
+      const limited = resourceScope ?? requestScope;
+      limited.cooldownUntil = Math.max(limited.cooldownUntil, Date.now() + retryAfterMs);
+    }
+    if (budget) {
+      const advertised = Number(response.headers.get('x-ratelimit-limit'));
+      const limit =
+        Number.isSafeInteger(advertised) && advertised > 0 && advertised <= 1_000_000
+          ? advertised
+          : 0;
+      const prior = requestScope.publishedRateLimit;
+      if (retryAfterMs || (limit && (prior?.limit !== limit || Date.now() - prior.at >= 60_000))) {
+        if (limit) requestScope.publishedRateLimit = { limit, at: Date.now() };
+        await budget.observe(providerBudgetBinding, limit, retryAfterMs ?? 0);
       }
+    }
+    if (!response.ok) {
       await response.body?.cancel();
       const reason =
         status === 401 || status === 403
@@ -324,8 +362,12 @@ export function createTransport(options: TransportOptions) {
     let text: string;
     if (coalesce && method === 'GET' && body === undefined) {
       const pendingJson = state(scope).pendingJson;
-      const identity = path;
-      let pending = pendingJson.get(identity);
+      // A background leader can be deferred while an interactive read still has quota.
+      // Background callers may join a foreground read; the reverse must retain its own admission.
+      const background =
+        scope === 'application' && coordinator.budget && isBackgroundProviderRead();
+      const identity = background ? `background:${path}` : path;
+      let pending = pendingJson.get(path) ?? (background ? pendingJson.get(identity) : undefined);
       if (!pending) {
         pending = readJson();
         if (pendingJson.size < 1024) pendingJson.set(identity, pending);
@@ -370,7 +412,12 @@ export function createTransport(options: TransportOptions) {
     return (await json(scope, path, z.object({ attributes: schema }), method, body, coalesce))
       .attributes;
   }
-  async function list<T>(scope: CredentialScope, path: string, schema: z.ZodType<T>): Promise<T[]> {
+  async function list<T>(
+    scope: CredentialScope,
+    path: string,
+    schema: z.ZodType<T>,
+    maxPages = 1000,
+  ): Promise<T[]> {
     const entries: T[] = [];
     const pageSchema = z.object({
       object: z.literal('list'),
@@ -379,12 +426,12 @@ export function createTransport(options: TransportOptions) {
         .object({
           pagination: z.object({
             current_page: z.number().int().positive(),
-            total_pages: z.number().int().nonnegative().max(1000),
+            total_pages: z.number().int().nonnegative().max(maxPages),
           }),
         })
         .optional(),
     });
-    for (let page = 1; page <= 1000; page++) {
+    for (let page = 1; page <= maxPages; page++) {
       // Never follow provider-supplied links, which could send credentials to another host.
       const result = await json(
         scope,

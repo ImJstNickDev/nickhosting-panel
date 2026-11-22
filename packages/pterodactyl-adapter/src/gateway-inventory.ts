@@ -53,6 +53,54 @@ const inventory = z
     servers: z.array(server).max(10000),
   })
   .strict();
+const revision = z.strictObject({
+  epoch: z.uuid(),
+  digest: z.string().regex(/^[0-9a-f]{64}$/),
+  revision: z.string().regex(/^[1-9][0-9]{0,19}$/),
+});
+export type GatewayTopologyRevision = z.infer<typeof revision>;
+const versionedInventory = inventory.extend({ receipt: revision });
+export function createGatewayTopology(transport: ReturnType<typeof createTransport>) {
+  return {
+    snapshot: async (nodeIds: number[], serverUuids: string[]) => {
+      const input = parseInput(request, { nodeIds, serverUuids });
+      const value = await transport.json(
+        'application',
+        'extensions/nickhosting/gateway-topology/snapshot',
+        versionedInventory,
+        'POST',
+        input,
+        false,
+        { readOnly: true },
+      );
+      validateInventory(value, nodeIds, serverUuids);
+      return value;
+    },
+    revision: (
+      expected: GatewayTopologyRevision,
+      nodeIds: number[],
+      serverUuids: string[],
+      waitMs = 0,
+    ) =>
+      transport.json(
+        'application',
+        'extensions/nickhosting/gateway-topology/revision',
+        z.union([
+          z.strictObject({ changed: z.literal(true) }),
+          revision.extend({ waitedMs: z.number().int().min(0).max(waitMs) }),
+        ]),
+        'POST',
+        {
+          ...parseInput(request, { nodeIds, serverUuids }),
+          epoch: expected.epoch,
+          revision: expected.revision,
+          waitMs: z.number().int().min(0).max(7500).parse(waitMs),
+        },
+        false,
+        { readOnly: true, ...(waitMs ? { timeoutMs: waitMs + 3000 } : {}) },
+      ),
+  };
+}
 const request = z.object({
   nodeIds: z.array(id).max(256),
   serverUuids: z.array(z.uuid()).max(10000),
@@ -80,6 +128,13 @@ export async function readGatewayInventory(
     false,
     { readOnly: true },
   );
+  return validateInventory(value, nodeIds, serverUuids);
+}
+function validateInventory(
+  value: z.infer<typeof inventory>,
+  nodeIds: number[],
+  serverUuids: string[],
+) {
   const invalid = (): never => {
     throw new PterodactylError('invalid_response', 'application', 'rejected');
   };

@@ -6,6 +6,7 @@ use Illuminate\Http\JsonResponse;
 use Illuminate\Support\Str;
 use Illuminate\Support\Facades\DB;
 use Pterodactyl\Models\ApiKey;
+use Pterodactyl\BlueprintFramework\Extensions\{identifier}\Services\GatewayTopology;
 use Pterodactyl\Models\Server;
 use Pterodactyl\Models\User;
 use Pterodactyl\Services\Acl\Api\AdminAcl;
@@ -61,16 +62,53 @@ final class BridgeController
         return array_keys($seen);
     }
 
-    public function gatewayInventory(Request $request): JsonResponse
+    private function inventoryKey(Request $request): ApiKey
     {
         $key = $this->authorize($request, 'servers', false, 524288);
         abort_unless(AdminAcl::check($key, AdminAcl::RESOURCE_NODES, AdminAcl::READ)
             && AdminAcl::check($key, AdminAcl::RESOURCE_ALLOCATIONS, AdminAcl::READ), 403);
+        return $key;
+    }
+
+    private function recheckInventoryKey(ApiKey $key): void
+    {
+        $fresh = $key->fresh();
+        abort_unless($fresh && $fresh->key_type === ApiKey::TYPE_APPLICATION
+            && $fresh->getRawOriginal('token') === $key->getRawOriginal('token')
+            && $fresh->getRawOriginal('identifier') === $key->getRawOriginal('identifier')
+            && $fresh->getRawOriginal('allowed_ips') === $key->getRawOriginal('allowed_ips')
+            && $fresh->user_id === $key->user_id && AdminAcl::check($fresh, 'servers', AdminAcl::READ)
+            && AdminAcl::check($fresh, AdminAcl::RESOURCE_NODES, AdminAcl::READ)
+            && AdminAcl::check($fresh, AdminAcl::RESOURCE_ALLOCATIONS, AdminAcl::READ), 403);
+    }
+
+    public function gatewayRevision(Request $request): JsonResponse
+    {
+        $key = $this->inventoryKey($request);
+        $input = $request->all();
+        abort_unless(count($input) === 5 && is_string($input['epoch'] ?? null) && Str::isUuid($input['epoch'])
+            && is_string($input['revision'] ?? null) && preg_match('/^[1-9][0-9]{0,19}$/D', $input['revision'])
+            && is_int($input['waitMs'] ?? null) && $input['waitMs'] >= 0 && $input['waitMs'] <= 7500, 422);
+        $receipt = GatewayTopology::wait($input['epoch'], $input['revision'], $input['waitMs'],
+            $this->ids($request, 'nodeIds', 256, false), $this->ids($request, 'serverUuids', 10000, true));
+        $this->recheckInventoryKey($key);
+        return $this->reply($receipt);
+    }
+
+    public function gatewayTopologySnapshot(Request $request): JsonResponse
+    {
+        return $this->gatewayInventory($request, true);
+    }
+
+    public function gatewayInventory(Request $request, bool $versioned = false): JsonResponse
+    {
+        $key = $this->inventoryKey($request);
         abort_if(array_diff(array_keys($request->all()), ['nodeIds', 'serverUuids']), 422);
         $result = app(GatewayInventory::class)->read(
             $this->ids($request, 'nodeIds', 256, false),
-            $this->ids($request, 'serverUuids', 10000, true)
+            $this->ids($request, 'serverUuids', 10000, true), $versioned
         );
+        if ($versioned) { $this->recheckInventoryKey($key); }
         $response = $this->reply($result);
         // The consumer's transport reads at most 4 MiB. Never send a partial catalog.
         abort_if(strlen($response->getContent()) > 4194304, 413);
@@ -158,11 +196,32 @@ final class BridgeController
     public function health(Request $request, string $instance): JsonResponse
     {
         $this->instance($request, $instance, 'servers', false);
-        return $this->reply(['schemaVersion' => 1, 'instanceId' => $instance,
-            'pendingEvents' => DB::table('nickhosting_outbox')->where('instance_id', $instance)->whereNull('delivered_at')->count(),
-            'lastDeliveredAt' => ($date = DB::table('nickhosting_outbox')->where('instance_id', $instance)->max('delivered_at'))
-                ? \Illuminate\Support\Carbon::parse($date)->toIso8601String() : null,
-            'checkedAt' => now()->toIso8601String()]);
+        $observedAt = now()->toIso8601String();
+        $outbox = DB::table('nickhosting_outbox')->where('instance_id', $instance);
+        $health = ['schemaVersion' => 1, 'instanceId' => $instance,
+            // Old receivers require a fully drained outbox, including quarantined events.
+            'pendingEvents' => (clone $outbox)->whereNull('delivered_at')->count(),
+            'lastDeliveredAt' => ($date = (clone $outbox)->max('delivered_at'))
+                ? \Illuminate\Support\Carbon::parse($date)->toIso8601String() : null];
+        if ($request->query->has('scopes')) {
+            $raw = $request->query('scopes');
+            abort_unless(is_string($raw) && strlen($raw) <= 3699, 422);
+            $uuids = explode(',', $raw);
+            abort_if(count($uuids) > 100 || count(array_unique($uuids)) !== count($uuids), 422);
+            foreach ($uuids as $uuid) { abort_unless(strlen($uuid) === 36 && Str::isUuid($uuid), 422); }
+            // One statement observes link revisions and pending claims in the same database snapshot.
+            $links = DB::table('nickhosting_servers as s')->where('s.instance_id', $instance)
+                ->leftJoin('servers as native', 'native.id', '=', 's.server_id')
+                ->whereIn('s.uuid', $uuids)->whereNotNull('s.owner_id')->select(['s.uuid', 's.revision', 's.valid', 's.owner_id',
+                    'native.owner_id as current_owner', 'native.uuid as current_uuid'])
+                ->selectRaw('EXISTS(SELECT 1 FROM nickhosting_outbox o WHERE o.instance_id = s.instance_id
+                    AND o.server_uuid = s.uuid AND o.delivered_at IS NULL AND o.quarantined_at IS NULL) AS pending')->get();
+            $health['scopes'] = $links->map(static fn ($s) => ['providerUuid' => $s->uuid,
+                'revision' => (int) $s->revision, 'ownerId' => (int) $s->owner_id,
+                'valid' => (bool) $s->valid && $s->current_uuid === $s->uuid && (int)$s->current_owner === (int)$s->owner_id,
+                'pending' => (bool) $s->pending])->all();
+        }
+        return $this->reply($health + ['checkedAt' => $observedAt]);
     }
 
     public function provisionUser(Request $request, string $instance, string $nickUser): JsonResponse

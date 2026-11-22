@@ -421,6 +421,8 @@ export interface GatewayProtocolAdapter {
   /** Authenticated provider events may deliver durable readiness receipts for opted-in integrations. */
   readonly startupHint?: 'provider_running';
   readonly readinessSource?: 'provider_running';
+  /** observe only sends a read-only status probe, without application/control effects. */
+  readonly readOnlyStatusProbe?: true;
   supports(route: Readonly<GatewayRoute>): boolean;
   classify(input: Uint8Array, context: GatewayProtocolContext): GatewayIntent;
   /** Hydrate presentation data without changing route authority, before a bounded status reply. */

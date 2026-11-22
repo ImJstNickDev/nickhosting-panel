@@ -6,6 +6,8 @@ export type ProviderReadCaller =
   | 'api-other'
   | 'gateway'
   | 'worker'
+  | 'worker-feed'
+  | 'worker-minecraft-worlds'
   | 'worker-reconcile'
   | 'worker-openworld-captures'
   | 'openworld-telemetry'
@@ -20,10 +22,30 @@ export type ProviderReadCaller =
   | 'openworld-dashboard'
   | 'unknown';
 
-const callerScope = new AsyncLocalStorage<ProviderReadCaller>();
+const callerScope = new AsyncLocalStorage<{ caller: ProviderReadCaller; signal?: AbortSignal }>();
 
-export function withProviderReadCaller<T>(caller: ProviderReadCaller, operation: () => T): T {
-  return callerScope.run(caller, operation);
+export function withProviderReadCaller<T>(
+  caller: ProviderReadCaller,
+  operation: () => T,
+  signal = callerScope.getStore()?.signal,
+): T {
+  return callerScope.run({ caller, signal }, operation);
+}
+
+/** A retired observer may finish an already-dispatched read shared with another
+ * caller, but cannot dispatch another request or publish the retired sample. */
+export function assertProviderReadActive() {
+  callerScope.getStore()?.signal?.throwIfAborted();
+}
+
+export function isBackgroundProviderRead() {
+  const caller = callerScope.getStore()?.caller;
+  return (
+    caller === 'worker-reconcile' ||
+    caller === 'worker-openworld-captures' ||
+    caller === 'worker-feed' ||
+    caller === 'worker-minecraft-worlds'
+  );
 }
 
 function readKind(scope: CredentialScope, method: string, path: string, url: URL) {
@@ -40,6 +62,8 @@ function readKind(scope: CredentialScope, method: string, path: string, url: URL
     return 'otherClient';
   }
   if (method === 'POST') {
+    if (path === 'extensions/nickhosting/gateway-topology/revision') return 'topologyRevision';
+    if (path === 'extensions/nickhosting/gateway-topology/snapshot') return 'topologySnapshot';
     if (path === 'extensions/nickhosting/gateway-inventory') return 'bundle';
     if (/^extensions\/nickhosting\/instances\/[^/?]+\/server-snapshots$/.test(path))
       return 'serverSnapshots';
@@ -63,7 +87,7 @@ export function createProviderReadAttribution(runtime?: 'api' | 'worker') {
     providerReadAgent(scope: CredentialScope, method: string, path: string, url: URL) {
       const kind = readKind(scope, method, path, url);
       if (!kind) return;
-      const caller = callerScope.getStore() ?? fallback;
+      const caller = callerScope.getStore()?.caller ?? fallback;
       const counts = callers.get(caller) ?? {};
       counts[kind] = (counts[kind] ?? 0) + 1;
       callers.set(caller, counts);
