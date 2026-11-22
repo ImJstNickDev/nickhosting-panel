@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   maxOpenworldMapColumn,
   type OpenworldMapWorld,
@@ -6,6 +6,8 @@ import {
 import { useFormat, useT } from '../../app/i18n.js';
 import { Check, ErrorNotice, Loading, Select } from '../../components/ui.js';
 import { Pagination, SearchField } from '../../components/workspace-controls.js';
+import type { AtlasMode } from './atlas-types.js';
+import type { SeedLegend } from './map-atlas-data.js';
 import {
   CheckpointDialog,
   type CheckpointForm,
@@ -15,6 +17,7 @@ import {
   type MapPoint,
 } from './map-checkpoints.js';
 import { CreaturePopulation, useCreatureLayer } from './map-creatures.js';
+import { factoryMapPoint, useFactoryData } from './map-factories.js';
 import { mapFocusQuery, useMapPlayers } from './map-players.js';
 import { mapKey as k, mapParams, scopeLost, useMapData } from './map-query.js';
 import { SpaceView } from './map-space.js';
@@ -22,6 +25,7 @@ import { type MapFace, MapViewport } from './map-viewport.js';
 import { type TelemetryViewProps, key as telemetryKey, withTelemetrySession } from './telemetry.js';
 import './world-map.css';
 import './map-layers.css';
+import './map-explorer.css';
 
 type MapView = 'terrain' | 'creatures' | 'space';
 
@@ -109,8 +113,11 @@ function MapSection(props: TelemetryViewProps) {
               selected.key,
               inspect,
               props.permissionKeys.includes('game.openworld.checkpoints.manage'),
+              props.permissionKeys.includes('game.openworld.seed.inspect'),
+              props.permissionKeys.includes('game.openworld.performance.read'),
             ])}
             showCreatures={view === 'creatures'}
+            showDirectory={() => setView('terrain')}
             playerFocus={!initial.factory && !!entry && entry.world === selected.key}
             server={props}
             world={selected}
@@ -127,6 +134,7 @@ export const OpenworldMap = withTelemetrySession(MapSection);
 
 function MapWorld({
   showCreatures,
+  showDirectory,
   playerFocus,
   server,
   world,
@@ -135,6 +143,7 @@ function MapWorld({
   reloadWorlds,
 }: {
   showCreatures: boolean;
+  showDirectory: () => void;
   playerFocus: boolean;
   server: TelemetryViewProps;
   world: OpenworldMapWorld;
@@ -145,11 +154,40 @@ function MapWorld({
   const t = useT(),
     format = useFormat(),
     query = mapParams({ world: world.key, processRef });
+  const [withCheckpoints, setWithCheckpoints] = useState(true);
+  const [withSeed, setWithSeed] = useState(false);
+  const [biomes, setBiomes] = useState(false);
+  const [feature, setFeature] = useState('');
+  const legend = useMapData<SeedLegend>(server, `/seed-legend?${query}`, withSeed);
+  const kind =
+    withSeed && !legend.error
+      ? legend.data?.featureKinds?.find((k) => k.key === feature)
+      : undefined;
+  const [withFactories, setWithFactories] = useState(false);
+  const [hasAtlas, setHasAtlas] = useState(true);
+  const [mode, setMode] = useState<AtlasMode>('plan');
+  const [directory, setDirectory] = useState(false);
+  const [layerPanel, setLayerPanel] = useState(false);
+  const [species, setSpecies] = useState('');
+  const [following, setFollowing] = useState<{ id: number; joinedAt: number; name: string } | null>(
+    null,
+  );
+  const factoryFeed = useFactoryData(server, withFactories);
+  const factoryPins = useMemo(
+    () =>
+      withFactories && !factoryFeed.error
+        ? (factoryFeed.data?.topColumns ?? []).flatMap((c) => {
+            const p = factoryMapPoint(c);
+            return p && p.world === world.key ? [{ ...p, nodes: c.nodes }] : [];
+          })
+        : [],
+    [withFactories, factoryFeed.data, factoryFeed.error, world.key],
+  );
   const index = useMapData<Index>(server, `/index?${query}`),
     checkpoints = useMapData<{ checkpoints: MapCheckpoint[] }>(
       server,
       `/checkpoints?${query}`,
-      !showCreatures,
+      withCheckpoints,
       20000,
     );
   const [scopeError, setScopeError] = useState<unknown>(null);
@@ -158,7 +196,7 @@ function MapWorld({
     server,
     world.key,
     processRef,
-    showCreatures && !scopeError,
+    (showCreatures || withCreatures) && !scopeError,
     withCreatures,
   );
   const [search, setSearch] = useState(''),
@@ -174,6 +212,24 @@ function MapWorld({
     grants.includes('game.openworld.players.read') &&
     grants.includes('game.openworld.players.inspect');
   const playerFeed = useMapPlayers(server, canTrack && withPlayers && !scopeError, processRef);
+  const tracked =
+    canTrack && withPlayers && playerFeed.data?.processRef === processRef && !playerFeed.error
+      ? playerFeed.data.players.find(
+          (p) =>
+            following &&
+            p.id === following.id &&
+            p.name === following.name &&
+            Math.abs(p.joinedAt - following.joinedAt) < 5000 &&
+            p.world === world.key,
+        )
+      : undefined;
+  useEffect(() => {
+    if (tracked) {
+      setFace(tracked.face);
+      setFocus({ face: tracked.face, x: tracked.x, z: tracked.z });
+    } else if (following && (playerFeed.data || playerFeed.error || !withPlayers))
+      setFollowing(null);
+  }, [tracked, following, playerFeed.data, playerFeed.error, withPlayers]);
   const data =
       checkpoints.data?.checkpoints.filter((c) => canManage || c.visibility === 'players') ?? [],
     current = data.find((c) => c.id === selected);
@@ -193,6 +249,38 @@ function MapWorld({
   const matches = data.filter((c) =>
     c.name.toLocaleLowerCase().includes(search.trim().toLocaleLowerCase()),
   );
+  const availablePlayers =
+    canTrack && withPlayers && !playerFeed.error && playerFeed.data?.processRef === processRef
+      ? playerFeed.data.players
+      : [];
+  const location = /^\s*(\d+(?:\.\d+)?)\s*[,; ]\s*(\d+(?:\.\d+)?)\s*$/.exec(search);
+  const located = location
+    ? {
+        face: chosenFace ?? index.data?.faces.find((f) => f.count > 0)?.face ?? 0,
+        x: Number(location[1]),
+        z: Number(location[2]),
+      }
+    : null;
+  const canCenter =
+    located != null &&
+    located.x <= (world.faceEdgeMeters ?? 0x7fffffff) &&
+    located.z <= (world.faceEdgeMeters ?? 0x7fffffff);
+  const matchingPlayers = search.trim()
+    ? availablePlayers.filter(
+        (p) =>
+          p.world === world.key &&
+          p.name.toLocaleLowerCase().includes(search.trim().toLocaleLowerCase()),
+      )
+    : [];
+  const visibleCreatures = useMemo(() => {
+    if (!withCreatures || creatures.error || !creatures.data) return undefined;
+    return species
+      ? {
+          ...creatures.data,
+          markers: creatures.data.markers.filter((m) => m.species === Number(species)),
+        }
+      : creatures.data;
+  }, [creatures.data, creatures.error, withCreatures, species]);
   const pages = Math.max(1, Math.ceil(matches.length / 30)),
     currentPage = Math.min(page, pages);
   const face = chosenFace ?? index.data?.faces.find((f) => f.count > 0)?.face ?? 0;
@@ -206,6 +294,7 @@ function MapWorld({
     void index.refetch();
   }, [index.refetch]);
   function select(c: MapCheckpoint, center: boolean) {
+    setFollowing(null);
     setSelected(c.id);
     setNotice('');
     if (center) {
@@ -215,8 +304,9 @@ function MapWorld({
   }
   const readingError =
     (scopeLost(index.error) && index.error) ||
-    (!showCreatures && scopeLost(checkpoints.error) && checkpoints.error) ||
-    (showCreatures && scopeLost(creatures.error) && creatures.error) ||
+    (withSeed && scopeLost(legend.error) && legend.error) ||
+    (withCheckpoints && scopeLost(checkpoints.error) && checkpoints.error) ||
+    ((showCreatures || withCreatures) && scopeLost(creatures.error) && creatures.error) ||
     scopeError;
   if (readingError)
     return (
@@ -224,6 +314,7 @@ function MapWorld({
         error={readingError}
         retry={async () => {
           await reloadWorlds();
+          if (withSeed && legend.error) void legend.refetch();
           setScopeError(null);
           void index.refetch();
           if (showCreatures) void creatures.refetch();
@@ -236,39 +327,153 @@ function MapWorld({
       <div className="ow-map-layout">
         <section className="ow-map-terrain">
           <div className="ow-map-filters">
-            <Select
-              label={t(k('face'))}
-              value={face}
+            <SearchField
+              label={t(k('atlas.search'))}
+              value={search}
+              onFocus={() => {
+                setDirectory(true);
+                setLayerPanel(false);
+              }}
               onChange={(e) => {
-                setFace(Number(e.target.value));
-                setFocus(null);
-                setSelected(null);
+                setSearch(e.target.value);
+                setPage(1);
+                setDirectory(true);
+              }}
+            />
+            <button
+              className="secondary"
+              type="button"
+              aria-pressed={directory && !showCreatures}
+              onClick={() => {
+                setDirectory(showCreatures || !directory);
+                if (showCreatures) showDirectory();
+                setLayerPanel(false);
               }}
             >
-              {faces.map((n) => (
-                <option key={n} value={n}>
-                  {t(k('faceNumber'), { face: n })}
-                </option>
-              ))}
-            </Select>
-            {showCreatures && (
+              {t(k('checkpoints'))}
+            </button>
+            <button
+              className="secondary"
+              type="button"
+              aria-expanded={layerPanel}
+              onClick={() => {
+                setLayerPanel(!layerPanel);
+                if (!layerPanel) setDirectory(false);
+              }}
+            >
+              {t(k('atlas.layers'))}
+            </button>
+          </div>
+          {layerPanel && (
+            <div className="ow-atlas-layers">
+              <Select
+                label={t(k('face'))}
+                value={face}
+                onChange={(e) => {
+                  setFace(Number(e.target.value));
+                  setFocus(null);
+                  setSelected(null);
+                  setFollowing(null);
+                }}
+              >
+                {faces.map((n) => (
+                  <option key={n} value={n}>
+                    {t(k('faceNumber'), { face: n })}
+                  </option>
+                ))}
+              </Select>
+              <Check
+                label={t(k('checkpoints'))}
+                checked={withCheckpoints}
+                onChange={(e) => {
+                  setWithCheckpoints(e.target.checked);
+                  if (!e.target.checked) {
+                    setSelected(null);
+                    setForm(null);
+                  }
+                }}
+              />
+              {canTrack && (
+                <Check
+                  label={t(k('playerMarkers'))}
+                  checked={withPlayers}
+                  onChange={(e) => {
+                    togglePlayers(e.target.checked);
+                    setFollowing(null);
+                  }}
+                />
+              )}
               <Check
                 label={t(k('layers.markers'))}
                 checked={withCreatures}
                 onChange={(e) => setWithCreatures(e.target.checked)}
               />
-            )}
-            {canTrack && (
-              <label className="check">
-                <input
-                  type="checkbox"
-                  checked={withPlayers}
-                  onChange={(e) => togglePlayers(e.target.checked)}
+              {withCreatures && creatures.data && !creatures.error && (
+                <Select
+                  label={t(k('layers.species'))}
+                  value={species}
+                  onChange={(e) => setSpecies(e.target.value)}
+                >
+                  <option value="">{t(k('atlas.allSpecies'))}</option>
+                  {creatures.data.species.map((s) => (
+                    <option key={s.id} value={s.id}>
+                      {s.name || s.key}
+                    </option>
+                  ))}
+                </Select>
+              )}
+              {hasAtlas && grants.includes('game.openworld.performance.read') && (
+                <Check
+                  label={t(k('atlas.factories'))}
+                  checked={withFactories}
+                  onChange={(e) => setWithFactories(e.target.checked)}
                 />
-                {t(k('playerMarkers'))}
-              </label>
-            )}
-          </div>
+              )}
+              {hasAtlas && grants.includes('game.openworld.seed.inspect') && (
+                <Check
+                  label={t(k('atlas.seed'))}
+                  checked={withSeed}
+                  onChange={(e) => {
+                    setWithSeed(e.target.checked);
+                    if (!e.target.checked) setFeature('');
+                  }}
+                />
+              )}
+              {withSeed && (
+                <Check
+                  label={t(k('atlas.biomes'))}
+                  checked={biomes}
+                  onChange={(e) => setBiomes(e.target.checked)}
+                />
+              )}
+              {withSeed && legend.data?.featureKinds?.length && !legend.error ? (
+                <Select
+                  label={t(k('atlas.feature'))}
+                  value={feature}
+                  onChange={(e) => setFeature(e.target.value)}
+                >
+                  <option value="">{t(k('atlas.featureOff'))}</option>
+                  {legend.data.featureKinds.map((f) => (
+                    <option key={f.key} value={f.key}>
+                      {f.name || f.key}
+                    </option>
+                  ))}
+                </Select>
+              ) : null}
+            </div>
+          )}
+          {withSeed && legend.error && (
+            <ErrorNotice error={legend.error} retry={() => void legend.refetch()} />
+          )}
+          {following && (
+            <button
+              type="button"
+              className="secondary ow-follow-active"
+              onClick={() => setFollowing(null)}
+            >
+              {t(k('atlas.stopFollow'), { name: following.name })}
+            </button>
+          )}
           {index.error && <ErrorNotice error={index.error} retry={() => void index.refetch()} />}
           {!index.data ? (
             index.error ? null : (
@@ -276,7 +481,7 @@ function MapWorld({
             )
           ) : (
             <MapViewport
-              key={`${face}/${viewportRevision}`}
+              key={`${face}/${terrainEdge}/${viewportRevision}`}
               server={server}
               world={world.key}
               edge={terrainEdge}
@@ -285,10 +490,27 @@ function MapWorld({
               extent={extent}
               stamp={index.data.stamp}
               processRef={processRef}
-              checkpoints={!showCreatures && !checkpoints.error ? data : []}
-              creatures={
-                showCreatures && withCreatures && !creatures.error ? creatures.data : undefined
-              }
+              seed={withSeed}
+              biomes={biomes}
+              legend={withSeed && !legend.error ? legend.data : undefined}
+              feature={kind}
+              tracking={following?.id}
+              mode={mode}
+              onModeChange={setMode}
+              onFallback={() => {
+                setHasAtlas(false);
+                setWithSeed(false);
+                setWithFactories(false);
+                setMode('plan');
+              }}
+              factories={factoryPins}
+              onCheckpointOpen={() => {
+                showDirectory();
+                setDirectory(true);
+                setLayerPanel(false);
+              }}
+              checkpoints={withCheckpoints && !checkpoints.error ? data : []}
+              creatures={visibleCreatures}
               players={
                 canTrack &&
                 withPlayers &&
@@ -301,7 +523,11 @@ function MapWorld({
               selectedId={selected}
               onSelect={(c) => select(c, false)}
               onCreate={
-                !showCreatures && canManage && !checkpoints.error && checkpoints.data
+                !showCreatures &&
+                withCheckpoints &&
+                canManage &&
+                !checkpoints.error &&
+                checkpoints.data
                   ? (p) => setForm({ kind: 'create', point: p })
                   : undefined
               }
@@ -315,6 +541,7 @@ function MapWorld({
             selected === null &&
             face === entry.face &&
             canManage &&
+            withCheckpoints &&
             checkpoints.data &&
             !checkpoints.error && (
               <button
@@ -325,137 +552,197 @@ function MapWorld({
                 {t(k('createAtPosition'))}
               </button>
             )}
+          {withFactories && factoryFeed.error && (
+            <ErrorNotice error={factoryFeed.error} retry={() => void factoryFeed.refetch()} />
+          )}
+          {!showCreatures && withCreatures && creatures.error && (
+            <ErrorNotice error={creatures.error} retry={() => void creatures.refetch()} />
+          )}
           {canTrack && withPlayers && playerFeed.error && (
             <ErrorNotice error={playerFeed.error} retry={() => void playerFeed.refetch()} />
           )}
         </section>
-        <aside className="ow-map-side">
-          {showCreatures ? (
-            <CreaturePopulation
-              query={creatures}
-              worldName={world.name || world.key}
-              markers={withCreatures}
-            />
-          ) : (
-            <>
-              <div className="ow-map-side-head">
-                <h3>{t(k('checkpoints'))}</h3>
-                {canManage && checkpoints.data && !checkpoints.error && (
-                  <button
-                    className="secondary"
-                    type="button"
-                    onClick={() => setForm({ kind: 'create' })}
-                  >
-                    {t(k('new'))}
-                  </button>
-                )}
+        {(directory || showCreatures) && (
+          <aside className="ow-map-side ow-atlas-directory">
+            <button
+              type="button"
+              className="secondary ow-directory-close"
+              aria-label={t('web.close')}
+              onClick={() => {
+                setDirectory(false);
+                if (showCreatures) showDirectory();
+              }}
+            >
+              ×
+            </button>
+            {canCenter && located && (
+              <button
+                type="button"
+                className="secondary"
+                onClick={() => {
+                  setFollowing(null);
+                  setSelected(null);
+                  setFace(located.face);
+                  setFocus({ ...located });
+                  setDirectory(false);
+                }}
+              >
+                {t(k('atlas.goTo'), { x: located.x, z: located.z })}
+              </button>
+            )}
+            {matchingPlayers.map((p) => (
+              <div className="ow-map-found" key={p.id}>
+                <button
+                  type="button"
+                  className="secondary"
+                  onClick={() => {
+                    setSelected(null);
+                    setFollowing(null);
+                    setFace(p.face);
+                    setFocus({ face: p.face, x: p.x, z: p.z });
+                  }}
+                >
+                  {p.name}
+                </button>
+                <button
+                  type="button"
+                  className="secondary"
+                  onClick={() => {
+                    setSelected(null);
+                    setFollowing({ id: p.id, name: p.name, joinedAt: p.joinedAt });
+                    setDirectory(false);
+                  }}
+                >
+                  {t(k('atlas.follow'))}
+                </button>
               </div>
-              {checkpoints.error ? (
-                <ErrorNotice error={checkpoints.error} retry={() => void checkpoints.refetch()} />
-              ) : !checkpoints.data ? (
-                <Loading />
-              ) : (
-                <>
-                  {data.length > 0 && (
-                    <SearchField
-                      label={t(k('search'))}
-                      value={search}
-                      onChange={(e) => {
-                        setSearch(e.target.value);
-                        setPage(1);
-                      }}
-                    />
+            ))}
+
+            {showCreatures ? (
+              <CreaturePopulation
+                query={creatures}
+                worldName={world.name || world.key}
+                markers={withCreatures}
+              />
+            ) : (
+              <>
+                <div className="ow-map-side-head">
+                  <h3>{t(k('checkpoints'))}</h3>
+                  {canManage && withCheckpoints && checkpoints.data && !checkpoints.error && (
+                    <button
+                      className="secondary"
+                      type="button"
+                      onClick={() => setForm({ kind: 'create' })}
+                    >
+                      {t(k('new'))}
+                    </button>
                   )}
-                  {!matches.length ? (
-                    <p className="ow-empty">{t(k(data.length ? 'noMatches' : 'empty'))}</p>
-                  ) : (
-                    <ul className="ow-map-list">
-                      {matches.slice((currentPage - 1) * 30, currentPage * 30).map((c) => (
-                        <li key={c.id}>
+                </div>
+                {checkpoints.error ? (
+                  <ErrorNotice error={checkpoints.error} retry={() => void checkpoints.refetch()} />
+                ) : !withCheckpoints ? (
+                  <button
+                    type="button"
+                    className="secondary"
+                    onClick={() => setWithCheckpoints(true)}
+                  >
+                    {t(k('atlas.showCheckpoints'))}
+                  </button>
+                ) : !checkpoints.data ? (
+                  <Loading />
+                ) : (
+                  <>
+                    {!matches.length && !matchingPlayers.length && !canCenter ? (
+                      <p className="ow-empty">{t(k(data.length ? 'noMatches' : 'empty'))}</p>
+                    ) : (
+                      <ul className="ow-map-list">
+                        {matches.slice((currentPage - 1) * 30, currentPage * 30).map((c) => (
+                          <li key={c.id}>
+                            <button
+                              type="button"
+                              aria-pressed={selected === c.id}
+                              onClick={() => select(c, true)}
+                            >
+                              <i style={{ backgroundColor: c.color }} aria-hidden="true">
+                                <CheckpointGlyph icon={c.icon} />
+                              </i>
+                              <span>
+                                <strong>{c.name}</strong>
+                                <small>
+                                  {t(k('faceNumber'), { face: c.pos.face })} · {t(k(c.visibility))}
+                                </small>
+                              </span>
+                            </button>
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                    {pages > 1 && (
+                      <Pagination
+                        label={t(k('checkpoints'))}
+                        previousLabel={t('web.previous')}
+                        nextLabel={t('web.next')}
+                        summary={t(telemetryKey('pageNumber'), { page: currentPage, total: pages })}
+                        canPrevious={currentPage > 1}
+                        canNext={currentPage < pages}
+                        onPrevious={() => setPage(currentPage - 1)}
+                        onNext={() => setPage(currentPage + 1)}
+                      />
+                    )}
+                    {current && (
+                      <section className="ow-map-checkpoint-detail">
+                        <h4>{current.name}</h4>
+                        {canManage && current.note && <p className="ow-map-note">{current.note}</p>}
+                        <dl>
+                          <div>
+                            <dt>{t('games.openworld.telemetry.latitude')}</dt>
+                            <dd>{format.number(current.geo.lat, 4)}°</dd>
+                          </div>
+                          <div>
+                            <dt>{t('games.openworld.telemetry.longitude')}</dt>
+                            <dd>{format.number(current.geo.lon, 4)}°</dd>
+                          </div>
+                        </dl>
+                        <div className="ow-map-actions">
                           <button
                             type="button"
-                            aria-pressed={selected === c.id}
-                            onClick={() => select(c, true)}
+                            className="secondary"
+                            onClick={() => select(current, true)}
                           >
-                            <i style={{ backgroundColor: c.color }} aria-hidden="true">
-                              <CheckpointGlyph icon={c.icon} />
-                            </i>
-                            <span>
-                              <strong>{c.name}</strong>
-                              <small>
-                                {t(k('faceNumber'), { face: c.pos.face })} · {t(k(c.visibility))}
-                              </small>
-                            </span>
+                            {t(k('showOnMap'))}
                           </button>
-                        </li>
-                      ))}
-                    </ul>
-                  )}
-                  {pages > 1 && (
-                    <Pagination
-                      label={t(k('checkpoints'))}
-                      previousLabel={t('web.previous')}
-                      nextLabel={t('web.next')}
-                      summary={t(telemetryKey('pageNumber'), { page: currentPage, total: pages })}
-                      canPrevious={currentPage > 1}
-                      canNext={currentPage < pages}
-                      onPrevious={() => setPage(currentPage - 1)}
-                      onNext={() => setPage(currentPage + 1)}
-                    />
-                  )}
-                  {current && (
-                    <section className="ow-map-checkpoint-detail">
-                      <h4>{current.name}</h4>
-                      {canManage && current.note && <p className="ow-map-note">{current.note}</p>}
-                      <dl>
-                        <div>
-                          <dt>{t('games.openworld.telemetry.latitude')}</dt>
-                          <dd>{format.number(current.geo.lat, 4)}°</dd>
+                          {canManage && (
+                            <>
+                              <button
+                                type="button"
+                                className="secondary"
+                                onClick={() => setForm({ kind: 'update', checkpoint: current })}
+                              >
+                                {t(k('edit'))}
+                              </button>
+                              <button
+                                type="button"
+                                className="secondary danger-text"
+                                onClick={() => setForm({ kind: 'delete', checkpoint: current })}
+                              >
+                                {t(k('delete'))}
+                              </button>
+                            </>
+                          )}
                         </div>
-                        <div>
-                          <dt>{t('games.openworld.telemetry.longitude')}</dt>
-                          <dd>{format.number(current.geo.lon, 4)}°</dd>
-                        </div>
-                      </dl>
-                      <div className="ow-map-actions">
-                        <button
-                          type="button"
-                          className="secondary"
-                          onClick={() => select(current, true)}
-                        >
-                          {t(k('showOnMap'))}
-                        </button>
-                        {canManage && (
-                          <>
-                            <button
-                              type="button"
-                              className="secondary"
-                              onClick={() => setForm({ kind: 'update', checkpoint: current })}
-                            >
-                              {t(k('edit'))}
-                            </button>
-                            <button
-                              type="button"
-                              className="secondary danger-text"
-                              onClick={() => setForm({ kind: 'delete', checkpoint: current })}
-                            >
-                              {t(k('delete'))}
-                            </button>
-                          </>
-                        )}
-                      </div>
-                    </section>
-                  )}
-                </>
-              )}
-              {notice && (
-                <p role="status" className="ow-map-notice">
-                  {notice}
-                </p>
-              )}
-            </>
-          )}
-        </aside>
+                      </section>
+                    )}
+                  </>
+                )}
+                {notice && (
+                  <p role="status" className="ow-map-notice">
+                    {notice}
+                  </p>
+                )}
+              </>
+            )}
+          </aside>
+        )}
       </div>
       {!showCreatures && canManage && form && !missingForm && !checkpoints.error && (
         <CheckpointDialog

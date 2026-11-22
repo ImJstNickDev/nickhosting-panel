@@ -118,6 +118,7 @@ export async function readOpenworldScope(
         resource: 'map';
         manageCheckpoints?: boolean;
         requirePlayerInspection?: boolean;
+        requireSeedInspection?: boolean;
       },
 ): Promise<OpenworldScope & { savedSkin?: Buffer }> {
   if (reader) assertAuthContext(reader.who);
@@ -227,6 +228,7 @@ export async function readOpenworldScope(
       if (
         !keys.includes('game.openworld.map.read') ||
         (reader.manageCheckpoints && !canManageCheckpoints) ||
+        (reader.requireSeedInspection && !keys.includes('game.openworld.seed.inspect')) ||
         (reader.requirePlayerInspection && !canInspectPlayers)
       )
         throw new DomainError('forbidden');
@@ -459,8 +461,9 @@ export function createOpenworldNativeConnection(options: OpenworldNativeOptions)
     scope: OpenworldScope,
     work: (origin: string, token: string, signal: AbortSignal) => Promise<T>,
     retryExpired = true,
+    timeoutMs = 8000,
   ) {
-    const signal = AbortSignal.timeout(8000);
+    const signal = AbortSignal.timeout(timeoutMs);
     const credential = () =>
       tokens.get(scope.liveKey, 60000, async () => {
         const verified = await target(scope.serverId);

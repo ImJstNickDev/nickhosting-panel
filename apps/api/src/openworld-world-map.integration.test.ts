@@ -41,6 +41,7 @@ async function fixture() {
       author: 'private owner IP',
       createdAtMs: 100,
     },
+    asset: undefined as ((url: URL) => Response | undefined) | undefined,
     afterScopeQuery: undefined as (() => void) | undefined,
     onRead: undefined as ((path: string) => Promise<void>) | undefined,
     onWrite: undefined as (() => Response | Promise<Response>) | undefined,
@@ -55,7 +56,7 @@ async function fixture() {
     reads: string[] = [];
   const fetcher: typeof fetch = async (url, init) => {
     const remote = new URL(String(url)),
-      resource = remote.pathname.slice('/api/live/'.length);
+      resource = remote.pathname.replace(/^\/api\/live\//, '');
     if (resource === 'auth')
       return Response.json({ required: true, loopback: false, canAct: false });
     if (resource === 'login') return Response.json({ token: 'owned-fixture' });
@@ -70,6 +71,8 @@ async function fixture() {
     reads.push(resource);
     const explored = state.explored;
     await state.onRead?.(resource);
+    const asset = state.asset?.(remote);
+    if (asset) return asset;
     switch (resource) {
       case 'chunks':
         return Response.json({
@@ -722,4 +725,300 @@ it('refreshes orbital checkpoint visibility immediately after an edit on a separ
     (await (await f.request(orbital)).json()).checkpoints.map((row: { name: string }) => row.name),
   ).toEqual(['Public']);
   expect(f.reads.filter((r) => r === 'space')).toHaveLength(2);
+});
+
+function atlasCatalog() {
+  return {
+    planet: 'earth',
+    planets: [{ key: 'earth' }],
+    seed: 'fixture-secret',
+    fixedSeed: true,
+    version: 32,
+    seedScheme: 1,
+    faceEdgeMeters: 8000,
+    fullChunkMeters: 16,
+    voxelSize: 0.25,
+    tileSize: 256,
+    maxZoom: 15,
+    materials: [{ id: 1, key: 'stone', color: '#808080', texture: '/pack/stone.png' }],
+    biomes: [{ id: 1, name: 'Grassland', color: '#77aa44' }],
+    featureKinds: [
+      { key: 'ore_vein', name: 'Ore', color: '#aabbcc', category: 'deposit', cellMeters: 12 },
+    ],
+  };
+}
+function atlasTile(x = 0, y = 0, z = 7) {
+  const side = 256,
+    pixels = side ** 2,
+    data = new Uint8Array(32 + 16 * pixels),
+    view = new DataView(data.buffer);
+  const span = 8000 / 2 ** z;
+  view.setUint32(0, 0x4f575431);
+  view.setUint16(4, side, true);
+  view.setFloat64(8, x * span, true);
+  view.setFloat64(16, y * span, true);
+  view.setFloat32(24, span / side, true);
+  view.setInt16(32, 1400, true);
+  view.setInt16(32 + 2 * pixels, -32768, true);
+  data.fill(77, 32 + 8 * pixels);
+  return new Response(data);
+}
+it('streams scoped native geometry, honours its stamp and invalidates only touched columns', async () => {
+  const f = await fixture();
+  await f.grant(read);
+  await f.power('running');
+  const q = `?world=earth&processRef=${await f.ref()}&face=0`;
+  const mesh = (i: number, j: number) => `/mesh${q}&i=${i}&j=${j}&lod=1&stamp=10`;
+  const surface = `/terrain${q}&ci=0&cj=0&n=2&lod=2&stamp=10`;
+  let wrongFace = false,
+    serial = 1;
+  f.state.asset = (url) => {
+    const p = url.searchParams,
+      n = Number(p.get('n')),
+      lod = Number(p.get('lod'));
+    if (url.pathname === '/api/live/map/surface') {
+      const bytes = new Uint8Array(32 + 4 * n * n),
+        v = new DataView(bytes.buffer);
+      v.setUint32(0, 0x4f574d53);
+      v.setUint16(4, 2, true);
+      v.setUint16(6, lod, true);
+      v.setUint16(20, n, true);
+      v.setUint16(22, 64 >> lod, true);
+      return new Response(bytes);
+    }
+    if (url.pathname === '/api/live/map/mesh') {
+      const data = new Uint8Array(48),
+        v = new DataView(data.buffer);
+      v.setUint32(0, 0x4f574d31);
+      v.setUint32(4, 1, true);
+      v.setInt32(8, wrongFace ? 5 : 0, true);
+      v.setInt32(12, Number(p.get('i')), true);
+      v.setInt32(16, Number(p.get('j')), true);
+      v.setUint16(20, lod, true);
+      data[35] = serial++;
+      return new Response(data);
+    }
+  };
+  const results = await Promise.all([
+    f.request(mesh(4, 3)),
+    f.request(mesh(4, 3)),
+    f.request(mesh(5, 3)),
+  ]);
+  for (const res of results) {
+    expect(res.status).toBe(200);
+    expect(res.headers.get('cache-control')).toBe('private, no-store');
+  }
+  expect(f.reads.filter((x) => x === 'map/mesh')).toHaveLength(2);
+  expect((await f.request(surface)).status).toBe(200);
+  expect((await f.request(surface.replace('ci=0', 'ci=1'))).status).toBe(400);
+  expect((await f.request(surface.replace('n=2&lod=2', 'n=32&lod=0'))).status).toBe(400);
+  expect((await f.request(mesh(4, 3).replace('lod=1', 'lod=3'))).status).toBe(400);
+  await f.request(`/changes?world=earth&processRef=${await f.ref()}&since=30`);
+  await Promise.all([f.request(mesh(4, 3)), f.request(mesh(5, 3))]);
+  expect(f.reads.filter((x) => x === 'map/mesh')).toHaveLength(3);
+  wrongFace = true;
+  expect(await (await f.request(mesh(8, 3))).json()).toEqual({ error: 'integration_unavailable' });
+  await f.grant(manage);
+  expect((await f.request(mesh(4, 3))).status).toBe(403);
+});
+
+it('requires both grants for seed overlays, binds the generation arguments and returns only the filtered data', async () => {
+  const f = await fixture();
+  await f.power('running');
+  const q = `?world=earth&processRef=${await f.ref()}`;
+  const tile = `/seed-tile${q}&face=3&x=0&y=0&z=7`,
+    legend = `/seed-legend${q}`;
+  let bound = 'earth';
+  let fixed = true;
+  f.state.asset = (u) => {
+    if (u.pathname === '/api/info')
+      return Response.json({ ...atlasCatalog(), planet: bound, fixedSeed: fixed });
+    if (u.pathname === '/api/tile') {
+      expect([...u.searchParams.entries()].sort()).toEqual(
+        Object.entries({
+          planet: 'earth',
+          seed: 'fixture-secret',
+          face: '3',
+          x: '0',
+          y: '0',
+          z: '7',
+        }).sort(),
+      );
+      return atlasTile();
+    }
+    if (u.pathname === '/api/features')
+      return Response.json({
+        features: [
+          { kind: 'ore_vein', x: 1, y: 2, z: 4, seed: 'PRIVATE' },
+          { kind: 'ore_vein', x: 500, y: 0, z: 0 },
+        ],
+        truncated: false,
+      });
+    if (u.pathname === '/pack/stone.png') return new Response(null, { status: 404 });
+  };
+  const seed = 'game.openworld.seed.inspect';
+  for (const grants of [[seed], [read]]) {
+    await f.grant(...grants);
+    expect((await f.request(tile)).status).toBe(403);
+    expect((await f.request(legend)).status).toBe(403);
+  }
+  expect(f.reads).not.toContain('/api/info');
+  const paint = await (await f.request(`/palette${q}`)).json();
+  expect(paint.materials[0]).toMatchObject({ key: 'stone', textured: true });
+  expect(JSON.stringify(paint)).not.toMatch(/fixture-secret|\/pack|Grassland/);
+  expect((await f.request(`/texture${q}&id=1`)).status).toBe(204);
+  expect((await f.request(`/texture${q}&id=1&path=%2Fapi%2Ftile`)).status).toBe(400);
+  await f.grant(read, seed);
+  expect((await f.request(`/seed-tile${q}&face=3&x=2&y=0&z=1`)).status).toBe(400);
+  const native = await f.request(tile);
+  expect(native.status).toBe(200);
+  const buf = await native.arrayBuffer(),
+    d = new DataView(buf);
+  expect(buf.byteLength).toBe(32 + 8 * 256 ** 2);
+  expect(d.getUint32(0)).toBe(0x4e485354);
+  expect(d.getInt16(32, true)).toBe(1400);
+  expect(d.getInt16(32 + 2 * 256 ** 2, true)).toBe(-32768);
+  const catalog = await (await f.request(legend)).json();
+  expect(catalog.biomes[0].name).toBe('Grassland');
+  expect(catalog.featureKinds[0].key).toBe('ore_vein');
+  expect(catalog).not.toHaveProperty('seed');
+  const features = `${tile.replace('seed-tile', 'seed-features')}&kind=ore_vein`;
+  expect(await (await f.request(features)).json()).toEqual({
+    features: [{ kind: 'ore_vein', x: 1, y: 2, z: 4 }],
+    truncated: false,
+  });
+  expect((await f.request(features.replace('z=7', 'z=0'))).status).toBe(400);
+  expect((await f.request(features.replace('ore_vein', 'unknown'))).status).toBe(400);
+  expect(f.reads.filter((x) => x === '/api/features')).toHaveLength(1);
+  bound = 'moon';
+  expect(await (await f.router()(tile)).json()).toEqual({ error: 'game_request_unsupported' });
+  fixed = false;
+  bound = 'earth';
+  expect(await (await f.router()(tile)).json()).toEqual({ error: 'game_request_unsupported' });
+  expect(f.reads.filter((x) => x === '/api/tile')).toHaveLength(1);
+});
+
+it('rechecks a seed grant after a flight, bounds generator work across API processes, and reuses the local result', async () => {
+  const f = await fixture();
+  await f.power('running');
+  await f.grant(read, 'game.openworld.seed.inspect');
+  const q = `?world=earth&processRef=${await f.ref()}`;
+  const tile = (x: number) => `/seed-tile${q}&face=0&z=7&y=0&x=${x}`;
+  const other = f.router();
+  f.state.asset = (u) =>
+    u.pathname === '/api/info'
+      ? Response.json(atlasCatalog())
+      : u.pathname === '/api/tile'
+        ? atlasTile(Number(u.searchParams.get('x')))
+        : undefined;
+  await f.request(`/seed-legend${q}`);
+  await other(`/seed-legend${q}`);
+  const first = Promise.withResolvers<void>(),
+    both = Promise.withResolvers<void>(),
+    resume = Promise.withResolvers<void>();
+  let running = 0;
+  f.state.onRead = async (path) => {
+    if (path !== '/api/tile') return;
+    running++;
+    if (running === 1) first.resolve();
+    if (running === 2) both.resolve();
+    await resume.promise;
+  };
+  const a = f.request(tile(0));
+  await first.promise;
+  try {
+    expect((await other(tile(0))).status).toBe(429);
+    const b = other(tile(1));
+    await both.promise;
+    const busy = await f.request(tile(2));
+    expect(busy.status).toBe(429);
+    expect(busy.headers.get('retry-after')).toBe('1');
+    await f.grant(read);
+    resume.resolve();
+    expect((await a).status).toBe(403);
+    expect((await b).status).toBe(403);
+    expect((await f.request(tile(0))).status).toBe(403);
+    expect((await f.request(tile(0), undefined, 'owner')).status).toBe(200);
+    expect(f.reads.filter((x) => x === '/api/tile')).toHaveLength(2);
+  } finally {
+    resume.resolve();
+  }
+});
+
+it('shares cached mesh reads between bounded NHMB frames and single columns, preserving order, holes and the current grant', async () => {
+  const f = await fixture();
+  await f.power('running');
+  await f.grant(read);
+  const q = `?world=earth&face=0&lod=1&stamp=1&processRef=${await f.ref()}`;
+  const group = (cells: string) => `/meshes${q}&cells=${encodeURIComponent(cells)}`;
+  f.state.asset = (u) => {
+    if (u.pathname !== '/api/live/map/mesh') return;
+    const i = Number(u.searchParams.get('i')),
+      j = Number(u.searchParams.get('j'));
+    if (i === 5) return new Response(null, { status: 404 });
+    const d = new Uint8Array(32),
+      v = new DataView(d.buffer);
+    v.setUint32(0, 0x4f574d31);
+    v.setInt32(12, i, true);
+    v.setInt32(16, j, true);
+    v.setUint16(20, 1, true);
+    return new Response(d);
+  };
+  for (const cells of [
+    '',
+    '1,1;1,1',
+    '-1,2',
+    '0,2147483648',
+    '0,1,4',
+    Array.from({ length: 17 }, (_, i) => `${i},0`).join(';'),
+  ]) {
+    expect((await f.request(group(cells))).status).toBe(400);
+  }
+  expect(f.reads.filter((x) => x === 'map/mesh')).toHaveLength(0);
+  await f.request(`/mesh${q}&i=4&j=3`);
+  const result = await f.request(group('5,2;4,3;2,1'));
+  const buf = await result.arrayBuffer(),
+    v = new DataView(buf);
+  expect(result.status).toBe(200);
+  expect(result.headers.get('content-length')).toBe(String(buf.byteLength));
+  expect(v.getUint32(0)).toBe(0x4e484d42);
+  expect(v.getUint16(4, true)).toBe(1);
+  expect(v.getUint16(6, true)).toBe(3);
+  let off = 8;
+  for (const [i, j, len] of [
+    [5, 2, 0],
+    [4, 3, 32],
+    [2, 1, 32],
+  ] as const) {
+    expect([v.getInt32(off, true), v.getInt32(off + 4, true), v.getUint32(off + 8, true)]).toEqual([
+      i,
+      j,
+      len,
+    ]);
+    off += 12;
+    if (len) {
+      expect(v.getUint32(off)).toBe(0x4f574d31);
+      off += len;
+    }
+  }
+  expect(off).toBe(buf.byteLength);
+  expect((await f.request(`/mesh${q}&i=2&j=1`)).status).toBe(200);
+  expect(f.reads.filter((x) => x === 'map/mesh')).toHaveLength(3);
+  const started = Promise.withResolvers<void>(),
+    done = Promise.withResolvers<void>();
+  let pending = 0;
+  f.state.onRead = async (path) => {
+    if (path === 'map/mesh') {
+      pending++;
+      if (pending === 3) started.resolve();
+      await done.promise;
+    }
+  };
+  const batch = f.request(group('6,0;7,0;8,0;9,0;10,0;11,0'));
+  await started.promise;
+  expect(pending).toBe(3);
+  await f.grant(manage);
+  done.resolve();
+  expect((await batch).status).toBe(403);
+  expect((await f.request(group('5,2;4,3;2,1'))).status).toBe(403);
 });

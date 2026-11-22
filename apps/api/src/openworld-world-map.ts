@@ -2,6 +2,7 @@ import { DomainError } from '@nickhosting/core';
 import { PterodactylError } from '@nickhosting/pterodactyl-adapter';
 import { Hono } from 'hono';
 import { z } from 'zod';
+import { maxMeshBatchColumns } from '../../../games/openworld/src/map-mesh-batch.js';
 import {
   maxOpenworldMapColumn,
   openworldCheckpointActionSchema,
@@ -62,6 +63,75 @@ const columns = selected
     return { ...q, bounds: { i0, i1, j0, j1 } };
   });
 const surface = selected.extend({ face, ci: aligned, cj: aligned, stamp: stamp.optional() });
+const terrain = selected
+  .extend({
+    face,
+    ci: column,
+    cj: column,
+    stamp: stamp.optional(),
+    lod: integer(6),
+    n: integer(32)
+      .refine((n) => n >= 1 && Number.isInteger(Math.log2(n)))
+      .optional()
+      .default(8),
+  })
+  .refine((q) => q.ci % q.n === 0 && q.cj % q.n === 0 && q.n * (64 >> q.lod) <= 512);
+const mesh = selected.extend({
+  face,
+  i: column,
+  j: column,
+  lod: integer(4).refine((n) => [1, 2, 4].includes(n)),
+  stamp: stamp.optional(),
+});
+const cells = z
+  .string()
+  .max(maxMeshBatchColumns * 22)
+  .transform((input, ctx) => {
+    const pairs = input.split(';');
+    if (pairs.length > maxMeshBatchColumns) {
+      ctx.addIssue({ code: 'custom', message: 'Too many columns' });
+      return z.NEVER;
+    }
+    const parsed: [number, number][] = [];
+    const seen = new Set<string>();
+    for (const pair of pairs) {
+      const match = /^(0|[1-9]\d{0,9}),(0|[1-9]\d{0,9})$/.exec(pair);
+      if (
+        !match ||
+        seen.has(pair) ||
+        Number(match[1]) > maxOpenworldMapColumn ||
+        Number(match[2]) > maxOpenworldMapColumn
+      ) {
+        ctx.addIssue({ code: 'custom', message: 'Invalid column list' });
+        return z.NEVER;
+      }
+      parsed.push([Number(match[1]), Number(match[2])]);
+      seen.add(pair);
+    }
+    return parsed;
+  });
+const meshes = mesh.omit({ i: true, j: true }).extend({ cells });
+const texture = selected.extend({ id: integer(65535) });
+const seedViewport = selected.extend({
+  face,
+  x: integer(2 ** 30 - 1),
+  y: integer(2 ** 30 - 1),
+  z: integer(30),
+});
+const inFace = (q: { x: number; y: number; z: number }) => q.x < 2 ** q.z && q.y < 2 ** q.z;
+const seedTile = seedViewport.refine(inFace);
+const seedFeatures = seedViewport.extend({ kind: openworldMapWorldKey }).refine(inFace);
+
+function binaryResponse(data: Uint8Array<ArrayBuffer> | null, type = 'application/octet-stream') {
+  return new Response(data, {
+    status: data === null ? 204 : 200,
+    headers: {
+      'Content-Type': type,
+      'Cache-Control': 'private, no-store',
+      'X-Content-Type-Options': 'nosniff',
+    },
+  });
+}
 const changes = selected.extend({ since: stamp });
 const change = selected.extend({ requestId: z.uuid(), action: openworldCheckpointActionSchema });
 function parse<T>(schema: z.ZodType<T>, value: unknown) {
@@ -88,6 +158,10 @@ export function registerOpenworldWorldMapRoutes(
   // Coalesced requests receive the same rejected provider read throughout its cooldown.
   const retryUntil = new WeakMap<PterodactylError, number>();
   routes.onError((error, c) => {
+    if (error instanceof DomainError && error.code === 'rate_limited') {
+      c.header('Retry-After', '1');
+      throw error;
+    }
     if (!(error instanceof PterodactylError) || error.reason !== 'rate_limited') throw error;
     const now = Date.now();
     const until = retryUntil.get(error) ?? now + (error.retryAfterMs ?? 60_000);
@@ -163,6 +237,92 @@ export function registerOpenworldWorldMapRoutes(
         c.req.param('id'),
         parse(surface, c.req.query()),
       ),
+    ),
+  );
+  routes.get('/map/terrain', async (c) =>
+    binaryResponse(
+      await service.terrain(
+        await options.principal(c),
+        c.req.param('id'),
+        parse(terrain, c.req.query()),
+        c.req.raw.signal,
+      ),
+    ),
+  );
+  routes.get('/map/mesh', async (c) =>
+    binaryResponse(
+      await service.mesh(
+        await options.principal(c),
+        c.req.param('id'),
+        parse(mesh, c.req.query()),
+        c.req.raw.signal,
+      ),
+    ),
+  );
+  routes.get('/map/meshes', async (c) => {
+    const { body, length } = await service.meshes(
+      await options.principal(c),
+      c.req.param('id'),
+      parse(meshes, c.req.query()),
+      c.req.raw.signal,
+    );
+    return new Response(body, {
+      headers: {
+        'content-type': 'application/octet-stream',
+        'content-length': String(length),
+        'cache-control': 'private, no-store',
+        'x-content-type-options': 'nosniff',
+      },
+    });
+  });
+  routes.get('/map/palette', async (c) =>
+    c.json(
+      await service.palette(
+        await options.principal(c),
+        c.req.param('id'),
+        parse(selected, c.req.query()),
+      ),
+    ),
+  );
+  routes.get('/map/texture', async (c) =>
+    binaryResponse(
+      await service.texture(
+        await options.principal(c),
+        c.req.param('id'),
+        parse(texture, c.req.query()),
+        c.req.raw.signal,
+      ),
+      'image/png',
+    ),
+  );
+  routes.get('/map/seed-legend', async (c) =>
+    c.json(
+      await service.seedLegend(
+        await options.principal(c),
+        c.req.param('id'),
+        parse(selected, c.req.query()),
+      ),
+    ),
+  );
+  routes.get('/map/seed-tile', async (c) =>
+    binaryResponse(
+      await service.seedTile(
+        await options.principal(c),
+        c.req.param('id'),
+        parse(seedTile, c.req.query()),
+        c.req.raw.signal,
+      ),
+    ),
+  );
+  routes.get('/map/seed-features', async (c) =>
+    binaryResponse(
+      await service.seedFeatures(
+        await options.principal(c),
+        c.req.param('id'),
+        parse(seedFeatures, c.req.query()),
+        c.req.raw.signal,
+      ),
+      'application/json',
     ),
   );
   routes.get('/map/checkpoints', async (c) =>

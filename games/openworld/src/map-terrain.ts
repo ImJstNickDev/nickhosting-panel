@@ -4,7 +4,12 @@ import { OpenworldTokenExpired } from './dashboard-api.js';
 import { readNativeBytes } from './native-response.js';
 import { maxOpenworldMapColumn } from './world-map.js';
 
-type Native = { origin: string; token: string; signal: AbortSignal; fetcher: typeof fetch };
+export type OpenworldMapNative = {
+  origin: string;
+  token: string;
+  signal: AbortSignal;
+  fetcher: typeof fetch;
+};
 const faceId = z.int().min(0).max(5);
 const column = z.int().min(0).max(maxOpenworldMapColumn);
 const stamp = z.uint32();
@@ -27,15 +32,24 @@ async function outsideFace(response: Response, params: Record<string, string | n
     await readNativeBytes(response, 1024),
     z.object({ error: z.string().max(400) }),
   );
-  const match = /^paramètre « (ci|cj) » hors de \[0, (\d{1,10})\] : (\d{1,10})$/u.exec(body.error);
+  const match = /^paramètre « (ci|cj|i|j) » hors de \[0, (\d{1,10})\] : (\d{1,10})$/u.exec(
+    body.error,
+  );
   if (!match) return false;
   const [, axis, max, requested] = match;
   return !!axis && Number(requested) === params[axis] && Number(requested) > Number(max);
 }
 
-async function read(
-  native: Native,
-  path: string,
+export async function readNativeMapBytes(
+  native: OpenworldMapNative,
+  path:
+    | 'map/index'
+    | 'map/columns'
+    | 'map/surface'
+    | 'map/changes'
+    | 'map/mesh'
+    | 'players'
+    | 'info',
   params: Record<string, string | number>,
   limit: number,
   allowMissing = false,
@@ -77,10 +91,10 @@ function validate(world: string, face?: number) {
   if (!worldKey.safeParse(world).success || (face !== undefined && !faceId.safeParse(face).success))
     throw new DomainError('validation_failed');
 }
-export async function readMapIndex(native: Native, world: string) {
+export async function readMapIndex(native: OpenworldMapNative, world: string) {
   validate(world);
   const raw = json(
-    await read(native, 'map/index', { world }, 32768),
+    await readNativeMapBytes(native, 'map/index', { world }, 32768),
     z.object({ stamp, faces: z.array(faceSummary).max(6) }),
   );
   const seen = new Set<number>();
@@ -99,9 +113,9 @@ export async function readMapIndex(native: Native, world: string) {
     }),
   };
 }
-export async function readMapColumns(native: Native, world: string, face: number) {
+export async function readMapColumns(native: OpenworldMapNative, world: string, face: number) {
   validate(world, face);
-  const bytes = await read(native, 'map/columns', { world, face }, 8 * 262144);
+  const bytes = await readNativeMapBytes(native, 'map/columns', { world, face }, 8 * 262144);
   if (!bytes || bytes.byteLength % 8) throw invalid();
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   const columns: [number, number][] = [];
@@ -117,11 +131,11 @@ const changeTuple = z
   .tuple([faceId, column, column])
   .rest(z.unknown())
   .transform(([f, i, j]): [number, number, number] => [f, i, j]);
-export async function readMapChanges(native: Native, world: string, since: number) {
+export async function readMapChanges(native: OpenworldMapNative, world: string, since: number) {
   validate(world);
   if (!stamp.safeParse(since).success) throw new DomainError('validation_failed');
   return json(
-    await read(native, 'map/changes', { world, since }, 1024 * 1024),
+    await readNativeMapBytes(native, 'map/changes', { world, since }, 1024 * 1024),
     z.object({ stamp, reset: z.boolean(), columns: z.array(changeTuple).max(65536) }),
   );
 }
@@ -185,7 +199,7 @@ export function decodeMapTile(
   return tile;
 }
 export async function readMapTile(
-  native: Native,
+  native: OpenworldMapNative,
   world: string,
   face: number,
   ci: number,
@@ -194,7 +208,7 @@ export async function readMapTile(
   validate(world, face);
   if (!tileOrigin.safeParse(ci).success || !tileOrigin.safeParse(cj).success)
     throw new DomainError('validation_failed');
-  const bytes = await read(
+  const bytes = await readNativeMapBytes(
     native,
     'map/surface',
     { world, face, ci, cj, n: 8, lod: 4 },
@@ -222,8 +236,8 @@ export type MapPlayer = {
   x: number;
   z: number;
 };
-export async function readMapPlayers(native: Native) {
-  const data = json(await read(native, 'players', {}, 4 * 1024 * 1024), roster);
+export async function readMapPlayers(native: OpenworldMapNative) {
+  const data = json(await readNativeMapBytes(native, 'players', {}, 4 * 1024 * 1024), roster);
   const time = Date.now();
   const players: MapPlayer[] = [];
   for (const row of data.players) {

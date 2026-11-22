@@ -1,476 +1,467 @@
-import { useQueries, useQuery } from '@tanstack/react-query';
 import {
   type CSSProperties,
-  type KeyboardEvent,
-  type PointerEvent,
+  lazy,
+  Suspense,
+  useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
 } from 'react';
 import { Link } from 'react-router';
-import type { OpenworldCreatureLayer } from '../../../../../games/openworld/src/map-layers.js';
-import { maxOpenworldMapColumn } from '../../../../../games/openworld/src/world-map.js';
+import { apiError } from '../../api/client.js';
 import { useT } from '../../app/i18n.js';
-import { ErrorNotice } from '../../components/ui.js';
-import { CheckpointGlyph, type MapCheckpoint, type MapPoint } from './map-checkpoints.js';
-import { type MapPlayer, playerHref } from './map-players.js';
-import { mapKey as k, mapData, mapParams, mapScope, scopeLost } from './map-query.js';
-import type { ServerView } from './telemetry.js';
+import { ErrorNotice, Loading } from '../../components/ui.js';
+import { AtlasScene, AtlasUnsupported } from './atlas-scene.js';
+import type { AtlasController, AtlasFrame, AtlasMode, AtlasPoint } from './atlas-types.js';
+import {
+  type MapPalette,
+  readAtlasMeshes,
+  readAtlasResource,
+  type SeedLegend,
+  useAtlasCoverage,
+} from './map-atlas-data.js';
+import { CheckpointGlyph } from './map-checkpoints.js';
+import { type FeatureKind, useFeatureLayer } from './map-feature-layer.js';
+import { fit, populatedExtent } from './map-framing.js';
+import { type AtlasMarker, MapMarkerLayer } from './map-marker-layer.js';
+import type { MapViewportProps } from './map-plan-fallback.js';
+import { playerHref } from './map-players.js';
+import { mapKey as k, mapBase, mapParams, scopeLost, useMapData } from './map-query.js';
 
-export type MapFace = {
-  face: number;
-  count: number;
-  i0: number | null;
-  j0: number | null;
-  i1: number | null;
-  j1: number | null;
+export type { MapFace } from './map-framing.js';
+
+const Fallback = lazy(() =>
+  import('./map-plan-fallback.js').then((m) => ({ default: m.MapPlanFallback })),
+);
+function MapToolLabel({ name, icon }: { name: string; icon: 'center' | 'extent' | 'full' }) {
+  const paths = {
+    center:
+      'M12 2v4m0 12v4M2 12h4m12 0h4m-3 0a7 7 0 1 1-14 0 7 7 0 1 1 14 0m-5.5 0a1.5 1.5 0 1 1-3 0 1.5 1.5 0 1 1 3 0',
+    extent: 'M4 9V4h5m6 0h5v5m0 6v5h-5m-6 0H4v-5m4-2 3-5 5 7H7z',
+    full: 'M3 9V3h6m6 0h6v6m0 6v6h-6m-6 0H3v-6',
+  };
+  return (
+    <>
+      <svg
+        className="ow-map-tool-icon"
+        viewBox="0 0 24 24"
+        width="18"
+        height="18"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.6"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        aria-hidden="true"
+      >
+        <path d={paths[icon]} />
+      </svg>
+      <span className="ow-map-tool-text">{name}</span>
+    </>
+  );
+}
+export type FactoryPin = { face: number; x: number; z: number; nodes?: number | null };
+type ViewProps = MapViewportProps & {
+  seed: boolean;
+  biomes: boolean;
+  legend?: SeedLegend;
+  feature?: FeatureKind;
+  tracking?: number;
+  factories: FactoryPin[];
+  onCheckpointOpen: () => void;
+  onFallback: () => void;
+  mode: AtlasMode;
+  onModeChange: (mode: AtlasMode) => void;
 };
-type Area = { x: number; z: number; span: number };
-type Bounds = { i0: number; j0: number; i1: number; j1: number };
-type Surface = { side: number; samples: number[] };
-type Delta = { stamp: number; reset: boolean; columns: [number, number, number][] };
-const clamp = (v: number, min: number, max: number) => Math.max(min, Math.min(max, v));
-const columnSize = 16,
-  tileColumns = 8,
-  tileSize = columnSize * tileColumns;
-const textures = new WeakMap<Surface, HTMLCanvasElement>();
-function surfaceImage(tile: Surface) {
-  const cached = textures.get(tile);
-  if (cached) return cached;
-  const c = document.createElement('canvas');
-  c.width = c.height = tile.side;
-  const ctx = c.getContext('2d');
-  if (!ctx) return c;
-  const image = ctx.createImageData(tile.side, tile.side);
-  for (const [i, rgb] of tile.samples.entries()) {
-    if (rgb < 0) continue;
-    const j = i * 4;
-    image.data[j] = rgb >>> 16;
-    image.data[j + 1] = (rgb >>> 8) & 255;
-    image.data[j + 2] = rgb & 255;
-    image.data[j + 3] = 255;
-  }
-  ctx.putImageData(image, 0, 0);
-  textures.set(tile, c);
-  return c;
+export function MapViewport(props: ViewProps) {
+  const t = useT();
+  const [fallback, setFallback] = useState(false);
+  if (fallback)
+    return (
+      <>
+        <p role="status" className="ow-map-layer-note">
+          {t(k('atlas.fallback'))}
+        </p>
+        <Suspense fallback={<Loading />}>
+          <Fallback
+            {...props}
+            onSelect={(c) => {
+              props.onSelect(c);
+              props.onCheckpointOpen();
+            }}
+          />
+        </Suspense>
+      </>
+    );
+  return (
+    <AtlasViewport
+      {...props}
+      unavailable={() => {
+        setFallback(true);
+        props.onFallback();
+      }}
+    />
+  );
 }
-type Footprint = { columns: [number, number][] };
-// Widely scattered columns can obscure the area where almost all the terrain is.
-// Keep multiple inhabited areas together, and offer the full outline when a few
-// isolated columns would dominate the initial frame.
-function populatedExtent(face: MapFace | undefined, cells: Footprint | undefined) {
-  const points = cells?.columns;
-  if (!face || !points || points.length < 100) return null;
-  const centralRange = (axis: 0 | 1) => {
-    const sorted = points.map((p) => p[axis]).sort((a, b) => a - b);
-    const tail = Math.floor(sorted.length / 100);
-    const lo = sorted[tail] ?? 0,
-      hi = sorted[sorted.length - 1 - tail] ?? lo;
-    const reach = 8 * Math.max(1, hi - lo + 1);
-    return { lo: lo - reach, hi: hi + reach };
-  };
-  const xs = centralRange(0),
-    zs = centralRange(1);
-  const core = points.filter(([i, j]) => i >= xs.lo && i <= xs.hi && j >= zs.lo && j <= zs.hi);
-  if (core.length === points.length || core.length < points.length * 0.99) return null;
-  const ii = core.map((p) => p[0]),
-    jj = core.map((p) => p[1]);
-  return {
-    ...face,
-    i0: Math.min(...ii),
-    i1: Math.max(...ii),
-    j0: Math.min(...jj),
-    j1: Math.max(...jj),
-  };
-}
-function fit(edge: number, b: MapFace | undefined, aspect: number, point?: MapPoint): Area {
-  if (b?.i0 == null || b.j0 == null || b.i1 == null || b.j1 == null)
-    return {
-      x: point?.x ?? Math.min(edge, 256) / 2,
-      z: point?.z ?? Math.min(edge, 256) / 2,
-      span: Math.min(edge, 256),
-    };
-  return {
-    x: (b.i0 + b.i1 + 1) * 8,
-    z: (b.j0 + b.j1 + 1) * 8,
-    span: clamp(
-      1.25 * 16 * Math.max(6, b.i1 - b.i0 + 1, (b.j1 - b.j0 + 1) * aspect),
-      32,
-      edge * 1.25 * Math.max(1, aspect),
-    ),
-  };
-}
-export function MapViewport({
-  server,
-  world,
-  edge,
-  checkpointEdge,
-  face,
-  extent,
-  stamp,
-  processRef,
-  checkpoints,
-  players,
-  creatures,
-  focus,
-  selectedId,
-  onSelect,
-  onCreate,
-  onScopeError,
-  onRefreshIndex,
-}: {
-  server: ServerView;
-  world: string;
-  edge: number;
-  checkpointEdge: number;
-  face: number;
-  extent?: MapFace;
-  stamp: number;
-  processRef: string;
-  checkpoints: MapCheckpoint[];
-  players: MapPlayer[];
-  creatures?: OpenworldCreatureLayer;
-  focus: MapPoint | null;
-  selectedId: number | null;
-  onSelect: (c: MapCheckpoint) => void;
-  onCreate?: (p: MapPoint) => void;
-  onScopeError: (e: unknown) => void;
-  onRefreshIndex: () => void;
-}) {
-  const t = useT(),
-    host = useRef<HTMLDivElement>(null),
-    canvas = useRef<HTMLCanvasElement>(null);
-  const [size, setSize] = useState({ width: 0, height: 0 });
-  useEffect(() => {
-    const el = host.current;
-    if (!el) return;
-    const obs = new ResizeObserver(([e]) => {
-      if (e)
-        setSize({
-          width: Math.round(e.contentRect.width),
-          height: Math.round(e.contentRect.height),
-        });
-    });
-    obs.observe(el);
-    return () => obs.disconnect();
-  }, []);
-  const cursor = useRef(stamp);
-  const [revisions, setRevisions] = useState<{
-    all: number;
-    tiles: Map<string, number>;
-    columns: number;
-  }>(() => ({ all: stamp, tiles: new Map(), columns: stamp }));
-  const change = useQuery({
-    queryKey: [...mapScope(server), 'terrain-changes', world, face, processRef],
-    queryFn: ({ signal }) =>
-      mapData<Delta>(
-        server,
-        `/changes?${mapParams({ world, processRef, since: cursor.current })}`,
-        signal,
-      ),
-    retry: false,
-    gcTime: 0,
-    refetchInterval: (q) => (scopeLost(q.state.error) ? false : 12000),
-    refetchIntervalInBackground: false,
-  });
-  const delta = change.data;
-  useEffect(() => {
-    if (!delta || (delta.stamp === cursor.current && !delta.reset)) return;
-    cursor.current = delta.stamp;
-    if (!delta.reset && !delta.columns.length) return;
-    setRevisions((prev) => {
-      if (delta.reset || prev.tiles.size + delta.columns.length > 1024)
-        return { all: delta.stamp, tiles: new Map(), columns: delta.stamp };
-      const tiles = new Map(prev.tiles);
-      let touched = false;
-      for (const [f, i, j] of delta.columns)
-        if (f === face) {
-          tiles.set(`${i - (i % 8)},${j - (j % 8)}`, delta.stamp);
-          touched = true;
-        }
-      return touched ? { ...prev, tiles, columns: delta.stamp } : prev;
-    });
-    onRefreshIndex();
-  }, [delta, face, onRefreshIndex]);
-  const investigateFootprint =
-    !!extent &&
-    extent.count > 0 &&
-    extent.count <= 262144 &&
-    Math.max((extent.i1 ?? 0) - (extent.i0 ?? 0), (extent.j1 ?? 0) - (extent.j0 ?? 0)) > 4096;
-  const footprintPath = `/columns?${mapParams({ world, face, processRef, stride: 1, sample: 1, stamp: revisions.columns })}`;
-  const footprint = useQuery({
-    queryKey: [...mapScope(server), footprintPath],
-    queryFn: ({ signal }) => mapData<Footprint>(server, footprintPath, signal),
-    enabled: investigateFootprint,
-    placeholderData: (prior) => prior,
-    gcTime: 0,
-    staleTime: Infinity,
-    retry: false,
-  });
-  const sample = investigateFootprint ? footprint.data : undefined;
-  const completeFootprint = investigateFootprint && extent.count <= 4096;
-  const core = useMemo(() => populatedExtent(extent, sample), [extent, sample]);
-  const aspect = size.width / Math.max(1, size.height) || 1;
-  const [manual, setManual] = useState<Area | null>(null);
-  const area =
-      manual ??
-      fit(edge, core ?? extent, aspect, checkpoints.find((c) => c.pos.face === face)?.pos),
-    px = size.width / area.span || 1;
-  const zSpan = size.height / px;
-  const minX = area.x - area.span / 2,
-    minZ = area.z - zSpan / 2;
-  const colMax = Math.min(maxOpenworldMapColumn, Math.ceil(edge / 16) - 1);
-  const bounds: Bounds = {
-    i0: clamp(Math.floor(minX / 16), 0, colMax),
-    j0: clamp(Math.floor(minZ / 16), 0, colMax),
-    i1: clamp(Math.floor((minX + area.span) / 16), 0, colMax),
-    j1: clamp(Math.floor((minZ + zSpan) / 16), 0, colMax),
-  };
-  const [draftPan, setDraftPan] = useState<{ dx: number; dy: number } | null>(null);
+
+function AtlasViewport(props: ViewProps & { unavailable: () => void }) {
+  const {
+    server,
+    world,
+    face,
+    edge,
+    processRef,
+    extent,
+    checkpoints,
+    creatures,
+    factories,
+    focus,
+    mode,
+    onModeChange,
+  } = props;
+  const t = useT();
+  const canvas = useRef<HTMLCanvasElement>(null);
+  const overlay = useRef<HTMLDivElement>(null);
+  const plot = useRef<HTMLDivElement>(null);
+  const scene = useRef<AtlasController | null>(null);
+  const [frame, setFrame] = useState<AtlasFrame>();
   const [pick, setPick] = useState(false);
-  const canPlace = onCreate !== undefined;
-  useEffect(() => {
-    if (!canPlace) setPick(false);
-  }, [canPlace]);
-  const drag = useRef<{ id: number; x: number; y: number } | null>(null);
-  useEffect(() => {
-    if (focus?.face === face) {
-      setManual({
-        x: clamp(focus.x, 0, edge),
-        z: clamp(focus.z, 0, edge),
-        span: Math.min(edge, 240),
-      });
+  const [point, setPoint] = useState<(AtlasPoint & { label?: string }) | null>(null);
+  const [streamError, setStreamError] = useState<unknown>(null);
+  const [fullscreen, setFullscreen] = useState(false);
+  const moved = useRef(false);
+  const coverage = useAtlasCoverage(
+    server,
+    world,
+    face,
+    processRef,
+    props.stamp,
+    extent,
+    frame?.bounds,
+    scene,
+    props.onRefreshIndex,
+  );
+  const query = mapParams({ world, processRef });
+  const palette = useMapData<MapPalette>(server, `/palette?${query}`);
+  const legend = props.legend;
+  const features = useFeatureLayer(
+    server,
+    world,
+    processRef,
+    face,
+    frame,
+    legend,
+    props.feature,
+    scene,
+    coverage.data,
+  );
+  const core = useMemo(() => populatedExtent(extent, coverage.sample), [extent, coverage.sample]);
+  const current = useRef({ props, coverage, pick, core });
+  current.current = { props, coverage, pick, core };
+
+  // Projection updates do not redraw terrain or enqueue a React render while the camera moves.
+  const pins = useRef<{ el: HTMLElement; x: number; z: number; y?: number }[]>([]);
+  const projectPins = useCallback(() => {
+    const engine = scene.current;
+    if (!engine) return;
+    for (const p of pins.current) {
+      const at = engine.project(p.x, p.z, p.y);
+      p.el.hidden = !at.visible || (p.el.hasAttribute('data-seed') && !engine.isSeedArea(p.x, p.z));
+      if (at.visible) {
+        p.el.style.left = `${at.x}px`;
+        p.el.style.top = `${at.y}px`;
+      }
     }
-  }, [focus, edge, face]);
-  const tiles: { ci: number; cj: number }[] = [];
-  const iStart = bounds.i0 - (bounds.i0 % 8),
-    jStart = bounds.j0 - (bounds.j0 % 8);
-  const overview =
-    (1 + Math.floor((bounds.i1 - iStart) / 8)) * (1 + Math.floor((bounds.j1 - jStart) / 8)) > 16;
-  if (!overview && size.width)
-    for (let ci = iStart; ci <= bounds.i1; ci += 8)
-      for (let cj = jStart; cj <= bounds.j1; cj += 8)
-        if (
-          extent?.i0 != null &&
-          extent.i1 != null &&
-          extent.j0 != null &&
-          extent.j1 != null &&
-          ci <= extent.i1 &&
-          ci + 7 >= extent.i0 &&
-          cj <= extent.j1 &&
-          cj + 7 >= extent.j0
-        )
-          tiles.push({ ci, cj });
-  const tileQueries = useQueries({
-    queries: tiles.map(({ ci, cj }) => {
-      const stamp = revisions.tiles.get(`${ci},${cj}`) ?? revisions.all;
-      const path = `/surface?${mapParams({ world, face, processRef, ci, cj, stamp })}`;
-      return {
-        queryKey: [...mapScope(server), path],
-        queryFn: ({ signal }: { signal: AbortSignal }) => mapData<Surface>(server, path, signal),
-        gcTime: 0,
-        staleTime: Infinity,
-        retry: false,
-      };
-    }),
-  });
-  const stride = completeFootprint
-    ? 1
-    : Math.min(
-        2 ** 31,
-        2 **
-          Math.max(
-            0,
-            Math.ceil(
-              Math.log2(Math.max(bounds.i1 - bounds.i0 + 1, bounds.j1 - bounds.j0 + 1) / 64),
-            ),
-          ),
+  }, []);
+  useLayoutEffect(() => {
+    const scan = () => {
+      pins.current = Array.from(
+        overlay.current?.querySelectorAll<HTMLElement>(
+          '[data-x]:not(.ow-map-cluster-list [data-x])',
+        ) ?? [],
+        (el) => ({
+          el,
+          x: Number(el.dataset.x),
+          z: Number(el.dataset.z),
+          y: el.dataset.y == null ? undefined : Number(el.dataset.y),
+        }),
       );
-  const tooWide = overview && (extent?.count ?? 0) > 262144;
-  const columnPath =
-    '/columns?' +
-    mapParams({ world, face, processRef, ...bounds, stride, stamp: revisions.columns });
-  const columns = useQuery({
-    queryKey: [...mapScope(server), columnPath],
-    queryFn: ({ signal }) => mapData<{ columns: [number, number][] }>(server, columnPath, signal),
-    enabled:
-      overview &&
-      !tooWide &&
-      !completeFootprint &&
-      (!investigateFootprint || !!sample) &&
-      size.width > 0,
-    staleTime: Infinity,
-    gcTime: 0,
-    retry: false,
-  });
-  const error =
-    change.error ??
-    (investigateFootprint ? footprint.error : null) ??
-    (overview
-      ? completeFootprint
-        ? null
-        : columns.error
-      : tileQueries.find((q) => q.error)?.error);
-  useEffect(() => {
-    if (scopeLost(error)) onScopeError(error);
-  }, [error, onScopeError]);
-  const loading = overview
-    ? !tooWide && (completeFootprint ? footprint.isPending : columns.isPending)
-    : tileQueries.some((q) => q.isPending);
-  useEffect(() => {
-    const el = canvas.current,
-      ctx = el?.getContext('2d');
-    if (!el || !ctx || !size.width) return;
-    const dpr = Math.min(2, window.devicePixelRatio || 1);
-    if (el.width !== Math.round(size.width * dpr) || el.height !== Math.round(size.height * dpr)) {
-      el.width = Math.round(size.width * dpr);
-      el.height = Math.round(size.height * dpr);
-    }
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    ctx.clearRect(0, 0, size.width, size.height);
-    ctx.imageSmoothingEnabled = false;
-    const left = (x: number) => (x - minX) * px + (draftPan?.dx ?? 0);
-    const top = (z: number) => (z - minZ) * px + (draftPan?.dy ?? 0);
-    if (overview) {
-      ctx.fillStyle = '#79aa94';
-      for (const [i, j] of (completeFootprint ? sample : columns.data)?.columns ?? []) {
-        ctx.fillRect(
-          left(i * 16),
-          top(j * 16),
-          Math.max(3, 16 * stride * px),
-          Math.max(3, 16 * stride * px),
-        );
-      }
-    } else {
-      tileQueries.forEach((q, idx) => {
-        const tile = tiles[idx];
-        if (tile && q.data && !q.error) {
-          ctx.drawImage(
-            surfaceImage(q.data),
-            left(tile.ci * 16),
-            top(tile.cj * 16),
-            tileSize * px,
-            tileSize * px,
-          );
-        }
+      projectPins();
+    };
+    scan();
+    const observer = new MutationObserver(scan);
+    if (overlay.current)
+      observer.observe(overlay.current, {
+        childList: true,
+        subtree: true,
+        attributes: true,
+        attributeFilter: ['data-x', 'data-z', 'data-y'],
       });
-    }
-  });
-  function zoom(factor: number) {
-    setManual({
-      ...area,
-      span: clamp(area.span * factor, Math.min(edge, 16), edge * 1.25 * Math.max(1, aspect)),
-    });
-  }
-  function move(x: number, z: number) {
-    setManual({ ...area, x: clamp(area.x + x, 0, edge), z: clamp(area.z + z, 0, edge) });
-  }
-  function keyboard(e: KeyboardEvent<HTMLCanvasElement>) {
-    if (e.target !== e.currentTarget) return;
-    const step = area.span / 4;
-    switch (e.key) {
-      case 'ArrowLeft':
-        move(-step, 0);
-        break;
-      case 'ArrowRight':
-        move(step, 0);
-        break;
-      case 'ArrowUp':
-        move(0, -step);
-        break;
-      case 'ArrowDown':
-        move(0, step);
-        break;
-      case '+':
-      case '=':
-        zoom(0.5);
-        break;
-      case '-':
-        zoom(2);
-        break;
-      case 'Enter':
-        if (!pick || !onCreate || area.x > checkpointEdge || area.z > checkpointEdge) return;
-        setPick(false);
-        onCreate({ face, x: area.x, z: area.z });
-        break;
-      case 'Escape':
-        setPick(false);
-        break;
-      default:
-        return;
-    }
-    e.preventDefault();
-  }
-  function end(e: PointerEvent<HTMLDivElement>) {
-    const d = drag.current;
-    if (!d || e.pointerId !== d.id) return;
-    drag.current = null;
-    setDraftPan(null);
-    const dx = e.clientX - d.x,
-      dy = e.clientY - d.y;
-    if (Math.hypot(dx, dy) > 4) {
-      move(-dx / px, -dy / px);
+    return () => observer.disconnect();
+  }, [projectPins]);
+  useEffect(() => {
+    const el = canvas.current;
+    if (!el) return;
+    const { props: p, core: initialCore } = current.current;
+    const initialView = p.focus
+      ? { x: p.focus.x, z: p.focus.z, span: Math.min(edge, 240) }
+      : fit(edge, initialCore ?? p.extent, el.clientWidth / Math.max(1, el.clientHeight));
+    let active = true;
+    const fail = (error: unknown) => {
+      if (!active) return;
+      if (scopeLost(error)) current.current.props.onScopeError(error);
+      else setStreamError(error);
+    };
+    let engine: AtlasController;
+    try {
+      engine = new AtlasScene(el, {
+        face,
+        edge,
+        initialView,
+        load: (request, signal) =>
+          readAtlasResource(
+            server.serverId,
+            world,
+            processRef,
+            face,
+            current.current.coverage.stamp.current,
+            request,
+            signal,
+          ),
+        loadMeshes: (requests, signal) =>
+          readAtlasMeshes(
+            server.serverId,
+            world,
+            processRef,
+            face,
+            current.current.coverage.stamp.current,
+            requests,
+            signal,
+          ),
+        loadTexture: async (id, signal) => {
+          const response = await fetch(
+            `${mapBase(server.serverId)}/texture?${mapParams({ world, processRef, id })}`,
+            { credentials: 'same-origin', redirect: 'error', signal },
+          );
+          if (!response.ok)
+            throw apiError(
+              await response.json().catch(() => ({})),
+              response.status,
+              response.headers.get('Retry-After'),
+            );
+          return response.status === 204 ? null : response.blob();
+        },
+        onCamera: (view) => {
+          if (active) setFrame(view);
+        },
+        onFrame: projectPins,
+        onPick: (_px, _py, at) => {
+          const { props: live, pick: placing } = current.current;
+          if (
+            placing &&
+            live.onCreate &&
+            at.x >= 0 &&
+            at.z >= 0 &&
+            at.x <= live.checkpointEdge &&
+            at.z <= live.checkpointEdge
+          ) {
+            setPick(false);
+            setPoint(null);
+            live.onCreate({
+              face,
+              x: Math.round(at.x * 100) / 100,
+              z: Math.round(at.z * 100) / 100,
+              ...(at.source === 'live' && at.y != null ? { y: at.y } : {}),
+            });
+          } else {
+            setPoint(at);
+          }
+        },
+        onUnavailable: () => {
+          if (active) current.current.props.unavailable();
+        },
+        onError: fail,
+      });
+      scene.current = engine;
+      setFrame(engine.getView());
+    } catch (error) {
+      if (error instanceof AtlasUnsupported) current.current.props.unavailable();
+      else setStreamError(error);
       return;
     }
-    const r = e.currentTarget.getBoundingClientRect();
-    const x = minX + (e.clientX - r.left) / px,
-      z = minZ + (e.clientY - r.top) / px;
-    if (!pick) {
-      if (!overview || !sample) return;
-      let nearest: MapPoint | undefined;
-      let distance = 10;
-      for (const [i, j] of sample.columns) {
-        const cx = (i + 0.5) * columnSize,
-          cz = (j + 0.5) * columnSize;
-        const d = Math.hypot(cx - x, cz - z) * px;
-        if (d < distance) {
-          distance = d;
-          nearest = { x: cx, z: cz, face };
-        }
-      }
-      if (nearest) setManual({ x: nearest.x, z: nearest.z, span: Math.min(edge, 240) });
-      return;
+    return () => {
+      active = false;
+      scene.current = null;
+      engine.destroy();
+    };
+  }, [edge, face, world, processRef, server.serverId, projectPins]);
+
+  useEffect(() => {
+    scene.current?.setMode(mode);
+  }, [mode]);
+  useEffect(() => {
+    if (palette.data) scene.current?.setPalette(palette.data.materials, palette.data.voxelSize);
+  }, [palette.data]);
+  useEffect(() => {
+    scene.current?.setSeed(
+      props.seed && !!legend,
+      props.biomes ? 'biomes' : 'surface',
+      legend?.biomes,
+      legend?.faceEdgeMeters,
+      legend?.maxZoom,
+    );
+    setPoint((p) =>
+      p?.source === 'seed' && (!props.seed || (p.label && p.label !== props.feature?.name))
+        ? null
+        : p,
+    );
+  }, [props.seed, props.biomes, props.feature?.name, legend]);
+  useEffect(() => {
+    const i0 = extent?.i0,
+      i1 = extent?.i1,
+      j0 = extent?.j0,
+      j1 = extent?.j1;
+    const full = coverage.oversized && i0 != null && i1 != null && j0 != null && j1 != null;
+    scene.current?.setSurveyBounds(full ? { i0, i1, j0, j1 } : null);
+  }, [coverage.oversized, extent]);
+  useEffect(() => {
+    if (coverage.data || coverage.empty)
+      scene.current?.setCoverage(coverage.data?.columns ?? [], coverage.stride, coverage.audited);
+  }, [coverage.data, coverage.stride, coverage.empty, coverage.audited]);
+  useEffect(() => {
+    if (!moved.current && !focus && core && canvas.current)
+      scene.current?.setView(
+        fit(edge, core, canvas.current.clientWidth / Math.max(1, canvas.current.clientHeight)),
+      );
+  }, [core, focus, edge]);
+  const lastTracking = useRef<number>(undefined);
+  useEffect(() => {
+    const following = props.tracking !== undefined && lastTracking.current === props.tracking;
+    lastTracking.current = props.tracking;
+    if (focus?.face === face) {
+      scene.current?.setView({
+        x: focus.x,
+        z: focus.z,
+        span: following ? (scene.current?.getView().span ?? 240) : Math.min(edge, 240),
+      });
+      setPoint(null);
     }
-    if (!onCreate || x < 0 || z < 0 || x > checkpointEdge || z > checkpointEdge) return;
-    setPick(false);
-    onCreate({ face, x: Math.round(x * 100) / 100, z: Math.round(z * 100) / 100 });
-  }
-  const pin = (p: MapPoint) => {
-    if (p.face !== face) return null;
-    const x = (p.x - minX) * px + (draftPan?.dx ?? 0),
-      y = (p.z - minZ) * px + (draftPan?.dy ?? 0);
-    if (x < 0 || y < 0 || x > size.width || y > size.height) return null;
-    return { left: x, top: y } as CSSProperties;
-  };
+  }, [focus, edge, face, props.tracking]);
+  useEffect(() => {
+    if (!props.onCreate) setPick(false);
+  }, [props.onCreate]);
+  const errors = [palette.error, coverage.error, features.error, streamError];
+  const error = errors.find(scopeLost) ?? errors.find(Boolean);
+  useEffect(() => {
+    if (scopeLost(error)) props.onScopeError(error);
+  }, [error, props.onScopeError]);
+  useEffect(() => {
+    const onChange = () =>
+      setFullscreen(
+        !!document.fullscreenElement &&
+          document.fullscreenElement === plot.current?.closest('.ow-panel'),
+      );
+    document.addEventListener('fullscreenchange', onChange);
+    return () => document.removeEventListener('fullscreenchange', onChange);
+  }, []);
   const speciesNames = useMemo(
     () => new Map(creatures?.species.map((s) => [s.id, s.name || s.key])),
     [creatures],
   );
-  // Coincident positions for the same species share a single marker.
-  const creaturePins = useMemo(() => {
-    const pins = new Map<string, OpenworldCreatureLayer['markers'][number]>();
-    for (const marker of creatures?.markers ?? []) {
-      if (marker.face === face) pins.set(`${marker.species}/${marker.x}/${marker.z}`, marker);
-    }
-    return [...pins];
-  }, [creatures, face]);
-  const scale = 10 ** Math.floor(Math.log10(Math.max(1, area.span * 0.16)));
-  const scaleBar =
-    (area.span * 0.16) / scale >= 5
-      ? 5 * scale
-      : (area.span * 0.16) / scale >= 2
-        ? 2 * scale
-        : scale;
+  const creaturePins = useMemo(
+    () =>
+      Array.from(
+        new Map(
+          creatures?.markers
+            .filter((m) => m.face === face)
+            .map((m) => [`${m.species}-${m.x}-${m.z}`, m]),
+        ).entries(),
+      ),
+    [creatures, face],
+  );
+  const checkpointPins = useMemo<AtlasMarker[]>(
+    () =>
+      checkpoints
+        .filter((c) => c.pos.face === face)
+        .map((c) => ({
+          ...c.pos,
+          id: c.id,
+          name: c.name,
+          selected: c.id === props.selectedId,
+          element: (
+            <button
+              key={c.id}
+              type="button"
+              className={`ow-map-pin${c.id === props.selectedId ? ' selected' : ''}`}
+              style={{ '--pin': c.color } as CSSProperties}
+              aria-label={c.name}
+              title={c.name}
+              data-x={c.pos.x}
+              data-z={c.pos.z}
+              data-y={c.pos.y}
+              onClick={() => {
+                setPoint(null);
+                props.onSelect(c);
+                props.onCheckpointOpen();
+              }}
+            >
+              <span>
+                <CheckpointGlyph icon={c.icon} />
+              </span>
+            </button>
+          ),
+        })),
+    [checkpoints, face, props.selectedId, props.onSelect, props.onCheckpointOpen],
+  );
+  const recenter = (all = false) => {
+    const el = canvas.current;
+    if (!el) return;
+    moved.current = all;
+    scene.current?.setView(
+      fit(
+        edge,
+        all ? extent : (core ?? extent),
+        el.clientWidth / Math.max(1, el.clientHeight),
+        checkpoints.find((c) => c.pos.face === face)?.pos,
+      ),
+    );
+  };
+  const span = frame?.span ?? 1;
+  const magnitude = 10 ** Math.floor(Math.log10(Math.max(0.01, span * 0.13)));
+  const scale =
+    magnitude * ((span * 0.13) / magnitude >= 5 ? 5 : (span * 0.13) / magnitude >= 2 ? 2 : 1);
+  const pointBiome =
+    point?.source === 'seed' ? legend?.biomes.find((b) => b.id === point.biome)?.name : null;
   return (
-    <div className="ow-map-plot">
+    <div ref={plot} className="ow-map-plot ow-atlas">
       <div className="ow-map-controls">
+        <fieldset aria-label={t(k('atlas.camera'))} className="ow-atlas-modes">
+          {(['plan', 'iso', 'fly'] as const).map((m) => (
+            <button
+              type="button"
+              className="secondary"
+              aria-pressed={mode === m}
+              key={m}
+              onClick={() => {
+                onModeChange(m);
+                canvas.current?.focus({ preventScroll: true });
+              }}
+            >
+              {t(k(`atlas.${m}`))}
+            </button>
+          ))}
+        </fieldset>
         <div className="ow-map-zoom">
           <button
             type="button"
             className="secondary"
             aria-label={t(k('zoomOut'))}
-            onClick={() => zoom(2)}
+            onClick={() => {
+              moved.current = true;
+              scene.current?.zoom(0.5);
+            }}
           >
             −
           </button>
@@ -478,174 +469,260 @@ export function MapViewport({
             type="button"
             className="secondary"
             aria-label={t(k('zoomIn'))}
-            onClick={() => zoom(0.5)}
+            onClick={() => {
+              moved.current = true;
+              scene.current?.zoom(2);
+            }}
           >
             +
           </button>
-          <button type="button" className="secondary" onClick={() => setManual(null)}>
-            {t(k('recenter'))}
+          <button
+            type="button"
+            className="secondary"
+            aria-label={t(k('recenter'))}
+            title={t(k('recenter'))}
+            onClick={() => recenter()}
+          >
+            <MapToolLabel icon="center" name={t(k('recenter'))} />
           </button>
           {core && (
             <button
               type="button"
               className="secondary"
-              onClick={() => setManual(fit(edge, extent, aspect))}
+              aria-label={t(k('showAllTerrain'))}
+              title={t(k('showAllTerrain'))}
+              onClick={() => recenter(true)}
             >
-              {t(k('showAllTerrain'))}
+              <MapToolLabel icon="extent" name={t(k('showAllTerrain'))} />
+            </button>
+          )}
+          {document.fullscreenEnabled && (
+            <button
+              type="button"
+              className="secondary"
+              aria-pressed={fullscreen}
+              aria-label={t(k(fullscreen ? 'atlas.exitFull' : 'atlas.full'))}
+              title={t(k(fullscreen ? 'atlas.exitFull' : 'atlas.full'))}
+              onClick={() => {
+                (fullscreen
+                  ? document.exitFullscreen()
+                  : plot.current?.closest('.ow-panel')?.requestFullscreen()
+                )?.catch(setStreamError);
+              }}
+            >
+              <MapToolLabel icon="full" name={t(k(fullscreen ? 'atlas.exitFull' : 'atlas.full'))} />
             </button>
           )}
         </div>
-        {onCreate && (
-          <button
-            type="button"
-            className="secondary"
-            aria-pressed={pick}
-            onClick={() => setPick(!pick)}
-          >
-            {t(k('placePin'))}
-          </button>
-        )}
       </div>
       <div
-        ref={host}
         className={`ow-map-stage${pick ? ' ow-map-picking' : ''}`}
-        onPointerDown={(e) => {
-          if (
-            e.button !== 0 ||
-            (e.target !== e.currentTarget &&
-              e.target !== canvas.current &&
-              !(
-                e.target instanceof HTMLElement && e.target.classList.contains('ow-creature-pin')
-              )) ||
-            drag.current
-          )
-            return;
-          drag.current = { id: e.pointerId, x: e.clientX, y: e.clientY };
-          e.currentTarget.setPointerCapture(e.pointerId);
+        onWheelCapture={() => {
+          moved.current = true;
         }}
-        onPointerMove={(e) => {
-          const d = drag.current;
-          if (d && e.pointerId === d.id) setDraftPan({ dx: e.clientX - d.x, dy: e.clientY - d.y });
+        onPointerDownCapture={() => {
+          moved.current = true;
         }}
-        onPointerUp={end}
-        onPointerCancel={() => {
-          drag.current = null;
-          setDraftPan(null);
+        onKeyDownCapture={(e) => {
+          moved.current = true;
+          if (e.key === 'Escape') {
+            setPick(false);
+            setPoint(null);
+          }
         }}
       >
         <canvas
           ref={canvas}
           tabIndex={0}
           aria-label={t(k('stage'), { world, face })}
-          aria-description={t(k('panHint'))}
-          onKeyDown={keyboard}
+          aria-description={t(k(mode === 'fly' ? 'atlas.flyHint' : 'atlas.panHint'))}
         />
-        {focus && pin(focus) && !selectedId && (
-          <span
-            role="img"
-            className="ow-map-location"
-            aria-label={t(k('selectedPosition'))}
-            style={pin(focus) ?? undefined}
-          />
-        )}
-        {creaturePins.map(([markerKey, m]) => {
-          const style = pin(m);
-          if (!style) return null;
-          const name =
-            speciesNames.get(m.species) || t(k('layers.unknownSpecies'), { id: m.species });
-          const label = t(k('layers.creatureMarker'), { name });
-          return (
+        <div ref={overlay} className="ow-atlas-pins">
+          {focus?.face === face && props.selectedId === null && (
             <span
-              key={markerKey}
-              className="ow-creature-pin"
               role="img"
-              aria-label={label}
-              title={label}
-              style={style}
+              className="ow-map-location"
+              aria-label={t(k('selectedPosition'))}
+              data-x={focus.x}
+              data-z={focus.z}
+              data-y={focus.y}
             />
-          );
-        })}
-        {checkpoints.map((c) => {
-          const style = pin(c.pos);
-          return (
-            style && (
-              <button
-                key={c.id}
-                type="button"
-                className={`ow-map-pin${c.id === selectedId ? ' selected' : ''}`}
-                aria-label={c.name}
-                title={c.name}
-                onClick={() => onSelect(c)}
-                style={{ ...style, '--pin': c.color } as CSSProperties}
+          )}
+          <MapMarkerLayer markers={checkpointPins} frame={frame} scene={scene} />
+          {props.players
+            .filter((p) => p.face === face && p.world === world)
+            .map((p) => (
+              <Link
+                key={p.id}
+                className="ow-map-player"
+                data-x={p.x}
+                data-z={p.z}
+                to={playerHref(server.serverId, p, processRef)}
+                aria-label={t(k('openPlayer'), { name: p.name })}
               >
-                <span>
-                  <CheckpointGlyph icon={c.icon} />
-                </span>
-              </button>
-            )
-          );
-        })}
-        {players
-          .filter((p) => p.world === world)
-          .map((p) => {
-            const style = pin(p);
+                {p.name}
+              </Link>
+            ))}
+          {creaturePins.map(([id, m]) => {
+            const name =
+              speciesNames.get(m.species) || t(k('layers.unknownSpecies'), { id: m.species });
             return (
-              style && (
-                <Link
-                  className="ow-map-player"
-                  key={p.id}
-                  to={playerHref(server.serverId, p, processRef)}
-                  title={p.name}
-                  aria-label={t(k('openPlayer'), { name: p.name })}
-                  style={style}
-                >
-                  {p.name}
-                </Link>
-              )
+              <button
+                key={id}
+                type="button"
+                data-x={m.x}
+                data-z={m.z}
+                className="ow-creature-pin"
+                aria-label={t(k('layers.creatureMarker'), { name })}
+                title={name}
+                onClick={() => setPoint({ x: m.x, z: m.z, source: 'live', label: name })}
+              />
             );
           })}
-        {!extent?.count && <span className="ow-map-status">{t(k('unexploredFace'))}</span>}
-        {tooWide && <span className="ow-map-status">{t(k('zoomForTerrain'))}</span>}
-        {loading && !error && (
-          <span className="ow-map-status" role="status">
-            {t('web.loading')}
-          </span>
-        )}
-        <div className="ow-map-scale" aria-hidden="true">
-          <b style={{ width: scaleBar * px }} />
-          {scaleBar >= 1000 ? `${scaleBar / 1000} km` : `${scaleBar} m`}
+          {props.feature &&
+            features.tile.features.map((f) => (
+              <button
+                key={`seed/${f.kind}/${f.x}/${f.y}/${f.z}`}
+                className="ow-predicted-pin"
+                type="button"
+                data-seed=""
+                data-x={f.x}
+                data-z={f.z}
+                aria-label={props.feature?.name}
+                title={props.feature?.name}
+                style={{ '--pin': props.feature?.color } as CSSProperties}
+                onClick={() => setPoint({ ...f, source: 'seed', label: props.feature?.name })}
+              >
+                ◇
+              </button>
+            ))}
+          {factories
+            .filter((p) => p.face === face)
+            .map((p) => (
+              <button
+                key={`${p.x},${p.z}`}
+                className="ow-factory-pin"
+                type="button"
+                data-x={p.x}
+                data-z={p.z}
+                title={t(k('atlas.factory'))}
+                aria-label={t(k('atlas.factory'))}
+                onClick={() =>
+                  setPoint({ x: p.x, z: p.z, source: 'live', label: t(k('atlas.factory')) })
+                }
+              >
+                ◆
+              </button>
+            ))}
         </div>
+        {!extent?.count && !props.seed && (
+          <span className="ow-map-status">{t(k('unexploredFace'))}</span>
+        )}
+        {frame && (
+          <div className="ow-map-scale" aria-hidden="true">
+            <b style={{ width: (scale / span) * frame.width }} />
+            {scale >= 1000 ? `${scale / 1000} km` : `${scale} m`}
+          </div>
+        )}
+        {mode !== 'plan' && (
+          <div className="ow-atlas-motion">
+            <button
+              type="button"
+              aria-label={t(k('atlas.turnLeft'))}
+              onClick={() => scene.current?.rotate(-1)}
+            >
+              ↶
+            </button>
+            <button
+              type="button"
+              aria-label={t(k('atlas.turnRight'))}
+              onClick={() => scene.current?.rotate(1)}
+            >
+              ↷
+            </button>
+            {mode === 'fly' &&
+              (['forward', 'back', 'rise', 'descend'] as const).map((move, i) => (
+                <button
+                  type="button"
+                  key={move}
+                  aria-label={t(k(`atlas.${move}`))}
+                  onClick={() => {
+                    const step = Math.max(4, span * 0.1);
+                    scene.current?.move(
+                      0,
+                      i === 0 ? step : i === 1 ? -step : 0,
+                      i === 2 ? step : i === 3 ? -step : 0,
+                    );
+                  }}
+                >
+                  {['↑', '↓', '+', '−'][i]}
+                </button>
+              ))}
+          </div>
+        )}
+        {point && (
+          <div className="ow-atlas-point" role="status">
+            <div>
+              <strong>{(point.label ?? pointBiome) || t(k(`atlas.source.${point.source}`))}</strong>
+              {point.source === 'seed' && (point.label || pointBiome) && (
+                <small>{t(k('atlas.source.seed'))}</small>
+              )}
+              <small>
+                X {Math.round(point.x)} · Z {Math.round(point.z)}
+                {point.y != null && ` · ${Math.round(point.y)} m`}
+              </small>
+            </div>
+            <button
+              className="secondary"
+              type="button"
+              aria-label={t('web.close')}
+              onClick={() => setPoint(null)}
+            >
+              ×
+            </button>
+          </div>
+        )}
       </div>
-      {error && !scopeLost(error) && (
-        <ErrorNotice
-          error={error}
-          retry={() => {
-            if (change.error) void change.refetch();
-            if (footprint.error && investigateFootprint) void footprint.refetch();
-            if (columns.error && overview && !completeFootprint) void columns.refetch();
-            for (const q of tileQueries) if (q.error) void q.refetch();
-          }}
-        />
-      )}
       <div className="ow-map-key">
         <span>
           <i />
           {t(k('unknown'))}
         </span>
-        {overview && (
-          <span>
-            <i className="known" />
-            {t(k('explored'))}
-          </span>
+        {props.seed && legend && (
+          <span className="ow-atlas-seed-key">{t(k('atlas.source.seed'))}</span>
         )}
-        {creatures && (
-          <span>
-            <i className="ow-creature-dot" />
-            {t(k('layers.markerLegend'))}
-          </span>
+        {props.onCreate && (
+          <button
+            type="button"
+            className="secondary"
+            aria-pressed={pick}
+            onClick={() => {
+              setPick(!pick);
+              canvas.current?.focus({ preventScroll: true });
+            }}
+          >
+            {t(k('placePin'))}
+          </button>
         )}
-        <span>{t(k(pick ? 'placeHint' : 'panHint'))}</span>
+        <span>{t(k(pick ? 'placeHint' : mode === 'fly' ? 'atlas.flyHint' : 'atlas.panHint'))}</span>
       </div>
+      {props.feature && (features.wide || features.tile.truncated) && (
+        <p role="status" className="ow-map-layer-note">
+          {t(k(features.wide ? 'atlas.featureZoom' : 'atlas.featureSample'))}
+        </p>
+      )}
+      {error && !scopeLost(error) ? (
+        <ErrorNotice
+          error={error}
+          retry={() => {
+            setStreamError(null);
+            coverage.retry();
+            if (palette.error) void palette.refetch();
+            if (features.error) features.retry();
+            scene.current?.retry();
+          }}
+        />
+      ) : null}
     </div>
   );
 }

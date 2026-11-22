@@ -1,12 +1,9 @@
-import { useQuery } from '@tanstack/react-query';
 import { Link } from 'react-router';
-import type {
-  OpenworldFactoriesSnapshot,
-  OpenworldFactoryColumn,
-} from '../../../../../games/openworld/src/factories.js';
-import { ApiError, readApi } from '../../api/client.js';
+import type { OpenworldFactoriesSnapshot } from '../../../../../games/openworld/src/factories.js';
+import { ApiError } from '../../api/client.js';
 import { useT } from '../../app/i18n.js';
 import { ErrorNotice, Loading } from '../../components/ui.js';
+import { factoryMapPoint, useFactoryData } from './map-factories.js';
 import { mapHref } from './map-players.js';
 import {
   Metrics,
@@ -18,13 +15,6 @@ import './factories.css';
 
 const key = (name: string) => `games.openworld.factories.${name}`;
 type Props = { data: OpenworldFactoriesSnapshot; serverId: string; canViewMap: boolean };
-
-function mapPoint(c: OpenworldFactoryColumn) {
-  if (!c.world || c.world === 'ships' || c.face == null) return null;
-  if (c.i != null && c.j != null)
-    return { world: c.world, face: c.face, x: c.i * 16 + 8, z: c.j * 16 + 8 };
-  return c.x != null && c.z != null ? { world: c.world, face: c.face, x: c.x, z: c.z } : null;
-}
 
 function FactoryColumns({ data, serverId, canViewMap }: Props) {
   const t = useT();
@@ -38,7 +28,7 @@ function FactoryColumns({ data, serverId, canViewMap }: Props) {
       {columns?.length ? (
         <ol className="ow-factory-columns">
           {columns.map((c) => {
-            const point = mapPoint(c);
+            const point = factoryMapPoint(c);
             const location =
               c.i != null && c.j != null && c.face != null
                 ? t(key('coords'), { face: c.face, i: c.i, j: c.j })
@@ -140,35 +130,7 @@ function Factories(props: TelemetryViewProps) {
   const t = useT();
   const canRead = props.permissionKeys.includes('game.openworld.performance.read');
   const online = props.runtimeState === 'running';
-  const query = useQuery({
-    queryKey: [
-      'openworld-factories',
-      ...props.viewerScope,
-      props.serverId,
-      props.runtimeState,
-      canRead,
-    ],
-    queryFn: ({ signal }) =>
-      readApi<OpenworldFactoriesSnapshot>(
-        `/v1/servers/${encodeURIComponent(props.serverId)}/openworld/factories`,
-        signal,
-      ),
-    enabled: online && canRead,
-    staleTime: 3000,
-    gcTime: 0,
-    retry: false,
-    refetchInterval: (q) =>
-      online &&
-      canRead &&
-      !(
-        q.state.error instanceof ApiError &&
-        ([401, 403, 404].includes(q.state.error.status) ||
-          q.state.error.code === 'game_request_unsupported')
-      )
-        ? 10000
-        : false,
-    refetchIntervalInBackground: false,
-  });
+  const query = useFactoryData(props, true);
   if (!canRead) return <ErrorNotice error={new ApiError('forbidden', 'errors.forbidden')} />;
   if (online && query.error)
     return <ErrorNotice error={query.error} retry={() => void query.refetch()} />;

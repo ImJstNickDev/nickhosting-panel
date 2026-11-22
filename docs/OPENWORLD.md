@@ -158,16 +158,27 @@ of the same console stream to reconcile that clock with the file's UTC modificat
 time before publishing an attribution. Files without sufficient evidence remain in
 the server gallery.
 
-**Map** opens the selected world's explored terrain. Select a planetary face to pan or
-zoom. The overview uses explored columns, and the detailed view loads just the
-surface tiles in view. Water and elevation come from the saved or active terrain.
-Unknown ground remains blank. If a sparsely populated face has isolated entries
-far from the explored area, the map opens on the main cluster. **Show full index**
-includes the distant entries. The game can list a column outside its playable face;
-such a column has no surface to draw.
-The map follows the game's change cursor while open
-and loads a new index if the game resets that cursor. It reads a running instance
-through the private API, including when public dashboard access is off.
+**Map** opens the explored terrain of a planetary face in 2D. Isometric and free
+flight share the viewport, selected point and terrain cache. Zoom or move toward a
+place to see the game's voxel mesh, including overhangs, water and material textures
+when provided by the running release. The more distant landscape uses the game's
+saved surface at progressively coarser resolutions. On a device without WebGL 2
+the interactive 2D overview remains available.
+
+Layers include checkpoints, live players, creatures by species and active factory
+columns with their respective permissions. With both map and Seed Inspector access,
+**Seed preview** fills unexplored areas with procedural terrain. Biome colors and
+catalogued deposits or structures can be selected separately. Generation starts on
+request. A selected location distinguishes recorded ground, indexed columns and
+predictions. Predicted locations do not establish the state of a save.
+
+For a sparsely explored face the initial camera fits the main cluster. **Show full
+index** includes remote outliers, including coordinates the game can report outside
+its playable terrain. Changes from the game's cursor invalidate affected regions.
+The map reads a running instance through its private service even when public
+dashboard access is off. On a1.2.9 an isolated headless server acknowledged a terrain
+edit from its console while its map API continued to return the old geometry after
+a save and restart. The panel displays the geometry supplied by that API.
 
 Map readers can find player-visible checkpoints by world and name. The separate
 **Manage checkpoints** grant also reveals administrative checkpoints and the notes on

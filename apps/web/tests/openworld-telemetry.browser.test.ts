@@ -3,6 +3,17 @@ import { homedir } from 'node:os';
 import { type Browser, expect as check, chromium, type Page } from '@playwright/test';
 import { createServer, type ViteDevServer } from 'vite';
 import { afterAll, beforeAll, expect, it } from 'vitest';
+import { decodeMapTile } from '../../../games/openworld/src/map-terrain.js';
+
+import {
+  faceEdge,
+  materialPalette,
+  mesh,
+  meshBundle,
+  surface,
+  texture,
+  columns as valleyColumns,
+} from '../../../scripts/experiments/openworld-atlas/valley.js';
 
 let vite: ViteDevServer, browser: Browser, url: string;
 const shots = '.codex/local/openworld-browser';
@@ -31,6 +42,15 @@ beforeAll(async () => {
   await vite.listen();
   url = vite.resolvedUrls?.local[0] ?? '';
   browser = await chromium.launch({
+    args:
+      process.env.NICKHOSTING_PLAYWRIGHT_GPU === 'vulkan'
+        ? [
+            '--enable-gpu',
+            '--use-angle=vulkan',
+            '--enable-features=Vulkan',
+            '--ignore-gpu-blocklist',
+          ]
+        : undefined,
     env: {
       ...process.env,
       LD_LIBRARY_PATH: `${homedir()}/.cache/nickhosting-playwright-libs/root/usr/lib/x86_64-linux-gnu`,
@@ -1866,6 +1886,7 @@ it('opens the exact connected player from a map marker and links back to their l
       }),
     );
     await page.goto(`${url}telemetry-fixture?section=map#world=earth&face=0&x=128&z=128`);
+    await page.getByRole('button', { name: 'Layers', exact: true }).click();
     await page.getByLabel('Show players').check();
     const marker = page.getByRole('link', { name: 'Open player Solstice' });
     await check(marker).toHaveAttribute('href', /\/players\/connection\/23#/);
@@ -1895,6 +1916,8 @@ async function mapRoutes(
   page: Page,
   options: {
     wide?: boolean;
+    bridge?: boolean;
+    edge?: number;
     emptyWorlds?: boolean;
     failWrites?: boolean;
     deltaGate?: Promise<void>;
@@ -1909,6 +1932,15 @@ async function mapRoutes(
     fixtureCheckpoint(2, 'Supply cache', 'admins'),
   ];
   const processRef = 'f'.repeat(64);
+  const known = options.bridge
+    ? valleyColumns(8)
+    : valleyColumns().filter(([x, z]) => x < 16 && z < 16);
+  if (options.wide) known.push([200, 100]);
+  if (options.bridge)
+    checkpoints[0] = {
+      ...fixtureCheckpoint(1, 'Footbridge'),
+      pos: { face: 0, x: 256, z: 258, y: 35 },
+    };
   await page.route('**/v1/servers/**/openworld/map**', async (route) => {
     const u = new URL(route.request().url());
     paths.push(u);
@@ -1924,7 +1956,7 @@ async function mapRoutes(
           worlds: options.emptyWorlds
             ? []
             : [
-                { key: 'earth', name: 'Earth', faceEdgeMeters: 8192 },
+                { key: 'earth', name: 'Earth', faceEdgeMeters: options.edge ?? faceEdge },
                 { key: 'moon', name: 'Moon', faceEdgeMeters: null },
               ],
           processRef,
@@ -1940,11 +1972,11 @@ async function mapRoutes(
             face === 0
               ? {
                   face,
-                  count: 100,
-                  i0: 0,
-                  j0: 0,
-                  i1: options.wide ? 200 : 15,
-                  j1: options.wide ? 100 : 15,
+                  count: known.length,
+                  i0: options.bridge ? 8 : 0,
+                  j0: options.bridge ? 8 : 0,
+                  i1: options.wide ? 200 : options.bridge ? 23 : 15,
+                  j1: options.wide ? 100 : options.bridge ? 23 : 15,
                 }
               : { face, count: 0, i0: null, j0: null, i1: null, j1: null },
           ),
@@ -1958,32 +1990,92 @@ async function mapRoutes(
           : { stamp: 7, reset: false, columns: [] },
       });
     }
-    if (path === '/columns')
+    const number = (key: string, fallback = 0) => Number(u.searchParams.get(key) ?? fallback);
+    if (path === '/columns') {
+      const stride = number('stride', 1);
+      const unique = new Map<string, number[]>();
+      for (const [i, j] of known) {
+        if (
+          i < number('i0') ||
+          j < number('j0') ||
+          i > number('i1', Infinity) ||
+          j > number('j1', Infinity)
+        )
+          continue;
+        const cell = [Math.floor(i / stride) * stride, Math.floor(j / stride) * stride];
+        unique.set(cell.join('/'), cell);
+      }
+      return route.fulfill({ json: { columns: Array.from(unique.values()) } });
+    }
+    if (path === '/palette')
+      return route.fulfill({
+        json: { materials: materialPalette, voxelSize: 0.25, faceEdgeMeters: faceEdge },
+      });
+    if (path === '/texture')
+      return route.fulfill({ contentType: 'image/png', body: texture(number('id')) });
+    if (path === '/meshes') {
+      const cells = (u.searchParams.get('cells') ?? '')
+        .split(';')
+        .map((pair) => pair.split(',').map(Number) as [number, number]);
+      if (cells.length > 16 || !cells.length) throw Error('Mesh batch size out of bounds');
+      return route.fulfill({
+        contentType: 'application/octet-stream',
+        body: await meshBundle(cells, number('lod'), 16, number('face')),
+      });
+    }
+    if (path === '/surface') {
+      const ci = number('ci'),
+        cj = number('cj'),
+        face = number('face');
+      return route.fulfill({ json: decodeMapTile(surface(ci, cj, 8, 4, 16, face), face, ci, cj) });
+    }
+    if (path === '/terrain' || path === '/mesh') {
+      if (number('face') !== 0 || u.searchParams.get('world') !== 'earth')
+        return route.fulfill({ status: 204 });
+      const body =
+        path === '/mesh'
+          ? mesh(number('i'), number('j'), number('lod', 1))
+          : surface(number('ci'), number('cj'), number('n', 8), number('lod'));
+      return route.fulfill({ contentType: 'application/octet-stream', body });
+    }
+    if (path === '/seed-legend')
       return route.fulfill({
         json: {
-          columns: [
-            [0, 0],
-            [2, 2],
-            [4, 2],
-            [4, 4],
+          featureKinds: [
+            {
+              key: 'copper',
+              name: 'Copper vein',
+              color: '#bc8956',
+              category: 'deposit',
+              cellMeters: 128,
+            },
           ],
+          biomes: [{ id: 1, name: 'Temperate hills', color: '#649661' }],
+          faceEdgeMeters: faceEdge,
+          maxZoom: 8,
         },
       });
-    if (path === '/surface') {
-      const ci = Number(u.searchParams.get('ci')),
-        cj = Number(u.searchParams.get('cj'));
-      const samples = Array.from({ length: 1024 }, (_, i) => {
-        const x = (i % 32) + ci * 4,
-          z = Math.floor(i / 32) + cj * 4;
-        if (x + z > 105 || x + z < 15) return -1;
-        const river = Math.abs(z - 24 - 7 * Math.sin(x / 10));
-        if (river < 3) return 0x598ea5;
-        return (
-          (river < 5 ? 0xc1b990 : 0x729c74) +
-          (Math.floor(Math.sin(x / 4) * 1.7 + Math.cos(z / 7) * 2.8) + 5) * 0x020301
-        );
+    if (path === '/seed-features')
+      return route.fulfill({
+        json: { features: [{ kind: 'copper', x: 250, y: 26, z: 260 }], truncated: false },
       });
-      return route.fulfill({ json: { side: 32, samples } });
+    if (path === '/seed-tile') {
+      const side = 256,
+        n = side * side,
+        mpp = faceEdge / (2 ** number('z') * side);
+      const body = Buffer.alloc(32 + 8 * n);
+      body.write('NHST');
+      body.writeUInt16LE(side, 4);
+      body.writeDoubleLE(number('x') * side * mpp, 8);
+      body.writeDoubleLE(number('y') * side * mpp, 16);
+      body.writeFloatLE(mpp, 24);
+      for (let i = 0; i < n; i++) {
+        body.writeInt16LE(200, i * 2 + 32);
+        body.writeInt16LE(-32768, 32 + 2 * n + i * 2);
+        body.writeUInt16LE(1, 32 + 4 * n + i * 2);
+        body[32 + 6 * n + i] = 1;
+      }
+      return route.fulfill({ contentType: 'application/octet-stream', body });
     }
     if (path === '/creatures') {
       const world = u.searchParams.get('world'),
@@ -2091,7 +2183,7 @@ it('opens and edits a checkpoint at the linked player position, then requires co
     await check(page.getByRole('heading', { name: 'Map', exact: true })).toBeVisible();
     await check(page.locator('.ow-map-pin')).toHaveCount(2);
     await check
-      .poll(() => paths.filter((p) => p.pathname.endsWith('/surface')).length)
+      .poll(() => paths.filter((p) => p.pathname.endsWith('/terrain')).length)
       .toBeGreaterThan(0);
     await page.getByRole('button', { name: 'Add checkpoint at this position' }).click();
     const dialog = page.getByRole('dialog');
@@ -2101,6 +2193,7 @@ it('opens and edits a checkpoint at the linked player position, then requires co
     await dialog.getByLabel('Name', { exact: true }).fill('Trailhead');
     await dialog.getByLabel('Note', { exact: true }).fill('By the footbridge');
     await dialog.getByRole('button', { name: 'Create checkpoint' }).click();
+    await page.getByRole('searchbox').focus();
     await check(page.getByRole('list').getByRole('button', { name: /Trailhead/ })).toBeVisible();
     expect(writes[0]).toMatchObject({
       world: 'earth',
@@ -2158,14 +2251,16 @@ it('shows the explored overview on mobile and limits player and private checkpoi
       .poll(() => paths.filter((p) => p.pathname.endsWith('/columns')).length)
       .toBeGreaterThan(0);
     expect(
-      paths.some((p) => p.pathname.endsWith('/surface') || p.pathname.endsWith('/players')),
+      paths.some((p) => /\/(players|meshes|mesh|seed-tile|seed-legend)$/.test(p.pathname)),
     ).toBe(false);
     const footprint = paths.find((p) => p.pathname.endsWith('/columns'));
-    expect(Number(footprint?.searchParams.get('stride'))).toBeGreaterThan(1);
+    expect(footprint?.searchParams.get('sample')).toBe('1');
     await check(page.getByRole('button', { name: 'Aggiungi checkpoint', exact: true })).toHaveCount(
       0,
     );
+    await page.getByRole('button', { name: 'Livelli', exact: true }).click();
     await check(page.getByLabel('Mostra giocatori')).toHaveCount(0);
+    await check(page.getByLabel('Anteprima seed')).toHaveCount(0);
     await check(page.getByRole('button', { name: /Supply cache/ })).toHaveCount(0);
     const search = page.getByRole('searchbox');
     await search.fill('wrong');
@@ -2178,11 +2273,12 @@ it('shows the explored overview on mobile and limits player and private checkpoi
     await check(page.getByRole('heading', { name: 'Lakeside' })).toBeVisible();
     await check(page.getByText('Western approach')).toHaveCount(0);
     await check
-      .poll(() => paths.filter((p) => p.pathname.endsWith('/surface')).length)
+      .poll(() => paths.filter((p) => p.pathname.endsWith('/terrain')).length)
       .toBeGreaterThan(0);
     await fits(page);
     await page.screenshot({ path: `${shots}/world-map-it-mobile.png` });
     await page.getByLabel('Mondo', { exact: true }).selectOption('moon');
+    await page.getByRole('searchbox').focus();
     await check(page.getByText('Questo mondo non ha checkpoint.')).toBeVisible();
     await check(page.getByRole('heading', { name: 'Lakeside' })).toHaveCount(0);
   } finally {
@@ -2204,16 +2300,24 @@ it('refreshes only changed visible tiles, suppresses reads offline and clears re
     expect(paths).toEqual([]);
     await page.goto(`${url}telemetry-fixture?section=map`);
     await check(page.locator('canvas')).toBeVisible();
-    const tiles = () => paths.filter((p) => p.pathname.endsWith('/surface'));
-    await check.poll(() => tiles().length).toBe(4);
+    const tiles = () => paths.filter((p) => p.pathname.endsWith('/terrain'));
+    await check
+      .poll(() =>
+        tiles().some(
+          (p) => Number(p.searchParams.get('ci')) === 0 && Number(p.searchParams.get('cj')) === 0,
+        ),
+      )
+      .toBe(true);
     resume();
     await check
       .poll(() =>
         tiles()
           .filter((p) => p.searchParams.get('stamp') === '8')
-          .map((p) => [p.searchParams.get('ci'), p.searchParams.get('cj')]),
+          .map((p) => `${p.searchParams.get('ci')},${p.searchParams.get('cj')}`)
+          .filter((v, i, a) => a.indexOf(v) === i),
       )
-      .toEqual([['0', '0']]);
+      .toEqual(['0,0']);
+    await page.getByRole('button', { name: 'Layers', exact: true }).click();
     await page.getByLabel('Face', { exact: true }).selectOption('4');
     await check(page.getByText('No explored terrain on this face.')).toBeVisible();
     const before = tiles().length;
@@ -2233,6 +2337,7 @@ it('locks a checkpoint submission with an unknown outcome and preserves the orig
   try {
     const { writes } = await mapRoutes(page, { failWrites: true });
     await page.goto(`${url}telemetry-fixture?section=map&cartographer`);
+    await page.getByRole('searchbox').focus();
     await page
       .getByRole('list')
       .getByRole('button', { name: /Lakeside/ })
@@ -2256,6 +2361,7 @@ it('switches coordinate systems without reusing numbers, then closes a private c
   try {
     await mapRoutes(page);
     await page.goto(`${url}telemetry-fixture?section=map&cartographer`);
+    await page.getByRole('searchbox').focus();
     await page
       .getByRole('list')
       .getByRole('button', { name: /Supply cache/ })
@@ -2308,7 +2414,7 @@ it('keeps the map available after a failed index refresh and picks up new explor
     await page.getByRole('alert').getByRole('button').click();
     await check(page.getByRole('alert')).toHaveCount(0);
     await check(page.getByText('No explored terrain on this face.')).toHaveCount(0);
-    await check.poll(() => paths.some((p) => p.pathname.endsWith('/surface'))).toBe(true);
+    await check.poll(() => paths.some((p) => p.pathname.endsWith('/terrain'))).toBe(true);
   } finally {
     resume();
     await context.close();
@@ -2319,19 +2425,16 @@ it('frames a populated cluster, then reaches distant indexed columns without unb
   const context = await browser.newContext({ viewport: { width: 1280, height: 900 } });
   const page = await context.newPage();
   try {
-    const { paths } = await mapRoutes(page);
-    const cluster = Array.from({ length: 2816 }, (_, k) => [
-      45632 + (k % 56),
-      76880 + Math.floor(k / 56),
-    ]);
-    const far = [12622489, 951427];
-    const indexed = [...cluster, far];
+    const { paths } = await mapRoutes(page, { edge: 2_000_000 });
+    const cluster = Array.from({ length: 256 }, (_, k) => [k % 16, Math.floor(k / 16)]);
+    const far = [67321, 78123] as const,
+      indexed = [...cluster, far];
     const queries: URL[] = [];
     await page.route('**/map/index?**', (r) =>
       r.fulfill({
         json: {
           stamp: 7,
-          faces: [{ face: 0, count: indexed.length, i0: 45632, j0: 76880, i1: far[0], j1: far[1] }],
+          faces: [{ face: 0, count: indexed.length, i0: 0, j0: 0, i1: far[0], j1: far[1] }],
         },
       }),
     );
@@ -2340,53 +2443,29 @@ it('frames a populated cluster, then reaches distant indexed columns without unb
       return r.fulfill({ json: { columns: indexed } });
     });
     await page.goto(`${url}telemetry-fixture?section=map&reader`);
-    const all = page.getByRole('button', { name: 'Show full index' }),
-      canvas = page.locator('canvas');
+    const all = page.getByRole('button', { name: 'Show full index' });
+    const scale = page.locator('.ow-map-scale');
     await check(all).toBeVisible();
-    const colored = () =>
-      canvas.evaluate((c) => {
-        const el = c as HTMLCanvasElement,
-          ctx = el.getContext('2d');
-        if (!ctx) return 0;
-        const { data } = ctx.getImageData(0, 0, el.width, el.height);
-        let count = 0;
-        for (let p = 3; p < data.length; p += 4) if (data[p]) count++;
-        return count;
-      });
-    await check.poll(colored).toBeGreaterThan(10000);
-    expect(queries).toHaveLength(1);
-    expect(queries[0]?.searchParams.get('stride')).toBe('1');
+    await check.poll(() => paths.some((u) => u.pathname.endsWith('/terrain'))).toBe(true);
     expect(queries[0]?.searchParams.get('sample')).toBe('1');
-    expect(paths.some((u) => u.pathname.endsWith('/surface'))).toBe(false);
     await all.click();
-    await check.poll(colored).toBeLessThan(100);
-    // Locate the rightmost visible footprint dot and open its exact tile.
-    const pixel = await canvas.evaluate((c) => {
-      const el = c as HTMLCanvasElement,
-        ctx = el.getContext('2d');
-      if (!ctx) return null;
-      const { data } = ctx.getImageData(0, 0, el.width, el.height);
-      for (let x = el.width - 1; x >= 0; x--)
-        for (let y = 0; y < el.height; y++) {
-          if (data[4 * (y * el.width + x) + 3]) return { x, y };
-        }
-      return null;
-    });
-    if (!pixel) throw new Error('Expected an indexed column on the overview');
-    await canvas.click({ position: pixel });
+    await check(scale).toContainText('km');
+    await page.getByRole('searchbox').fill(`${far[0] * 16 + 8}, ${far[1] * 16 + 8}`);
+    await page.getByRole('button', { name: /Go to / }).click();
     await check
       .poll(() =>
-        paths.some(
-          (u) =>
-            u.pathname.endsWith('/surface') &&
-            Number(u.searchParams.get('ci')) === 12622488 &&
-            Number(u.searchParams.get('cj')) === 951424,
-        ),
+        paths.some((u) => {
+          if (!u.pathname.endsWith('/terrain')) return false;
+          const ci = Number(u.searchParams.get('ci')),
+            cj = Number(u.searchParams.get('cj')),
+            n = Number(u.searchParams.get('n'));
+          return ci <= far[0] && far[0] < ci + n && cj <= far[1] && far[1] < cj + n;
+        }),
       )
       .toBe(true);
-    expect(paths.filter((u) => u.pathname.endsWith('/surface')).length).toBeLessThanOrEqual(16);
+    expect(queries.length).toBeLessThan(4);
     await page.getByRole('button', { name: 'Recenter' }).click();
-    await check.poll(colored).toBeGreaterThan(10000);
+    await check(scale).not.toContainText('km');
     await fits(page);
   } finally {
     await context.close();
@@ -2396,18 +2475,18 @@ it('frames a populated cluster, then reaches distant indexed columns without unb
 it('uses a bounded sample to frame a larger map and fetches the actual overview inside that region', async () => {
   const page = await browser.newPage();
   try {
-    await mapRoutes(page);
-    const far = [0x7fffffff, 0x7fffffff];
+    await mapRoutes(page, { edge: 5_000_000 });
+    const far = [180_100, 185_100] as const;
     const cluster = Array.from({ length: 200 }, (_, k) => [
-      500000 + (k % 10),
-      800000 + Math.floor(k / 10) * 8,
+      5000 + (k % 10),
+      8000 + Math.floor(k / 10) * 8,
     ]);
     const queries: URLSearchParams[] = [];
     await page.route('**/map/index?**', (r) =>
       r.fulfill({
         json: {
           stamp: 7,
-          faces: [{ face: 0, count: 45000, i0: 500000, j0: 800000, i1: far[0], j1: far[1] }],
+          faces: [{ face: 0, count: 45000, i0: 5000, j0: 8000, i1: far[0], j1: far[1] }],
         },
       }),
     );
@@ -2421,7 +2500,7 @@ it('uses a bounded sample to frame a larger map and fetches the actual overview 
     await check
       .poll(() =>
         queries.some(
-          (q) => !q.has('sample') && Number(q.get('i1')) > 500000 && Number(q.get('i1')) < 502000,
+          (q) => !q.has('sample') && Number(q.get('i1')) > 5000 && Number(q.get('i1')) < 7000,
         ),
       )
       .toBe(true);
@@ -2431,13 +2510,151 @@ it('uses a bounded sample to frame a larger map and fetches the actual overview 
       .poll(() =>
         queries.some(
           (q) =>
-            Number(q.get('i1')) === 0x7fffffff &&
-            Number(q.get('j1')) === 0x7fffffff &&
-            Number(q.get('stride')) > 8192,
+            Number(q.get('i1')) === far[0] &&
+            Number(q.get('j1')) === far[1] &&
+            Number(q.get('stride')) > 1024,
         ),
       )
       .toBe(true);
     await fits(page);
+  } finally {
+    await page.close();
+  }
+});
+
+it('keeps the same bridge across the three projections', async () => {
+  const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
+  try {
+    await page.addInitScript(() => performance.setResourceTimingBufferSize(4000));
+    const { paths } = await mapRoutes(page, { bridge: true });
+    await page.goto(
+      `${url}telemetry-fixture?section=map&seedAccess&cartographer#world=earth&face=0&x=256&z=258&y=35`,
+    );
+    const pinned = page.locator('.ow-map-location');
+    const reads = (kind: string) => paths.filter((p) => p.pathname.endsWith(`/${kind}`));
+    await check(pinned).toBeVisible();
+    await check.poll(() => reads('terrain').length).toBeGreaterThan(0);
+    expect([...reads('mesh'), ...reads('meshes')]).toHaveLength(0);
+    await page.getByRole('button', { name: 'Isometric', exact: true }).click();
+    await check.poll(() => reads('meshes').length).toBeGreaterThan(0);
+    await page.waitForFunction(
+      () =>
+        performance.getEntriesByType('resource').filter((e) => e.name.includes('/map/texture?'))
+          .length >= 7,
+    );
+    await page.evaluate(
+      () =>
+        new Promise<void>((resolve) =>
+          requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+        ),
+    );
+    await check(pinned).toBeVisible();
+    const waitForDetail = () =>
+      page.waitForFunction(() => {
+        const entries = performance
+          .getEntriesByType('resource')
+          .filter((e) => /\/map\/(meshes|texture)\?/.test(e.name));
+        return (
+          entries.length > 0 &&
+          performance.now() - Math.max(...entries.map((e) => e.startTime + e.duration)) > 800
+        );
+      });
+    await waitForDetail();
+    await page.screenshot({ path: `${shots}/world-map-isometric.png` });
+    await page.getByRole('button', { name: 'Free flight', exact: true }).click();
+    await check(pinned).toBeVisible();
+    await waitForDetail();
+    await page.screenshot({ path: `${shots}/world-map-flight.png` });
+    await page.getByRole('button', { name: '2D', exact: true }).click();
+    await check(pinned).toHaveAttribute('data-x', '256');
+    await check(pinned).toHaveAttribute('data-z', '258');
+    await check.poll(() => reads('seed-legend').length + reads('seed-tile').length).toBe(0);
+
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.getByRole('heading', { name: 'Map', exact: true }).scrollIntoViewIfNeeded();
+    await check(pinned).toBeVisible();
+    await fits(page);
+    await page.screenshot({ path: `${shots}/world-map-bridge-mobile.png` });
+  } finally {
+    await page.close();
+  }
+}, 90_000);
+it('shows seed deposits and structures only on opt-in and clears predicted markers when access is withdrawn', async () => {
+  const page = await browser.newPage();
+  try {
+    const { paths } = await mapRoutes(page);
+    const reads = (kind: string) => paths.filter((p) => p.pathname.endsWith(`/${kind}`));
+    await page.goto(
+      `${url}telemetry-fixture?section=map&reader&seedAccess#world=earth&face=1&x=250&z=260`,
+    );
+    await page.getByRole('button', { name: 'Layers', exact: true }).click();
+    expect(paths.filter((u) => /\/seed-/.test(u.pathname))).toHaveLength(0);
+    const seed = page.getByLabel('Seed preview');
+    await seed.check();
+    await check.poll(() => reads('seed-tile').length).toBeGreaterThan(0);
+    expect(reads('seed-features')).toHaveLength(0);
+    const resources = page.getByLabel('Seed deposits and structures');
+    await resources.selectOption('copper');
+    const feature = page.getByRole('button', { name: 'Copper vein', exact: true });
+    await check(feature).toBeVisible();
+    expect(reads('seed-features').every((u) => u.searchParams.get('kind') === 'copper')).toBe(true);
+    await resources.selectOption('');
+    await check(feature).toHaveCount(0);
+    await resources.selectOption('copper');
+    await check(feature).toBeVisible();
+    await page.evaluate(() =>
+      window.dispatchEvent(
+        new CustomEvent('fixture-revoke', { detail: 'game.openworld.seed.inspect' }),
+      ),
+    );
+    await check(seed).toHaveCount(0);
+    await check(feature).toHaveCount(0);
+    await check(resources).toHaveCount(0);
+    await check(page.locator('.ow-atlas-seed-key')).toHaveCount(0);
+    const prior = reads('seed-tile').length;
+    await page.getByRole('button', { name: 'Layers', exact: true }).click();
+    await page.getByRole('button', { name: 'Isometric', exact: true }).click();
+    await check(page.getByRole('button', { name: 'Isometric', exact: true })).toHaveAttribute(
+      'aria-pressed',
+      'true',
+    );
+    expect(reads('seed-tile').length).toBe(prior);
+    await fits(page);
+  } finally {
+    await page.close();
+  }
+});
+
+it('falls back to the readable 2D map with checkpoint navigation when WebGL2 is unavailable', async () => {
+  const page = await browser.newPage();
+  try {
+    await page.addInitScript(() => {
+      const actual = HTMLCanvasElement.prototype.getContext;
+      HTMLCanvasElement.prototype.getContext = function (
+        this: HTMLCanvasElement,
+        kind,
+        ...options
+      ) {
+        return kind === 'webgl2' ? null : Reflect.apply(actual, this, [kind, ...options]);
+      } as typeof actual;
+    });
+    const { paths } = await mapRoutes(page);
+    await page.goto(
+      `${url}telemetry-fixture?section=map&reader&seedAccess#world=earth&face=0&x=128&z=120`,
+    );
+    await check(page.getByText('WebGL is unavailable. Showing the 2D terrain map.')).toBeVisible();
+    await check.poll(() => paths.some((u) => u.pathname.endsWith('/surface'))).toBe(true);
+    await page.getByRole('searchbox').fill('Lakeside');
+    await page
+      .locator('.ow-map-list')
+      .getByRole('button', { name: /Lakeside/ })
+      .click();
+    await check(page.getByRole('heading', { name: 'Lakeside' })).toBeVisible();
+    await page.getByRole('button', { name: 'Layers', exact: true }).click();
+    await check(page.getByLabel('Seed preview')).toHaveCount(0);
+    expect(paths.some((u) => /\/(mesh|meshes|seed-tile|seed-legend)$/.test(u.pathname))).toBe(
+      false,
+    );
   } finally {
     await page.close();
   }
@@ -2472,23 +2689,26 @@ it('loads creature populations on demand, requests markers only when selected, a
     await page.getByRole('button', { name: 'Terrain', exact: true }).click();
     await check(place).toHaveAttribute('aria-pressed', 'false');
     await page.getByRole('button', { name: 'Creatures', exact: true }).click();
+    await page.getByRole('button', { name: 'Layers', exact: true }).click();
     await page.getByLabel('Show creature positions').check();
-    const toad = page.getByRole('img', { name: 'Creature · Marsh toad', exact: true });
+    await page.getByRole('button', { name: 'Layers', exact: true }).click();
+    const toad = page.getByRole('button', { name: 'Creature · Marsh toad', exact: true });
     await toad.hover();
-    await check(toad).toHaveAttribute('title', 'Creature · Marsh toad');
+    await check(toad).toHaveAttribute('title', 'Marsh toad');
     const box = await toad.boundingBox();
     if (!box) throw Error('Marker is outside the viewport');
-    await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+    await page.mouse.move(box.x - 15, box.y - 20);
     await page.mouse.down();
-    await page.mouse.move(box.x + box.width / 2 + 36, box.y + box.height / 2 + 14);
+    await page.mouse.move(box.x + 21, box.y - 6, { steps: 4 });
     await page.mouse.up();
     await check.poll(async () => (await toad.boundingBox())?.x ?? 0).toBeGreaterThan(box.x + 25);
     await page.getByRole('button', { name: 'Recenter' }).click();
     await check(page.getByText('The map shows a sample of the creature positions.')).toBeVisible();
     await fits(page);
     await page.screenshot({ path: `${shots}/world-map-creatures-en.png` });
+    await page.getByRole('button', { name: 'Layers', exact: true }).click();
     await page.getByLabel('Face', { exact: true }).selectOption('3');
-    await check(page.getByRole('img', { name: /^Creature ·/ })).toHaveCount(0);
+    await check(page.getByRole('button', { name: /^Creature ·/ })).toHaveCount(0);
     await page.getByLabel('World', { exact: true }).selectOption('moon');
     await check(page.getByRole('heading', { name: 'Active population in Moon' })).toBeVisible();
     await check(page.getByText('No species recorded in this world.')).toBeVisible();

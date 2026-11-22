@@ -12,7 +12,11 @@ export function mapParams(params: Record<string, string | number>) {
   return new URLSearchParams(Object.entries(params).map(([k, v]) => [k, String(v)])).toString();
 }
 export const scopeLost = (reason: unknown) =>
-  reason instanceof ApiError && [401, 403, 404, 409].includes(reason.status);
+  reason instanceof ApiError &&
+  (reason.status === 401 ||
+    reason.status === 403 ||
+    reason.status === 404 ||
+    (reason.status === 409 && reason.code !== 'game_request_unsupported'));
 export function useMapData<T>(s: ServerView, path: string, enabled = true, interval?: number) {
   return useQuery({
     queryKey: [...mapScope(s), path],
