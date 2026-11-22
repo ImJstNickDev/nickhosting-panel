@@ -6,7 +6,12 @@ import { allocationInventory } from './allocations.js';
 import { backupIgnoredSchema } from './backup-limits.js';
 import { discoverNickHostingExtension, providerIdentitySchema } from './blueprint.js';
 import { type ConsoleRelayOptions, createConsoleRelay } from './console.js';
-import { getDirectoryBatchSettings, listDirectoriesBatch } from './directory-batch.js';
+import {
+  getDirectoryBatchSettings,
+  listDirectoriesBatch,
+  requestDirectories,
+  type WorldScanGuard,
+} from './directory-batch.js';
 import { createDownloadPool } from './download-pool.js';
 import {
   allowedOrigin,
@@ -700,6 +705,52 @@ export function createPterodactylAdapter(options: PterodactylOptions) {
       const request = () => listDirectoriesBatch(transport, identifier, directories);
       return timing ? timing.measure('directoryBatch.list.http', request) : request();
     },
+    async readWorldDirectories(identifier: string, directories: string[], guard: WorldScanGuard) {
+      const { results, propertiesGrant } = await requestDirectories(
+        transport,
+        identifier,
+        directories,
+        guard,
+      );
+      let properties: Uint8Array | undefined;
+      if (
+        directories.length === 1 &&
+        directories[0] === '' &&
+        results[0] &&
+        'files' in results[0]
+      ) {
+        if (
+          !propertiesGrant ||
+          Date.parse(propertiesGrant.expiresAt) <= Date.now() ||
+          Date.parse(propertiesGrant.expiresAt) > Date.now() + 960000
+        )
+          throw new PterodactylError('invalid_response', 'client', 'rejected');
+        const url = fileDownloads.target(propertiesGrant.urls[0]);
+        try {
+          properties = await readEditorDownload(options, url.href, 1048576);
+        } catch (error) {
+          if (!(error instanceof PterodactylError && error.upstreamStatus === 404)) throw error;
+        }
+      } else if (propertiesGrant)
+        throw new PterodactylError('invalid_response', 'client', 'rejected');
+      return { results, properties };
+    },
+    async prepareWorldFiles(identifier: string, paths: string[], guard: WorldScanGuard) {
+      const grants = await fileDownloads.worldGrants(identifier, paths, guard);
+      return grants.map(({ url, expiresAt }) => async (maxBytes: number, signal: AbortSignal) => {
+        if (Date.now() >= expiresAt) throw new DomainError('integration_unavailable');
+        parseInput(
+          z
+            .number()
+            .int()
+            .min(1)
+            .max(8 * 1024 ** 2),
+          maxBytes,
+        );
+        const { body } = await download(url, { maxBytes, signal });
+        return readBounded(new Response(body), maxBytes);
+      });
+    },
     getDirectoryBatchSettings(identifier: string, timing?: FileReadTiming) {
       const request = () => getDirectoryBatchSettings(transport, identifier);
       return timing ? timing.measure('directoryBatch.settings.http', request) : request();
@@ -1221,7 +1272,10 @@ export function createPterodactylAdapter(options: PterodactylOptions) {
 }
 export type PterodactylAdapter = Omit<
   ReturnType<typeof createPterodactylAdapter>,
-  'gatewayTopology'
-> & {
-  gatewayTopology?: ReturnType<typeof createGatewayTopology>;
-};
+  'gatewayTopology' | 'readWorldDirectories' | 'prepareWorldFiles'
+> &
+  Partial<
+    Pick<ReturnType<typeof createPterodactylAdapter>, 'readWorldDirectories' | 'prepareWorldFiles'>
+  > & {
+    gatewayTopology?: ReturnType<typeof createGatewayTopology>;
+  };

@@ -43,6 +43,39 @@ async function stockInventory(management: ManagementRuntime, nodeIds: number[], 
 type Topology = NonNullable<ManagementRuntime['adapter']['gatewayTopology']>;
 type Snapshot = Awaited<ReturnType<Topology['snapshot']>>;
 type Receipt = Snapshot['receipt'];
+type PrepareHeartbeat = NonNullable<ManagementRuntime['prepareGatewayHeartbeat']>;
+type Heartbeat = NonNullable<Awaited<ReturnType<PrepareHeartbeat>>>;
+
+// Planning a feed batch may wait for a pool connection. Keep that optional
+// work outside the Gateway renewal deadline, including on a stalled database.
+async function planHeartbeat(
+  prepare: (expired: () => boolean) => Promise<Heartbeat | undefined>,
+  budgetMs: number,
+) {
+  let expired = false;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<undefined>((resolve) => {
+    timer = setTimeout(() => {
+      expired = true;
+      resolve(undefined);
+    }, budgetMs);
+  });
+  try {
+    const plan = Promise.resolve()
+      .then(() => prepare(() => expired))
+      .then(
+        (heartbeat) => {
+          if (!expired) return heartbeat;
+          void heartbeat?.accept(undefined).catch(() => {});
+        },
+        () => undefined,
+      );
+    return await Promise.race([plan, timeout]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 const matches = (a: Receipt, b: Receipt) =>
   a.epoch === b.epoch && a.revision === b.revision && a.digest === b.digest;
 
@@ -57,12 +90,42 @@ export function createGatewayInventoryReader(changed: () => Promise<void> = asyn
     observedAt: number;
     demandAt: number;
     snapshotAt: number;
+    standaloneUntil?: number;
     watching?: Promise<void>;
     loading?: Promise<void>;
   };
   let rejection: { binding: string; error: PterodactylError; announced: boolean } | undefined;
   let current: Scope | undefined;
   let watcher: Promise<void> | undefined;
+  let feedBusy = false;
+  let publication: Promise<void> | undefined;
+  async function prepareFeed(
+    prepare: PrepareHeartbeat,
+    interval: number,
+  ): Promise<Heartbeat | undefined> {
+    feedBusy = true;
+    try {
+      const work = await prepare(interval);
+      if (work) {
+        return {
+          request: work.request,
+          accept(sections) {
+            const result = Promise.resolve().then(() => work.accept(sections));
+            publication = result
+              .catch(() => {})
+              .finally(() => {
+                feedBusy = false;
+                publication = undefined;
+              });
+            return result;
+          },
+        };
+      }
+    } catch {
+      // The worker can renew a feed directly when the coordinator is unavailable.
+    }
+    feedBusy = false;
+  }
   const invalidate = (scope: Scope) => {
     if (scope !== current) return;
     scope.value = undefined;
@@ -74,51 +137,100 @@ export function createGatewayInventoryReader(changed: () => Promise<void> = asyn
     nodes: number[],
     servers: string[],
     interval: number,
+    prepare: PrepareHeartbeat | undefined,
   ) {
     if (watcher || !scope.value || current !== scope) return;
     const original = scope.value;
-    const start = Date.now();
-    const waitMs = Math.max(0, Math.min(interval, Math.floor(scope.observedAt + interval - start)));
     let renewed = false;
-    const monotonicStart = performance.now();
-    watcher = scope.watching = topology
-      .revision(original.receipt, nodes, servers, waitMs)
-      .then(
-        (receipt) => {
-          if (scope.value !== original || current !== scope) return;
-          if ('changed' in receipt || !matches(receipt, original.receipt)) {
-            invalidate(scope);
-            return;
-          }
-          // The remote monotonic wait ends BEFORE the consistent transaction. Exclude
-          // network/DB latency. Clamp to elapsed local monotonic and wall time.
-          const observed =
-            start + Math.min(receipt.waitedMs, Math.floor(performance.now() - monotonicStart));
-          if (observed > Date.now() || receipt.waitedMs < waitMs) {
-            invalidate(scope);
-            return;
-          }
-          scope.observedAt = observed;
-          renewed = true;
-        },
-        (error: unknown) => {
-          if (scope.value !== original || current !== scope) return;
-          if (
-            error instanceof PterodactylError &&
-            (error.reason === 'permission_denied' || error.upstreamStatus === 409)
-          ) {
-            rejection = { binding: scope.binding, error, announced: false };
-          }
-          invalidate(scope);
-        },
-      )
+    let heartbeat: Heartbeat | undefined;
+    let accepted = false;
+    const active = () => scope.value === original && current === scope;
+    async function confirm(standalone = false): Promise<void> {
+      const remaining = scope.observedAt + interval - Date.now();
+      if (
+        !standalone &&
+        prepare &&
+        (!feedBusy || publication) &&
+        remaining > 100 &&
+        (scope.standaloneUntil ?? 0) <= Date.now()
+      ) {
+        // A quick publication can free the slot for this heartbeat. Consume its
+        // promise once so a stalled store never accumulates waiting watchers.
+        const pending = publication;
+        publication = undefined;
+        heartbeat = await planHeartbeat(async (expired) => {
+          if (pending) await pending;
+          if (expired() || !active() || feedBusy) return;
+          return prepareFeed(prepare, interval);
+        }, 100);
+      }
+      if (!active()) return;
+      const start = Date.now();
+      const waitMs = Math.max(0, Math.min(interval, scope.observedAt + interval - start));
+      const monotonicStart = performance.now();
+      let receipt: Awaited<ReturnType<Topology['revision']>>;
+      try {
+        receipt = await topology.revision(
+          original.receipt,
+          nodes,
+          servers,
+          waitMs,
+          heartbeat?.request,
+        );
+      } catch (error) {
+        // A rolling downgrade to 1.10 rejects optional fields. Reuse only the
+        // remaining time and ask the old endpoint once with its original schema.
+        if (
+          heartbeat &&
+          active() &&
+          error instanceof PterodactylError &&
+          error.upstreamStatus === 422
+        ) {
+          scope.standaloneUntil = Date.now() + 60000;
+          void heartbeat.accept(undefined).catch(() => {});
+          heartbeat = undefined;
+          return confirm(true);
+        }
+        throw error;
+      }
+      if (!active()) return;
+      if (heartbeat) {
+        accepted = true;
+        void heartbeat.accept(receipt.coordinated).catch(() => {});
+      }
+      if ('changed' in receipt || !matches(receipt, original.receipt)) {
+        invalidate(scope);
+        return;
+      }
+      // The remote wait ends before the source transaction. Neither planning nor
+      // publication time can make a provider observation appear more recent.
+      const observed =
+        start + Math.min(receipt.waitedMs, Math.floor(performance.now() - monotonicStart));
+      if (observed > Date.now() || receipt.waitedMs < waitMs) {
+        invalidate(scope);
+        return;
+      }
+      scope.observedAt = observed;
+      renewed = true;
+    }
+    watcher = scope.watching = confirm()
+      .catch((error: unknown) => {
+        if (!active()) return;
+        if (
+          error instanceof PterodactylError &&
+          (error.reason === 'permission_denied' || error.upstreamStatus === 409)
+        ) {
+          rejection = { binding: scope.binding, error, announced: false };
+        }
+        invalidate(scope);
+      })
       .finally(() => {
+        if (heartbeat && !accepted) void heartbeat.accept(undefined).catch(() => {});
         watcher = undefined;
         scope.watching = undefined;
-        // Continue only for an active Gateway. Scope replacement and inactivity
-        // release the upstream worker within one bounded wait.
+        // Continue only for an active Gateway.
         if (renewed && Date.now() - scope.demandAt < interval + 1000)
-          watch(scope, topology, nodes, servers, interval);
+          watch(scope, topology, nodes, servers, interval, prepare);
       });
   }
 
@@ -191,7 +303,15 @@ export function createGatewayInventoryReader(changed: () => Promise<void> = asyn
           scope.value &&
           (started - scope.observedAt >= confirmAfterMs || started < scope.observedAt)
         ) {
-          if (!scope.watching) watch(scope, topology, nodeIds, uuids, confirmAfterMs);
+          if (!scope.watching)
+            watch(
+              scope,
+              topology,
+              nodeIds,
+              uuids,
+              confirmAfterMs,
+              management.prepareGatewayHeartbeat,
+            );
           await scope.watching;
           if (Date.now() - scope.observedAt > confirmAfterMs || Date.now() < scope.observedAt)
             scope.value = undefined;
@@ -226,7 +346,7 @@ export function createGatewayInventoryReader(changed: () => Promise<void> = asyn
         };
         checkCurrent();
         if (!value) throw new DomainError('integration_unavailable');
-        watch(scope, topology, nodeIds, uuids, confirmAfterMs);
+        watch(scope, topology, nodeIds, uuids, confirmAfterMs, management.prepareGatewayHeartbeat);
         return { ...value, providerObservedAt: scope.observedAt, providerReadFresh, checkCurrent };
       } catch (error) {
         if (current === scope) current = undefined;

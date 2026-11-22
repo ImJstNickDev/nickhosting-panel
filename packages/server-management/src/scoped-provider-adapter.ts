@@ -16,6 +16,8 @@ const identifierArguments: Partial<Record<keyof PterodactylAdapter, number>> = {
   listFiles: 0,
   getDirectoryBatchSettings: 0,
   listDirectoriesBatch: 0,
+  readWorldDirectories: 0,
+  prepareWorldFiles: 0,
   getFileOperationCapabilities: 0,
   inspectFileOperation: 0,
   guardedDeleteDirectory: 0,

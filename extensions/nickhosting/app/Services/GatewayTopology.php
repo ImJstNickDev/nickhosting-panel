@@ -3,6 +3,7 @@
 namespace Pterodactyl\BlueprintFramework\Extensions\{identifier}\Services;
 
 use Illuminate\Support\Facades\DB;
+use Illuminate\Database\Query\Builder;
 use Illuminate\Support\Str;
 
 /** A global change counter: a foreign allocation can collide with a managed listener. */
@@ -163,10 +164,24 @@ final class GatewayTopology
         return ['epoch'=>$row->epoch, 'revision'=>(string)$row->revision];
     }
 
-    /** A single primary-key read each tick. Recheck schema coverage and ACL before returning. */
-    public static function wait(string $epoch, string $revision, int $waitMs, array $nodeIds, array $serverUuids): array
+    /** Optional sections never wait behind native row updates or change session settings. */
+    public static function sectionRows(Builder $query): array
     {
-        $started = hrtime(true);
+        $db = $query->getConnection();
+        $sql = $query->toSql();
+        if (in_array($db->getDriverName(), ['mysql', 'mariadb'], true)) {
+            $sql = $db->isMaria()
+                ? 'SET STATEMENT max_statement_time=0.2, lock_wait_timeout=0 FOR ' . $sql
+                : preg_replace('/^select /i', 'SELECT /*+ MAX_EXECUTION_TIME(200) SET_VAR(lock_wait_timeout=1) */ ', $sql, 1);
+        } else { abort_unless($db->getDriverName() === 'sqlite', 503); }
+        return $db->selectFromWriteConnection($sql, $query->getBindings());
+    }
+
+    /** A single primary-key read each tick. Recheck schema coverage and ACL before returning. */
+    public static function wait(string $epoch, string $revision, int $waitMs, array $nodeIds, array $serverUuids, ?int $started = null): array
+    {
+        // Optional primary reads ran after this monotonic start and before the digest transaction.
+        $started ??= hrtime(true);
         $deadline = $started + $waitMs * 1000000;
         if ($waitMs) {
             do {

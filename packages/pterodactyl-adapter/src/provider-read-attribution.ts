@@ -51,9 +51,9 @@ export function isBackgroundProviderRead() {
 function readKind(scope: CredentialScope, method: string, path: string, url: URL) {
   if (scope === 'client') {
     if (method === 'POST') {
-      if (/^extensions\/nickhosting\/servers\/[^/?]+\/directory-list$/.test(path))
+      if (/^extensions\/nickhosting\/servers\/[^/?]+\/(?:world-)?directory-list$/.test(path))
         return 'directoryList';
-      if (/^extensions\/nickhosting\/servers\/[^/?]+\/download-urls$/.test(path))
+      if (/^extensions\/nickhosting\/servers\/[^/?]+\/(?:world-)?download-urls$/.test(path))
         return 'downloadUrls';
     }
     if (method !== 'GET') return;

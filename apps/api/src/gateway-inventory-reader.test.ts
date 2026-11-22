@@ -10,6 +10,7 @@ function fixture() {
   let receipt = { epoch: randomUUID(), revision: '1', digest: 'a'.repeat(64) };
   let fire = () => {};
   let fail: PterodactylError | undefined;
+  let coordinated: unknown;
   const snapshot = vi.fn(async () => {
     if (fail) throw fail;
     return { receipt, nodes: [], allocations: [], servers: [], schemaVersion: 1 as const };
@@ -22,7 +23,7 @@ function fixture() {
         fire = () => {
           clearTimeout(timer);
           if (fail) return reject(fail);
-          resolve({ ...receipt, waitedMs: Math.min(waitMs, Date.now() - started) });
+          resolve({ ...receipt, waitedMs: Math.min(waitMs, Date.now() - started), coordinated });
         };
       }),
   );
@@ -46,6 +47,9 @@ function fixture() {
     revision,
     legacy,
     runtime,
+    replyWith(sections: unknown) {
+      coordinated = sections;
+    },
     advance() {
       receipt = { ...receipt, revision: '2' };
       fire();
@@ -111,6 +115,101 @@ describe('gateway topology confirmation', () => {
     expect(misses).toBe(0);
     expect(inventory.snapshot).toHaveBeenCalledOnce();
     expect(inventory.revision).toHaveBeenCalledTimes(16); // 15 complete, one outstanding.
+  });
+  it('publishes coordinated sections independently while an unchanged topology continues renewing', async () => {
+    vi.useFakeTimers();
+    const f = fixture();
+    const sections = { snapshots: { error: 409 } };
+    const request = { instanceId: randomUUID(), snapshots: [randomUUID()] };
+    const publishing = Promise.withResolvers<void>();
+    const accept = vi.fn(() => publishing.promise);
+    const prepare = vi.fn(async () => ({ request, accept }));
+    Object.assign(f.runtime, { prepareGatewayHeartbeat: prepare });
+    f.replyWith(sections);
+    const start = Date.now();
+    const first = await f.read(undefined, 4000);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(f.revision.mock.calls[0]?.slice(4)).toEqual([request]);
+    await vi.advanceTimersByTimeAsync(4000);
+    expect(accept).toHaveBeenCalledWith(sections);
+    first.checkCurrent();
+    expect((await f.read(undefined, 4000)).providerObservedAt).toBe(start + 4000);
+    expect(prepare).toHaveBeenCalledOnce();
+    expect(f.snapshot).toHaveBeenCalledOnce();
+    expect(f.changed).not.toHaveBeenCalled();
+    publishing.reject(new Error('feed publication failed'));
+    await vi.advanceTimersByTimeAsync(0);
+    first.checkCurrent();
+  });
+  it('reuses consecutive heartbeats when feed publication finishes inside the planning budget', async () => {
+    vi.useFakeTimers();
+    const f = fixture();
+    const request = { capabilities: true as const };
+    const accept = vi.fn(() => new Promise<void>((resolve) => setTimeout(resolve, 15)));
+    Object.assign(f.runtime, { prepareGatewayHeartbeat: async () => ({ request, accept }) });
+    const start = Date.now();
+    await f.read(undefined, 4000);
+    await vi.advanceTimersByTimeAsync(4016);
+    expect(f.revision.mock.calls[1]?.slice(3)).toEqual([3985, request]);
+    await f.read(undefined, 4000);
+    await vi.advanceTimersByTimeAsync(3984);
+    expect((await f.read(undefined, 4000)).providerObservedAt).toBe(start + 8000);
+  });
+  it('renews topology when feed planning is stalled and discards a late plan only once', async () => {
+    vi.useFakeTimers();
+    const f = fixture();
+    const accept = vi.fn(async () => {});
+    const work = { request: { capabilities: true }, accept };
+    const blocked = Promise.withResolvers<typeof work>();
+    const prepare = vi.fn(() => blocked.promise);
+    Object.assign(f.runtime, { prepareGatewayHeartbeat: prepare });
+    const start = Date.now();
+    await f.read(undefined, 4000);
+    await vi.advanceTimersByTimeAsync(100);
+    expect(f.revision.mock.calls[0]?.slice(3)).toEqual([3900, undefined]);
+    await vi.advanceTimersByTimeAsync(3900);
+    expect((await f.read(undefined, 4000)).providerObservedAt).toBe(start + 4000);
+    expect(prepare).toHaveBeenCalledOnce();
+    blocked.resolve(work);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(accept).toHaveBeenCalledExactlyOnceWith(undefined);
+    expect(f.changed).not.toHaveBeenCalled();
+  });
+  it('renews with the original wire contract on a rolling downgrade that rejects the optional field', async () => {
+    vi.useFakeTimers();
+    const f = fixture();
+    const accept = vi.fn(async () => {});
+    const prepare = vi.fn(async () => ({ request: { capabilities: true }, accept }));
+    Object.assign(f.runtime, { prepareGatewayHeartbeat: prepare });
+    f.revision.mockRejectedValueOnce(
+      new PterodactylError('invalid_request', 'application', 'rejected', 422),
+    );
+    const start = Date.now();
+    const first = await f.read(undefined, 4000);
+    await vi.advanceTimersByTimeAsync(4000);
+    expect(accept).toHaveBeenCalledExactlyOnceWith(undefined);
+    expect(prepare).toHaveBeenCalledOnce();
+    expect(f.revision.mock.calls.map((c) => c.slice(4)[0]).slice(0, 2)).toEqual([
+      { capabilities: true },
+      undefined,
+    ]);
+    expect((await f.read(undefined, 4000)).providerObservedAt).toBe(start + 4000);
+    first.checkCurrent();
+    expect(f.snapshot).toHaveBeenCalledOnce();
+  });
+  it('discards optional work when the heartbeat was dispatched for a replaced scope', async () => {
+    vi.useFakeTimers();
+    const f = fixture();
+    const accept = vi.fn(async () => {});
+    Object.assign(f.runtime, {
+      prepareGatewayHeartbeat: async () => ({ request: { capabilities: true }, accept }),
+    });
+    await f.read(undefined, 4000);
+    await vi.advanceTimersByTimeAsync(1);
+    await f.read([randomUUID()], 4000);
+    f.advance();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(accept).toHaveBeenCalledExactlyOnceWith(undefined);
   });
   it('immediately invalidates an old proof on bulk mutation and reads a new bootstrap', async () => {
     vi.useFakeTimers();

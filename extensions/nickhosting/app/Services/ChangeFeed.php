@@ -38,6 +38,25 @@ final class ChangeFeed
         });
     }
 
+    /** The join observes native and linked state together without taking native update locks.
+     * If a repair is due the standalone snapshot transaction owns the revision and outbox writes. */
+    public function verifiedSnapshots(string $instance, array $uuids): array
+    {
+        $query = DB::table('nickhosting_servers as s')->where('s.instance_id', $instance)
+            ->whereIn('s.uuid', $uuids)->leftJoin('servers as n', 'n.id', '=', 's.server_id')
+            ->select(['s.instance_id', 's.identity', 's.limits', 's.revision', 's.valid', 's.owner_id as linked_owner',
+                'n.id', 'n.uuid', 'n.uuidShort', 'n.external_id', 'n.node_id', 'n.owner_id',
+                'n.memory', 'n.swap', 'n.disk', 'n.io', 'n.cpu', 'n.threads']);
+        $results = [];
+        foreach (GatewayTopology::sectionRows($query) as $native) {
+            $link = clone $native;
+            $link->owner_id = $native->linked_owner;
+            abort_if($this->reconcile($link, $native->id === null ? null : $native), 409);
+            $results[] = $this->payload($link);
+        }
+        return $results;
+    }
+
     public function snapshots(string $instance, array $uuids): array
     {
         return DB::transaction(function () use ($instance, $uuids) {

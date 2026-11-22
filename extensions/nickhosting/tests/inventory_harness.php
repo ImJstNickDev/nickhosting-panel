@@ -10,8 +10,9 @@ Schema::create('allocations', function ($table) {
     $table->integer('id')->primary(); $table->integer('node_id'); $table->integer('server_id')->nullable();
     $table->string('ip'); $table->integer('port');
 });
-$discover = static function (string $query) {
+$discover = static function (string $query, ?\Illuminate\Http\Request $authenticated = null) {
     $request = \Pterodactyl\BlueprintFramework\Extensions\nickhosting\Http\Requests\CapabilitiesRequest::create('/capabilities'.$query, 'GET');
+    if ($authenticated) { $request->setUserResolver($authenticated->getUserResolver()); }
     return (new \Pterodactyl\BlueprintFramework\Extensions\nickhosting\Http\Controllers\CapabilitiesController())($request)->getData(true);
 };
 $legacy = $discover('');
@@ -100,9 +101,12 @@ DB::table('allocations')->where('id',2001)->update(['node_id'=>10]);
 denied(fn () => $controller->gatewayTopologySnapshot($inventoryRequest($scope)),501,'missing topology migration offers v1 fallback');
 $topologyMigration->up();
 Schema::table('api_keys', function ($table) {
+    $table->timestamp('expires_at')->nullable();
     foreach (['r_servers','r_nodes','r_allocations'] as $col) { $table->integer($col)->default(0); }
 });
 $keyId=79001;
+$wasAdmin = DB::table('users')->where('id',1)->value('root_admin');
+DB::table('users')->where('id',1)->update(['root_admin'=>true]);
 DB::table('api_keys')->insert(['id'=>$keyId, 'user_id'=>1, 'key_type'=>2, 'identifier'=>'testreceipt1',
     'token'=>'test', 'memo'=>'', 'allowed_ips'=>'[]', 'r_nodes'=>1, 'r_allocations'=>1, 'r_servers'=>1]);
 $confirmRequest = static function (array $receipt) use ($keyId,$scope) {
@@ -126,6 +130,97 @@ $topologyRead = static function () use ($controller, $inventoryRequest, $scope, 
 $first=$topologyRead();
 $confirm = fn ($receipt) => array_diff_key($controller->gatewayRevision($confirmRequest($receipt))->getData(true), ['waitedMs'=>true]);
 check($first['receipt'] === $confirm($first['receipt']), 'unchanged topology returns compact epoch/revision');
+// This test key owns the feed only for the coordinated-read fixtures below.
+DB::table('nickhosting_instances')->where('id',$instanceId)->update(['api_key_id'=>$keyId]);
+$combined = static function (array $wanted, int $wait = 0, ?array $receipt = null) use ($controller, $confirmRequest, $first) {
+    $request = $confirmRequest($receipt ?? $first['receipt']);
+    $request->merge(['coordinated'=>$wanted, 'waitMs'=>$wait]);
+    return $controller->gatewayRevision($request)->getData(true);
+};
+$parts = ['instanceId'=>$instanceId, 'health'=>[$uuids[0],$uuids[1]], 'snapshots'=>[$uuids[0]], 'capabilities'=>true];
+$receiptBefore = $first['receipt'];
+$wire = $combined($parts);
+$sections = $wire['coordinated'];
+$discovery = $discover('?inventory=1&worldRead=1', $confirmRequest($receiptBefore));
+check($discovery === $negotiated + ['worldReadPrincipal'=>$discovery['worldReadPrincipal']]
+    && preg_match('/^[a-f0-9]{64}$/D', $discovery['worldReadPrincipal']) === 1
+    && $sections['capabilities']['value']['extension'] === $discovery
+    && abs(now()->timestamp - strtotime($sections['capabilities']['value']['checkedAt'])) <= 2,
+    'combined discovery returns the actual opt-in capability envelope and time, including the authenticated world principal');
+check(array_diff_key($wire, ['coordinated'=>true,'waitedMs'=>true]) === $receiptBefore
+    && count($sections['health']['value']['scopes']) === 2
+    && !array_key_exists('pendingEvents', $sections['health']['value'])
+    && array_column(array_column($sections['snapshots']['value']['servers'], 'server'), 'providerUuid') === [$uuids[0]],
+    'one topology call carries real scoped health and only the due snapshot UUID');
+$foreignSelectors = $combined(['instanceId'=>$instanceId, 'health'=>[$fixtureUuid(1101)], 'snapshots'=>[$fixtureUuid(1101)]]);
+check($foreignSelectors['coordinated']['health']['value']['scopes'] === []
+    && $foreignSelectors['coordinated']['snapshots']['value']['servers'] === [], 'foreign provider link omitted by each coordinated section');
+$badSelectors = $combined(['instanceId'=>$instanceId, 'health'=>[$uuids[0], $uuids[0]], 'snapshots'=>[$uuids[0]], 'capabilities'=>'true']);
+check($badSelectors['coordinated']['health'] === ['error'=>422] && $badSelectors['coordinated']['capabilities'] === ['error'=>422]
+    && count($badSelectors['coordinated']['snapshots']['value']['servers']) === 1, 'malformed sections leave valid siblings available');
+$overflow = $combined(['instanceId'=>$instanceId, 'snapshots'=>array_merge($uuids,[$fixtureUuid(1101)])]);
+check($overflow['coordinated']['snapshots'] === ['error'=>422], 'coordinated snapshot selectors remain bounded to 100');
+$driftId = 1042; $driftUuid = $fixtureUuid($driftId);
+DB::table('servers')->where('id',$driftId)->update(['memory'=>3072]);
+$drift = $combined(['instanceId'=>$instanceId, 'health'=>[$driftUuid], 'snapshots'=>[$driftUuid]]);
+check($drift['coordinated']['snapshots'] === ['error'=>409] && count($drift['coordinated']['health']['value']['scopes']) === 1
+    && DB::table('nickhosting_servers')->where('server_id',$driftId)->value('revision') === 1,
+    'drifted heartbeat snapshot requests standalone repair without writing a revision or blocking health');
+$repair = fn () => $controller->serverSnapshots(req(['serverUuids'=>[$driftUuid]],'POST',2,1,$keyId),$instanceId)->getData(true)['servers'][0];
+check($repair()['revision'] === 2 && $combined(['instanceId'=>$instanceId,'snapshots'=>[$driftUuid]])['coordinated']['snapshots']['value']['servers'][0]['revision'] === 2,
+    'standalone transaction repairs drift once and the next heartbeat reads it');
+DB::table('servers')->where('id',$driftId)->update(['memory'=>2048]);
+$repair();
+
+$measure = static function (callable $read) {
+    $times = [];
+    for ($sample=0; $sample<11; $sample++) {
+        DB::flushQueryLog();
+        $started = hrtime(true);
+        $read();
+        $times[] = (hrtime(true) - $started) / 1000000;
+    }
+    sort($times);
+    return [count(DB::getQueryLog()), round($times[5],2)];
+};
+foreach ([19,100] as $size) {
+    $ids = array_slice($uuids,0,$size);
+    [$baseSql, $baseMs] = $measure(fn () => $confirm($receiptBefore));
+    [$separateSql,$separateMs] = $measure(static function () use ($confirm,$receiptBefore,$controller,$ids,$keyId,$instanceId) {
+        $confirm($receiptBefore);
+        $controller->health(req(['scopes'=>implode(',',$ids)],'GET',2,1,$keyId),$instanceId);
+        $controller->serverSnapshots(req(['serverUuids'=>$ids],'POST',2,1,$keyId),$instanceId);
+    });
+    [$combinedSql,$combinedMs] = $measure(fn () => $combined(['instanceId'=>$instanceId,'health'=>$ids,'snapshots'=>$ids]));
+    check($combinedSql === $baseSql+4 && $separateSql === $baseSql+8, "$size scopes and snapshots add four constant primary reads vs eight standalone");
+    echo "MEASURE scopes=$size base_sql=$baseSql base_ms=$baseMs separate_sql=$separateSql separate_ms=$separateMs combined_sql=$combinedSql combined_ms=$combinedMs\n";
+}
+// Pause the optional snapshot query past its budget and rotate the instance binding during a wait.
+$delaySnapshots=false; $moveInstance=false;
+DB::listen(static function ($query) use (&$delaySnapshots, &$moveInstance, $instanceId) {
+    if ($delaySnapshots && str_contains($query->sql, 'linked_owner')) { $delaySnapshots=false; usleep(275000); }
+    if ($moveInstance && str_contains($query->sql, 'nickhosting_gateway_topology')) {
+        $moveInstance=false;
+        DB::table('nickhosting_instances')->where('id',$instanceId)->update(['api_key_id'=>1]);
+    }
+});
+$delaySnapshots=true;
+$slow = $combined($parts, 10);
+check($slow['coordinated']['snapshots'] === ['error'=>503] && isset($slow['coordinated']['health']['value'])
+    && $slow['waitedMs'] === 10 && array_diff_key($slow,['coordinated'=>true,'waitedMs'=>true]) === $receiptBefore,
+    'over-budget snapshot loses its section while the heartbeat recomputes its digest and health remains independent');
+$moveInstance=true;
+$moved = $combined($parts, 1);
+check($moved['coordinated']['health'] === ['error'=>403] && $moved['coordinated']['snapshots'] === ['error'=>403]
+    && isset($moved['coordinated']['capabilities']['value']), 'post-wait instance key rebinding withholds scoped data independently of topology and discovery');
+$deniedParts = $combined($parts, 1);
+check($deniedParts['coordinated']['health'] === ['error'=>403] && $deniedParts['coordinated']['snapshots'] === ['error'=>403],
+    'matching inventory ACL on a different instance application key grants no feed proof');
+$changedReceipt = $receiptBefore; $changedReceipt['revision'] = '999999';
+$changedWire = $combined(['capabilities'=>true], 10, $changedReceipt);
+check($changedWire['changed'] === true && $changedWire['coordinated']['capabilities']['value']['extension'] === $discovery,
+    'early changed response can carry independent discovery without asserting a topology revision');
+
 DB::beginTransaction();
 DB::table('allocations')->whereBetween('id',[2001,2004])->update(['server_id'=>null]);
 DB::rollBack();
@@ -141,7 +236,12 @@ $advancedAgain = $confirm($advanced);
 check((int)$advancedAgain['revision'] === (int)$advanced['revision'] + 4, 'bulk owner and node update/delete change the revision');
 DB::table('servers')->whereBetween('id',[1001,1002])->update(['owner_id'=>1]);
 $authorizedAtStart = $confirmRequest($advancedAgain);
-DB::table('api_keys')->where('id',$keyId)->update(['r_allocations'=>0]);
+DB::table('users')->where('id',1)->update(['root_admin'=>false]);
+denied(fn () => $controller->gatewayRevision($authorizedAtStart),403,'an administrator demoted during the wait cannot receive the result');
+DB::table('users')->where('id',1)->update(['root_admin'=>true]);
+DB::table('api_keys')->where('id',$keyId)->update(['expires_at'=>now()->subSecond()]);
+denied(fn () => $controller->gatewayRevision($authorizedAtStart),403,'an expired Application key cannot receive the result');
+DB::table('api_keys')->where('id',$keyId)->update(['expires_at'=>null,'r_allocations'=>0]);
 denied(fn () => $controller->gatewayRevision($authorizedAtStart),403,'receipt rechecks revoked allocation permission at delivery');
 $trigger = DB::table('sqlite_master')->where('type','trigger')->where('tbl_name','allocations')->value('name');
 DB::statement('DROP TRIGGER "' . $trigger . '"');
@@ -153,6 +253,7 @@ $topologyMigration->down();
 check(DB::table('sqlite_master')->where('name',$trigger)->exists(), 'uninstall preserves externally replaced trigger with same name');
 DB::statement('DROP TRIGGER "' . $trigger . '"');
 DB::table('api_keys')->where('id',$keyId)->delete();
+DB::table('users')->where('id',1)->update(['root_admin'=>$wasAdmin]);
 
 $batch = fn ($ids) => $controller->serverSnapshots(req(['serverUuids'=>$ids], 'POST', 2, 1),$instanceId)->getData(true);
 denied(fn () => $controller->serverSnapshots(req(['serverUuids'=>$uuids], 'POST',2,1,2),$instanceId),403,'batch checks instance key ownership');

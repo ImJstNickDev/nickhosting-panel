@@ -1,6 +1,6 @@
 # NickHosting Blueprint bridge
 
-Version **1.10.0**, targeting Pterodactyl **1.15.1** and Blueprint
+Version **1.11.0**, targeting Pterodactyl **1.15.1** and Blueprint
 **beta-2026-08**. Native PHP contracts retain compatibility with Panel **1.11.11**
 for coordinated rollback; the framework target and live deployment evidence are
 separate from that library-level compatibility. The monorepo is the source of truth; `.blueprint/dev` is optional
@@ -430,7 +430,7 @@ uses Laravel fakes. It exercises transaction rollback, idempotency, encryption,
 authorization, identity invalidation, delivery retry and configuration transforms.
 It is not a MySQL lock-concurrency or real HTTP middleware test. Packaging uses
 an explicit file allowlist, excludes secrets/tests/docs, rejects symlinks and
-existing output, and defaults to ignored `build/blueprint/1.10.0/nickhosting.blueprint`.
+existing output, and defaults to ignored `build/blueprint/1.11.0/nickhosting.blueprint`.
 
 The [extension-only update procedure](UPDATE-INSTALLED.md) supports the reviewed
 1.5.0 → 1.6.0 and 1.6.0 → 1.6.1 transitions. Its default is a read-only plan;
@@ -635,3 +635,29 @@ disables the revision and removes only triggers whose stored and installed
 definitions match. Retain both databases and the quarantined delivery history.
 Restoring the previous consumers returns them to full inventory reads. Reinstalling
 1.10.0 enables a new topology epoch.
+
+### Coordinated Gateway reads and Minecraft world scans (1.11.0)
+
+The existing Gateway topology revision endpoint accepts an optional
+`coordinated` object. A reader can request current feed health for up to 100
+linked server UUIDs, linked snapshots for the subset approaching renewal, and
+capability discovery. Each result carries its own value or error. The original
+topology wait and evidence deadline still apply. A snapshot that needs repair
+returns to the existing standalone reconciliation transaction. NickPanel workers
+also use the standalone routes when the Gateway is idle or a receipt expires.
+NickPanel migration 095 records per-server coordination tokens. Generation,
+credential binding and current server identity fence publication after a wait.
+
+Application discovery with `inventory=1&worldRead=1` supplies a credential-bound
+`worldReadPrincipal` for the scheduled Minecraft world indexer. The server-scoped
+Client routes `world-directory-list` and `world-download-urls` check the registered
+Application key and source-IP policy, the technical owner and Client credential,
+and the expected server identity, primary allocation and complete allocation set.
+A root listing can also grant a bounded download of `server.properties`.
+Directory batches and grants for selected `level.dat` files use the same guard.
+Older extensions and explicitly linked legacy owners use the existing verified
+Application detail path. A permission refusal or identity mismatch stops the scan.
+
+The native package uses the 1.10.0 topology triggers. A rollback from 1.11.0 to
+1.10.0 restores the previous NickPanel readers and package with those triggers
+in place. The additive NickPanel coordination table can remain installed.

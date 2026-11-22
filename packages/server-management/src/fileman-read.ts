@@ -16,7 +16,7 @@ import type { OperationTiming } from './operation-timing.js';
 const singleLimit = 8 * 1024 ** 2;
 const batchLimit = 16 * 1024 ** 2;
 const parallelism = 4;
-const entry = (
+export const filemanEntry = (
   file: Awaited<ReturnType<PterodactylAdapter['listFiles']>>[number],
 ): FilemanEntry => ({
   name: file.name,
@@ -192,7 +192,7 @@ export function createFilemanReadService(options: {
         );
         check();
         await authorize();
-        return files.map(entry);
+        return files.map(filemanEntry);
       })();
       directories.set(directory, pending);
     }
@@ -212,7 +212,7 @@ export function createFilemanReadService(options: {
         await authorize();
         return results.map((result) => {
           if ('error' in result) return result;
-          const files = result.files.map(entry);
+          const files = result.files.map(filemanEntry);
           directories.set(result.directory, Promise.resolve(files));
           return { directory: result.directory, files };
         });
@@ -226,7 +226,7 @@ export function createFilemanReadService(options: {
         check();
         const files = (
           await measure('directory.native', () => adapter.listFiles(identifier, directory))
-        ).map(entry);
+        ).map(filemanEntry);
         directories.set(directory, Promise.resolve(files));
         return { directory, files };
       } catch (error) {

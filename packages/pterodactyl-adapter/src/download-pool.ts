@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import type { FileReadTiming, PrivateTransferCache } from './adapter.js';
+import type { WorldScanGuard } from './directory-batch.js';
 import { allowedOrigin, signedTarget } from './downloads.js';
 import {
   type createTransport,
@@ -307,9 +308,10 @@ export function createDownloadPool(
     paths: string[],
     refresh = false,
     timing?: FileReadTiming,
+    worldScan?: WorldScanGuard,
   ): Promise<Token[] | null> {
     const pool = state();
-    if (pool.unsupportedUntil > Date.now()) return null;
+    if (!worldScan && pool.unsupportedUntil > Date.now()) return null;
     const config = await settings(identifier, refresh, timing);
     const tokens: Token[] = [];
     const seen = new Set<string | null>();
@@ -331,7 +333,7 @@ export function createDownloadPool(
         const request = () =>
           transport.json(
             'client',
-            endpoint(identifier, 'download-urls'),
+            endpoint(identifier, worldScan ? 'world-download-urls' : 'download-urls'),
             z.strictObject({
               expiresAt: z.string().datetime({ offset: true }),
               urls: z
@@ -344,16 +346,16 @@ export function createDownloadPool(
                 .length(chunk.length),
             }),
             'POST',
-            { paths: chunk },
+            { paths: chunk, ...(worldScan && { worldScan }) },
           );
         result = timing ? await timing.measure('grant.issue.http', request) : await request();
       } catch (error) {
-        if (error instanceof PterodactylError && error.reason === 'not_found') {
+        if (!worldScan && error instanceof PterodactylError && error.reason === 'not_found') {
           pool.unsupportedUntil = Date.now() + SETTINGS_TTL_MS;
           return null;
         }
         if (!refresh && error instanceof PterodactylError && error.upstreamStatus === 422) {
-          return issue(identifier, paths, true, timing);
+          return issue(identifier, paths, true, timing, worldScan);
         }
         throw error;
       }
@@ -699,5 +701,10 @@ export function createDownloadPool(
     if (!token) throw invalid();
     return token.url;
   }
-  return { prefetch, take, fresh, invalidate, settings };
+  async function worldGrants(identifier: string, paths: string[], guard: WorldScanGuard) {
+    const tokens = await issue(identifier, paths, false, undefined, guard);
+    if (!tokens) throw invalid();
+    return tokens;
+  }
+  return { prefetch, take, fresh, invalidate, settings, worldGrants, target };
 }

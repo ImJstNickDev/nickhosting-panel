@@ -55,7 +55,7 @@ describe('Blueprint extension discovery', () => {
     if (!call) throw new Error('Missing discovery request');
     const [url, init] = call;
     expect(String(url)).toBe(
-      'https://panel.example.com/api/application/extensions/nickhosting/capabilities?inventory=1',
+      'https://panel.example.com/api/application/extensions/nickhosting/capabilities?inventory=1&worldRead=1',
     );
     expect(init?.method).toBe('GET');
     expect(init?.redirect).toBe('error');

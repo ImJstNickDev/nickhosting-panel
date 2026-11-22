@@ -24,7 +24,8 @@ type Runtime = Pick<
   | 'consoleProviderBinding'
   | 'worldPreparation'
   | 'worldNotificationPool'
->;
+> &
+  Partial<Pick<ManagementRuntime, 'scheduledWorldReadPhase'>>;
 export interface MinecraftWorldIndex {
   current: boolean;
   snapshot: MinecraftWorldSnapshot;
@@ -161,7 +162,7 @@ async function reconcile(
         'profile.combination_id',
         'mapping.egg_id',
         'mapping.nest_id',
-        (receipt ? observationIdentityRevision(serverId, 'minecraft') : sql<null>`null`).as(
+        (scheduled ? observationIdentityRevision(serverId, 'minecraft') : sql<null>`null`).as(
           'identity_revision',
         ),
       ])
@@ -193,11 +194,16 @@ async function reconcile(
       }
     };
     await check();
+    const guarded =
+      scheduled && server.installed && server.identity_revision
+        ? await runtime.scheduledWorldReadPhase?.(server, signal)
+        : undefined;
     const reused =
+      !guarded &&
       receipt &&
       receipt.revision === server.identity_revision &&
       freshWorldIdentity(db, serverId, runtime.consoleProviderBinding) === receipt;
-    if (server.installed && !reused) {
+    if (server.installed && !reused && !guarded) {
       await readProvider();
       await check();
     }
@@ -235,9 +241,10 @@ async function reconcile(
       check,
       env,
       signal,
-      server.pterodactyl_identifier
-        ? runtime.fileReadPhase(server.pterodactyl_identifier, server, signal)
-        : undefined,
+      guarded ??
+        (server.pterodactyl_identifier
+          ? runtime.fileReadPhase(server.pterodactyl_identifier, server, signal)
+          : undefined),
       scheduled ? undefined : runtime.worldPreparation,
       {
         indexInspection: inspection,
@@ -332,8 +339,8 @@ async function reconcile(
         AND EXISTS(SELECT 1 FROM managed_servers s WHERE s.id=server_id AND s.active_operation_id IS NULL)
         AND minecraft_world_local_binding(server_id)=${token.localBinding}
         ${
-          reused && receipt
-            ? sql`AND ${observationIdentityRevision(serverId, 'minecraft')}=${receipt.revision}`
+          guarded || (reused && receipt)
+            ? sql`AND ${observationIdentityRevision(serverId, 'minecraft')}=${server.identity_revision}`
             : sql``
         }
         ${deadline ? sql`AND clock_timestamp()<${deadline}` : sql``}
@@ -401,7 +408,13 @@ async function reconcile(
     await sql`UPDATE minecraft_world_indexes SET lease_id=NULL,lease_until=NULL
       WHERE server_id=${serverId} AND lease_id=${token.id}`.execute(db);
   } catch (failure) {
-    if (failure instanceof DomainError && failure.code === 'provenance_mismatch')
+    if (
+      (failure instanceof DomainError && failure.code === 'provenance_mismatch') ||
+      (scheduled &&
+        failure instanceof PterodactylError &&
+        failure.scope === 'client' &&
+        failure.upstreamStatus === 409)
+    )
       denied = 'provenance_mismatch';
     else if (
       (failure instanceof DomainError && ['unauthorized', 'forbidden'].includes(failure.code)) ||

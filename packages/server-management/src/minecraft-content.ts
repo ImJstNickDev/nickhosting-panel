@@ -96,6 +96,7 @@ import {
   requireMinecraftRuntimeImageEvidence,
 } from './minecraft-runtime-evidence.js';
 import { createMinecraftSourceStore, reserveMinecraftStaging } from './minecraft-sources.js';
+import type { MinecraftWorldReader } from './minecraft-world-reader.js';
 import { supportsProviderFileOperations } from './provider-file-operations.js';
 import { assertServerStorageCapacity } from './storage-capacity.js';
 import { reserveUploadIngestion } from './upload-admission.js';
@@ -2616,7 +2617,7 @@ export async function inspectMinecraftWorlds(
   authorize: () => Promise<void>,
   _env: Environment = {},
   signal?: AbortSignal,
-  fileman?: FilemanReadService,
+  fileman?: MinecraftWorldReader,
   preparation?: MinecraftContentOptions['worldPreparation'],
   {
     indexInspection,

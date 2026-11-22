@@ -1,5 +1,10 @@
 import { isIP } from 'node:net';
 import { z } from 'zod';
+import {
+  type GatewayHeartbeatRequest,
+  gatewayHeartbeatRequest,
+  heartbeatSections,
+} from './gateway-heartbeat.js';
 import { type createTransport, PterodactylError, parseInput } from './transport.js';
 import { applicationServerSchema } from './types.js';
 
@@ -76,29 +81,38 @@ export function createGatewayTopology(transport: ReturnType<typeof createTranspo
       validateInventory(value, nodeIds, serverUuids);
       return value;
     },
-    revision: (
+    revision: async (
       expected: GatewayTopologyRevision,
       nodeIds: number[],
       serverUuids: string[],
       waitMs = 0,
-    ) =>
-      transport.json(
+      coordinated?: GatewayHeartbeatRequest,
+    ) => {
+      const sections = coordinated && parseInput(gatewayHeartbeatRequest, coordinated);
+      const response = await transport.json(
         'application',
         'extensions/nickhosting/gateway-topology/revision',
         z.union([
-          z.strictObject({ changed: z.literal(true) }),
-          revision.extend({ waitedMs: z.number().int().min(0).max(waitMs) }),
+          z.strictObject({ changed: z.literal(true), coordinated: z.unknown().optional() }),
+          revision.extend({
+            waitedMs: z.number().int().min(0).max(waitMs),
+            coordinated: z.unknown().optional(),
+          }),
         ]),
         'POST',
         {
           ...parseInput(request, { nodeIds, serverUuids }),
+          ...(sections ? { coordinated: sections } : {}),
           epoch: expected.epoch,
           revision: expected.revision,
           waitMs: z.number().int().min(0).max(7500).parse(waitMs),
         },
         false,
         { readOnly: true, ...(waitMs ? { timeoutMs: waitMs + 3000 } : {}) },
-      ),
+      );
+      const { coordinated: raw, ...receipt } = response;
+      return { ...receipt, coordinated: sections ? heartbeatSections(sections, raw) : undefined };
+    },
   };
 }
 const request = z.object({

@@ -48,6 +48,7 @@ import {
   trustedGameModules,
 } from './game-modules.js';
 import { gatewayConsoleOperationSchema } from './gateway-console-contract.js';
+import { prepareGatewayHeartbeat } from './gateway-provider-heartbeat.js';
 import { refreshHostObservations } from './host-observations.js';
 import { currentInteractiveContext } from './interactive-context.js';
 import {
@@ -62,6 +63,7 @@ import { assertNoModpackPublication } from './minecraft-modpack-schema.js';
 import { createMinecraftModuleRuntime } from './minecraft-module.js';
 import { runMinecraftVersionChange } from './minecraft-version-change.js';
 import { createMinecraftWorldPreparation } from './minecraft-world-preparation.js';
+import { openScheduledWorldReader, readWorldScanPrincipal } from './minecraft-world-reader.js';
 import { createOpenworldModuleRuntime } from './openworld-module.js';
 import type { OperationTiming } from './operation-timing.js';
 import { resolveProviderCredential } from './provider-accounts.js';
@@ -1543,6 +1545,7 @@ export async function createManagementRuntime(options: ManagementOptions) {
     directories: string[],
     signal?: AbortSignal,
     timing?: OperationTiming,
+    readChunk?: (paths: string[]) => Promise<DirectoryBatchResult[]>,
   ): Promise<DirectoryBatchResult[]> {
     signal?.throwIfAborted();
     let cache = directoryBatchSettings.get(db);
@@ -1593,12 +1596,11 @@ export async function createManagementRuntime(options: ManagementOptions) {
         );
         break;
       }
+      const paths = directories.slice(offset, offset + directoryBatchLimit);
       const chunk = await traceOperation(timing, 'batch', () =>
-        adapter.listDirectoriesBatch(
-          identifier,
-          directories.slice(offset, offset + directoryBatchLimit),
-          timing?.child('request'),
-        ),
+        readChunk
+          ? readChunk(paths)
+          : adapter.listDirectoriesBatch(identifier, paths, timing?.child('request')),
       );
       // Splitting for a lower Owner limit must not multiply the response budget.
       responseBytes += Buffer.byteLength(JSON.stringify(chunk), 'utf8');
@@ -1807,6 +1809,15 @@ export async function createManagementRuntime(options: ManagementOptions) {
   }
   return {
     adapter,
+    prepareGatewayHeartbeat: options.adapter
+      ? undefined
+      : (intervalMs?: number) =>
+          prepareGatewayHeartbeat(
+            db,
+            adapterOptions.baseURL,
+            providerCredentialBinding(adapterOptions.baseURL, adapterOptions.applicationKey),
+            intervalMs,
+          ),
     consoleProviderBinding,
     consoleBindingForServer,
     observeConsoleDisk,
@@ -1836,6 +1847,21 @@ export async function createManagementRuntime(options: ManagementOptions) {
     listDirectories,
     fileReadAccess,
     fileReadPhase,
+    async scheduledWorldReadPhase(
+      server: Parameters<typeof openScheduledWorldReader>[2],
+      signal: AbortSignal,
+    ) {
+      if (!server.pterodactyl_identifier || options.adapter) return;
+      const principal = await readWorldScanPrincipal(
+        db,
+        providerCredentialBinding(adapterOptions.baseURL, applicationKey),
+      );
+      if (!principal) return;
+      const identifier = server.pterodactyl_identifier;
+      return openScheduledWorldReader(db, adapter, server, principal, signal, (paths, readChunk) =>
+        fileDirectoryBatch(identifier, server, paths, signal, undefined, readChunk),
+      );
+    },
     fileReadScope,
     prepareFileWrites,
     fileMutationAccess,

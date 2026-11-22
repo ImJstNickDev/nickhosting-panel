@@ -8,6 +8,10 @@ export const nickHostingExtensionSchema = z
   .object({
     schemaVersion: z.literal(1),
     extension: z.literal('nickhosting'),
+    worldReadPrincipal: z
+      .string()
+      .regex(/^[a-f0-9]{64}$/)
+      .optional(),
     extensionVersion: z.string().min(1).max(64),
     target: z
       .object({ panel: z.string().min(1).max(64), blueprint: z.string().min(1).max(64) })
@@ -40,7 +44,7 @@ export async function discoverNickHostingExtension(
   try {
     return await transport.json(
       'application',
-      'extensions/nickhosting/capabilities?inventory=1',
+      'extensions/nickhosting/capabilities?inventory=1&worldRead=1',
       nickHostingExtensionSchema,
     );
   } catch (error) {
@@ -154,6 +158,44 @@ const issuedKeySchema = z
   })
   .strict();
 
+export function linkedSnapshotsSchema(instanceId: string, requested: Set<string>) {
+  return z
+    .object({
+      schemaVersion: z.literal(1),
+      instanceId: z.literal(instanceId),
+      servers: z.array(providerChangeSchema).max(requested.size),
+    })
+    .strict()
+    .refine(
+      ({ servers }) =>
+        servers.every(
+          (entry) =>
+            entry.instanceId === instanceId &&
+            entry.type !== 'limits.updated' &&
+            requested.has(entry.server.providerUuid),
+        ) && new Set(servers.map((entry) => entry.server.providerUuid)).size === servers.length,
+    );
+}
+
+export function scopedProofs(requested: Set<string>) {
+  return z
+    .array(
+      z.strictObject({
+        providerUuid: uuid,
+        ownerId: z.number().int().positive(),
+        revision: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+        valid: z.boolean(),
+        pending: z.boolean(),
+      }),
+    )
+    .max(requested.size)
+    .refine(
+      (scopes) =>
+        scopes.every((scope) => requested.has(scope.providerUuid)) &&
+        new Set(scopes.map((scope) => scope.providerUuid)).size === scopes.length,
+    );
+}
+
 /** Administrative extension operations. Callers must establish NickHosting ownership first. */
 export function createNickHostingBridge(options: TransportOptions) {
   const transport = createTransport(options);
@@ -214,22 +256,7 @@ export function createNickHostingBridge(options: TransportOptions) {
       const ids = z.array(uuid).min(1).max(PROVIDER_SNAPSHOT_BATCH_SIZE).parse(serverUuids);
       const requested = new Set(ids);
       if (requested.size !== ids.length) throw new DomainError('validation_failed');
-      const response = z
-        .object({
-          schemaVersion: z.literal(1),
-          instanceId: z.literal(instanceId),
-          servers: z.array(providerChangeSchema).max(ids.length),
-        })
-        .strict()
-        .refine(
-          ({ servers }) =>
-            servers.every(
-              (entry) =>
-                entry.instanceId === instanceId &&
-                entry.type !== 'limits.updated' &&
-                requested.has(entry.server.providerUuid),
-            ) && new Set(servers.map((entry) => entry.server.providerUuid)).size === servers.length,
-        );
+      const response = linkedSnapshotsSchema(instanceId, requested);
       return transport.json('application', path, response, 'POST', { serverUuids: ids }, false, {
         readOnly: true,
       });
@@ -238,26 +265,10 @@ export function createNickHostingBridge(options: TransportOptions) {
       const ids = z.array(uuid).max(PROVIDER_SNAPSHOT_BATCH_SIZE).parse(serverUuids);
       const requested = new Set(ids);
       if (requested.size !== ids.length) throw new DomainError('validation_failed');
-      const proof = z
-        .object({
-          providerUuid: uuid,
-          ownerId: z.number().int().positive(),
-          revision: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
-          valid: z.boolean(),
-          pending: z.boolean(),
-        })
-        .strict();
-      const response = providerHealthSchema
-        .extend({
-          instanceId: z.literal(instanceId),
-          scopes: z.array(proof).max(ids.length).optional(),
-        })
-        .refine(
-          ({ scopes }) =>
-            !scopes ||
-            (scopes.every((scope) => requested.has(scope.providerUuid)) &&
-              new Set(scopes.map((scope) => scope.providerUuid)).size === scopes.length),
-        );
+      const response = providerHealthSchema.extend({
+        instanceId: z.literal(instanceId),
+        scopes: scopedProofs(requested).optional(),
+      });
       return transport.json(
         'application',
         `${instancePath(instanceId)}/health${ids.length ? `?scopes=${ids.join(',')}` : ''}`,

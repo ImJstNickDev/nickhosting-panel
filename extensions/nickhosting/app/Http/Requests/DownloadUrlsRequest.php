@@ -9,6 +9,17 @@ final class DownloadUrlsRequest extends GetFileContentsRequest
     use ClientTransferSettings;
     public const MAX_BODY_BYTES = 12 * 1024 * 1024;
 
+    protected function prepareForValidation(): void
+    {
+        if (!$this->is('*/world-download-urls')) { return; }
+        abort_if(strlen($this->getContent()) > self::MAX_BODY_BYTES, 413);
+        abort_unless($this->isJson(), 415);
+        try { $body = json_decode($this->getContent(), true, 32, JSON_THROW_ON_ERROR); }
+        catch (\JsonException $error) { abort(422); }
+        // Native TrimStrings may have changed a legitimate world directory component.
+        $this->replace(['paths' => $body['paths'] ?? null, 'worldScan' => $body['worldScan'] ?? null]);
+    }
+
     public function rules(): array
     {
         return ['paths' => ['required', 'array', 'min:1', 'max:' . $this->transferSettings()['downloadBatchLimit'],

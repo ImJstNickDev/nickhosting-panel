@@ -1,8 +1,10 @@
 import { randomUUID } from 'node:crypto';
+import { once } from 'node:events';
+import { createServer } from 'node:http';
 import { SecretCodec } from '@nickhosting/core';
 import { createTestDatabase } from '@nickhosting/database/testing';
-import type { ProviderChange } from '@nickhosting/pterodactyl-adapter';
-import { afterEach, beforeEach, expect, it, vi } from 'vitest';
+import type { GatewayHeartbeatRequest, ProviderChange } from '@nickhosting/pterodactyl-adapter';
+import { afterEach, beforeEach, expect, it, onTestFinished, vi } from 'vitest';
 import { providerCredentialBinding } from './provider-capabilities.js';
 import {
   applyProviderChange,
@@ -472,4 +474,354 @@ it('coalesces API and worker discovery under one credential and preserves the or
   expect(f.calls().filter((c) => c === 'GET capabilities')).toHaveLength(2);
   await f.refresh('rotated');
   expect(f.calls().filter((c) => c === 'GET capabilities')).toHaveLength(3);
+});
+
+/** Count requests accepted by an isolated HTTP listener behind real adapters.
+ * The worker and Gateway share only their ordinary PostgreSQL state. */
+async function heartbeatFixture(count: number) {
+  const f = await setup(count, true);
+  vi.unstubAllGlobals();
+  const routes: string[] = [];
+  const batches: GatewayHeartbeatRequest[] = [];
+  const principals: string[] = [];
+  const state = {
+    shape: 'ok' as 'ok' | 'wrong-instance' | 'denied' | 'old' | 'omitted',
+    version: '1.11.0',
+    snapshotError: undefined as number | undefined,
+  };
+  const receipt = { epoch: randomUUID(), revision: '1', digest: 'a'.repeat(64) };
+  f.scenario.scoped = true;
+  const server = createServer(async (req, res) => {
+    const endpoint = new URL(req.url ?? '/', url);
+    const route = endpoint.pathname.split('/').at(-1) ?? '';
+    routes.push(route);
+    principals.push(req.headers.authorization ?? '');
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    const body = Buffer.concat(chunks).toString();
+    const discovery = {
+      schemaVersion: 1,
+      extension: 'nickhosting',
+      extensionVersion: state.version,
+      target: { panel: 'fixture', blueprint: 'fixture' },
+      capabilities: {
+        clientKeyManagement: true,
+        serverChangeEvents: true,
+        linkedServerSnapshots: true,
+        gatewayInventory: true,
+        backupEvents: true,
+      },
+      worldReadPrincipal: 'b'.repeat(64),
+    };
+    let response: unknown;
+    if (route === 'revision') {
+      const input = JSON.parse(body) as { coordinated?: GatewayHeartbeatRequest };
+      const request = input.coordinated;
+      const coordinated: Record<string, unknown> = {};
+      if (request) {
+        batches.push(request);
+        const checkedAt = new Date(state.shape === 'old' ? Date.now() - 45000 : Date.now())
+          .toISOString()
+          .replace('Z', '123Z');
+        if (request.health)
+          coordinated.health =
+            state.shape === 'denied'
+              ? { error: 403 }
+              : {
+                  value: {
+                    schemaVersion: 1,
+                    instanceId: state.shape === 'wrong-instance' ? randomUUID() : f.instanceId,
+                    checkedAt,
+                    scopes: request.health.flatMap((uuid) => {
+                      const event = f.entries.get(uuid);
+                      return event
+                        ? [
+                            {
+                              providerUuid: uuid,
+                              ownerId: 7,
+                              revision: event.revision,
+                              valid: true,
+                              pending: f.scenario.pendingScopes.has(uuid),
+                            },
+                          ]
+                        : [];
+                    }),
+                  },
+                };
+        if (request.snapshots)
+          coordinated.snapshots = state.snapshotError
+            ? { error: state.snapshotError }
+            : {
+                value: {
+                  schemaVersion: 1,
+                  instanceId: f.instanceId,
+                  servers: request.snapshots.flatMap((id) => f.entries.get(id) ?? []),
+                },
+              };
+        if (request.capabilities)
+          coordinated.capabilities = { value: { checkedAt, extension: discovery } };
+      }
+      response = { ...receipt, waitedMs: 0, ...(state.shape === 'omitted' ? {} : { coordinated }) };
+    } else if (route === 'capabilities') response = discovery;
+    else {
+      const passthrough = await f.fetcher(endpoint.href, {
+        method: req.method,
+        ...(body ? { body } : {}),
+      });
+      res.statusCode = passthrough.status;
+      response = await passthrough.json();
+    }
+    res.setHeader('content-type', 'application/json');
+    res.end(JSON.stringify(response));
+  });
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  onTestFinished(async () => {
+    server.close();
+    server.closeAllConnections();
+    await once(server, 'close');
+  });
+  const address = server.address();
+  if (!address || typeof address === 'string') throw new Error('missing isolated port');
+  const origin = `http://127.0.0.1:${address.port}`;
+  const env = { NH_PTERODACTYL_BASE_URL: origin, NH_PTERODACTYL_APPLICATION_KEY: 'fixture' };
+  await f.db
+    .updateTable('provider_change_feeds')
+    .set({ provider_url: origin })
+    .where('instance_id', '=', f.instanceId)
+    .execute();
+  const api = await createManagementRuntime({ db: f.db, codec, env });
+  const prepare = async () => {
+    const plan = await api.prepareGatewayHeartbeat?.();
+    if (!plan || !api.adapter.gatewayTopology) throw new Error('missing heartbeat plan');
+    const result = await api.adapter.gatewayTopology.revision(receipt, [], [], 0, plan.request);
+    return { plan, sections: result.coordinated };
+  };
+  const refresh = (key = 'fixture') =>
+    refreshProviderFeeds(f.db, codec, { ...env, NH_PTERODACTYL_APPLICATION_KEY: key });
+  const cached = (event: ProviderChange) =>
+    cachedProviderStartLimits(
+      f.db,
+      event.server.externalId,
+      origin,
+      new Date(),
+      providerCredentialBinding(origin, 'fixture'),
+    );
+  const tick = async (intervalMs: number) => {
+    const plan = await api.prepareGatewayHeartbeat?.(intervalMs);
+    if (!api.adapter.gatewayTopology) throw new Error('missing topology');
+    const result = await api.adapter.gatewayTopology.revision(receipt, [], [], 0, plan?.request);
+    await plan?.accept(result.coordinated);
+  };
+  return { ...f, api, prepare, tick, refresh, cached, routes, batches, principals, state };
+}
+
+it('serves due feed work and discovery on the existing HTTP heartbeat with zero standalone worker reads', async () => {
+  const f = await heartbeatFixture(19);
+  const first = f.snapshots[0];
+  if (!first) throw new Error('missing test server');
+  await f.db
+    .updateTable('provider_server_projections')
+    .set({ synchronized_at: new Date() })
+    .where('server_id', '!=', first.server.externalId)
+    .execute();
+  expect(await f.api.adapter.supportsGatewayInventory()).toBe(true);
+  expect(f.routes.splice(0)).toEqual(['capabilities']);
+  // The cache watermark uses the same millisecond precision as discovery().
+  await database.pool.query(
+    "update blueprint_capability_discovery set checked_at=date_trunc('milliseconds',clock_timestamp())-interval '48 seconds'",
+  );
+  const { plan, sections } = await f.prepare();
+  await plan.accept(sections);
+  expect(f.batches[0]?.health).toHaveLength(19);
+  expect(f.batches[0]?.snapshots).toEqual([first.server.providerUuid]);
+  expect(f.batches[0]?.capabilities).toBe(true);
+  const observed = sections?.capabilities?.checkedAt;
+  const { rows } = await database.pool.query(
+    "select checked_at,extension->>'worldReadPrincipal' as principal from blueprint_capability_discovery",
+  );
+  if (!observed) throw new Error('missing capability receipt');
+  expect(rows[0]).toEqual({ checked_at: new Date(observed), principal: 'b'.repeat(64) });
+  await f.refresh();
+  expect(f.routes).toEqual(['revision']);
+  expect(new Set(f.principals)).toEqual(new Set(['Bearer fixture']));
+  expect(await f.cached(first)).toEqual(first.limits);
+  expect(await f.api.prepareGatewayHeartbeat?.()).toBeUndefined();
+  // Dead/inactive Gateway: no renewal from local reads and no waiting for a poll.
+  await database.pool.query(
+    "update gateway_feed_heartbeat set checked_at=clock_timestamp()-interval '31 seconds'",
+  );
+  await f.refresh();
+  expect(f.routes).toEqual(['revision', 'health']);
+});
+
+it.each([1, 7])('counts the steady 60s wire window with a worker offset of %is', async (offset) => {
+  const f = await heartbeatFixture(19);
+  await f.api.adapter.supportsGatewayInventory();
+  await f.tick(4000);
+  f.routes.length = 0;
+  f.batches.length = 0;
+  // Shift stored observation clocks instead of sleeping. Each scheduled poll
+  // uses the real adapter and HTTP listener, including the 15th at t=60.
+  for (let t = 1; t <= 60; t++) {
+    await database.pool.query(`
+      update provider_server_projections set synchronized_at=synchronized_at-interval '1 second',
+        scope_healthy_at=scope_healthy_at-interval '1 second';
+      update gateway_feed_heartbeat set requested_at=requested_at-interval '1 second', checked_at=checked_at-interval '1 second';
+      update blueprint_capability_discovery set checked_at=checked_at-interval '1 second'`);
+    if (t % 4 === 0) await f.tick(4000);
+    if (t % 15 === offset) await f.refresh();
+  }
+  expect(f.routes).toEqual(Array(15).fill('revision'));
+  expect(f.batches.filter((work) => work.capabilities)).toHaveLength(1);
+  expect(f.batches.filter((work) => work.snapshots).map((work) => work.snapshots?.length)).toEqual([
+    19,
+  ]);
+});
+
+it('rotates bounded chunks fairly and immediately falls back for the missing HTTP scope', async () => {
+  const f = await heartbeatFixture(101);
+  await f.db
+    .updateTable('provider_server_projections')
+    .set({ synchronized_at: new Date() })
+    .execute();
+  await f.api.adapter.supportsGatewayInventory();
+  f.routes.length = 0;
+  const first = await f.prepare();
+  await first.plan.accept(first.sections);
+  expect(first.plan.request.health).toHaveLength(100);
+  expect(first.plan.request.snapshots).toBeUndefined();
+  await f.refresh();
+  expect(f.routes).toEqual(['revision', 'health']);
+  expect(
+    new URL(String(f.fetcher.mock.calls.at(-1)?.[0])).searchParams.get('scopes')?.split(','),
+  ).toHaveLength(1);
+  const second = await f.prepare();
+  expect(second.plan.request.health).toHaveLength(1);
+  expect(first.plan.request.health).not.toContain(second.plan.request.health?.[0]);
+  await second.plan.accept(second.sections);
+  await f.refresh();
+  expect(f.routes).toEqual(['revision', 'health', 'revision']);
+});
+
+it('withdraws refused, stale, malformed and absent heartbeat sections and retains independent discovery', async () => {
+  const f = await heartbeatFixture(1);
+  const first = f.snapshots[0];
+  if (!first) throw new Error('missing test server');
+  await f.api.adapter.supportsGatewayInventory();
+  await f.refresh();
+  for (const shape of ['denied', 'old', 'wrong-instance', 'omitted'] as const) {
+    f.state.shape = shape;
+    await database.pool.query(
+      "update gateway_feed_heartbeat set requested_at=clock_timestamp()-interval '20 seconds'",
+    );
+    const { plan, sections } = await f.prepare();
+    await plan.accept(sections);
+    expect(await f.cached(first)).toBeNull();
+    await f.refresh();
+    expect(f.routes.slice(-2)).toEqual(['revision', 'health']);
+    expect(await f.cached(first)).toEqual(first.limits);
+  }
+});
+
+it('withdraws only the refused snapshot on native 409, triggers early independent repair, and fences a stale refusal', async () => {
+  const f = await heartbeatFixture(2);
+  const [due, stable] = f.snapshots as [ProviderChange, ProviderChange];
+  const id = due.server.externalId;
+  await f.api.adapter.supportsGatewayInventory();
+  await f.refresh();
+  const dueSoon = () =>
+    f.db
+      .updateTable('provider_server_projections')
+      .set({ synchronized_at: new Date(Date.now() - 53000) })
+      .where('server_id', '=', id)
+      .execute();
+  await dueSoon();
+  expect(await f.cached(due)).toEqual(due.limits);
+  f.state.snapshotError = 409;
+  const denied = await f.prepare();
+  expect(denied.plan.request.snapshots).toEqual([due.server.providerUuid]);
+  await denied.plan.accept(denied.sections);
+  expect(await f.cached(due)).toBeNull();
+  expect(await f.cached(stable)).toEqual(stable.limits);
+  f.routes.length = 0;
+  await f.refresh();
+  expect(f.routes).toEqual(['server-snapshots', 'health']);
+  expect(await f.cached(due)).toEqual(due.limits);
+  await dueSoon();
+  await database.pool.query(
+    "update gateway_feed_heartbeat set requested_at=clock_timestamp()-interval '20 seconds'",
+  );
+  const stale = await f.prepare();
+  const changed = { ...due, revision: 2, type: 'limits.updated' as const };
+  await applyProviderChange(f.db, changed);
+  await stale.plan.accept(stale.sections);
+  expect(
+    await f.db
+      .selectFrom('provider_server_projections')
+      .select(['revision', 'valid'])
+      .where('server_id', '=', id)
+      .executeTakeFirst(),
+  ).toEqual({ revision: '2', valid: true });
+});
+
+it('preserves a scope across telemetry but rejects an owner change restored before heartbeat completion', async () => {
+  const f = await heartbeatFixture(2);
+  const [stable, changed] = f.snapshots as [ProviderChange, ProviderChange];
+  await f.api.adapter.supportsGatewayInventory();
+  const { plan, sections } = await f.prepare();
+  await f.db
+    .updateTable('managed_servers')
+    .set({ runtime_state: 'running' })
+    .where('id', '=', stable.server.externalId)
+    .execute();
+  for (const owner of [9, 7])
+    await f.db
+      .updateTable('managed_servers')
+      .set({ provider_user_id: owner })
+      .where('id', '=', changed.server.externalId)
+      .execute();
+  await plan.accept(sections);
+  expect(await f.cached(stable)).toEqual(stable.limits);
+  expect(await f.cached(changed)).toBeNull();
+});
+
+it('fences a heartbeat when webhook generation, standalone result or discovery credential supersedes it', async () => {
+  const f = await heartbeatFixture(1);
+  const first = f.snapshots[0];
+  if (!first) throw new Error('missing test server');
+  await f.api.adapter.supportsGatewayInventory();
+  const { plan, sections } = await f.prepare();
+  await applyProviderChange(f.db, {
+    ...first,
+    eventId: randomUUID(),
+    revision: 2,
+    type: 'limits.updated',
+  });
+  await plan.accept(sections);
+  expect(await f.cached(first)).toBeNull();
+  f.entries.set(first.server.providerUuid, {
+    ...first,
+    revision: 2,
+    occurredAt: new Date().toISOString(),
+  });
+  await f.refresh();
+  expect(await f.cached(first)).toEqual(first.limits);
+  await database.pool.query(
+    "update gateway_feed_heartbeat set requested_at=clock_timestamp()-interval '20 seconds'",
+  );
+  const pending = await f.prepare();
+  await f.refresh();
+  await pending.plan.accept(undefined);
+  expect(await f.cached(first)).toEqual(first.limits);
+  await database.pool.query(
+    "update gateway_feed_heartbeat set requested_at=clock_timestamp()-interval '20 seconds'",
+  );
+  const old = await f.prepare();
+  await f.refresh('rotated');
+  await old.plan.accept(old.sections);
+  expect(await f.cached(first)).toBeNull();
+  f.state.version = '1.10.0';
+  await f.refresh('legacy');
+  expect(await f.api.prepareGatewayHeartbeat?.()).toBeUndefined();
 });

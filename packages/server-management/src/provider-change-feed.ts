@@ -187,7 +187,7 @@ export async function refreshLinkedProviderSnapshots(
 ) {
   const requested = new Map(targets.map((target) => [target.id, target]));
   const received = new Map(snapshots.map((snapshot) => [snapshot.server.providerUuid, snapshot]));
-  await db.transaction().execute(async (tx) => {
+  const apply = async (tx: Kysely<Database>) => {
     const feed = await tx
       .selectFrom('provider_change_feeds')
       .select('enabled')
@@ -259,7 +259,9 @@ export async function refreshLinkedProviderSnapshots(
     `.execute(tx);
       await withdrawGlobalHealth(tx, instanceId);
     }
-  });
+  };
+  if (db.isTransaction) await apply(db);
+  else await db.transaction().execute(apply);
 }
 
 /** Caller verifies raw-body HMAC, timestamp and event-ID headers before invoking this transaction.
@@ -392,12 +394,13 @@ export async function markProviderFeedHealth(
     expectedGeneration: string;
     scopes?: ScopeProof[];
     credentialBinding?: string;
+    targetUuids?: string[];
   },
   now = new Date(),
 ) {
   const checked = new Date(input.checkedAt);
   const healthy = !input.scopes && input.pendingEvents === 0 && fresh(checked, now, MAX_HEALTH_AGE);
-  await db.transaction().execute(async (tx) => {
+  const apply = async (tx: Kysely<Database>) => {
     const feed = await tx
       .updateTable('provider_change_feeds')
       .set({ healthy_at: healthy ? checked : null })
@@ -407,7 +410,8 @@ export async function markProviderFeedHealth(
       .returning('instance_id')
       .executeTakeFirst();
     if (!feed) return;
-    if (!input.scopes?.length) return clearScopeHealth(tx, input.instanceId);
+    if (!input.scopes || (!input.scopes.length && !input.targetUuids))
+      return clearScopeHealth(tx, input.instanceId);
     const proofs = input.scopes.filter((proof) =>
       fresh(new Date(proof.checkedAt), now, MAX_HEALTH_AGE),
     );
@@ -422,8 +426,11 @@ export async function markProviderFeedHealth(
         AS proof("providerUuid" uuid, "ownerId" integer, revision bigint, valid boolean, pending boolean, "checkedAt" timestamptz)
         ON proof."providerUuid" = s.pterodactyl_uuid
       WHERE p.server_id = s.id AND p.instance_id = ${input.instanceId}::uuid
+        ${input.targetUuids ? sql`AND s.pterodactyl_uuid = ANY(${input.targetUuids}::uuid[])` : sql``}
     `.execute(tx);
-  });
+  };
+  if (db.isTransaction) await apply(db);
+  else await db.transaction().execute(apply);
 }
 
 /** Advisory cache only. Missing, unhealthy, changed identity or stale data must use the normal API. */

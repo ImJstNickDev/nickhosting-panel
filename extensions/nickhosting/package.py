@@ -22,6 +22,7 @@ FILES = (
     'app/Http/Controllers/DownloadUrlsController.php',
     'app/Http/Controllers/TransferSettingsController.php',
     'app/Services/ManagedTransferAccess.php',
+    'app/Services/WorldScanAccess.php',
     'app/Services/NativeTokenScope.php',
     'app/Http/Requests/InstallationWebsocketRequest.php',
     'app/Http/Controllers/InstallationWebsocketController.php',
@@ -105,6 +106,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--output", type=Path,
-        default=ROOT.parent.parent / "build/blueprint/1.10.0/nickhosting.blueprint",
+        default=ROOT.parent.parent / "build/blueprint/1.11.0/nickhosting.blueprint",
     )
     print(build(ROOT, parser.parse_args().output))

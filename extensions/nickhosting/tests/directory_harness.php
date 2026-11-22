@@ -195,3 +195,119 @@ check((new Pterodactyl\BlueprintFramework\Extensions\nickhosting\Services\Settin
     ['directoryBatchLimit'=>48,'directoryConcurrency'=>4,'directoryTimeoutSeconds'=>8],
     'stable settings preserve an existing Owner concurrency override across reads and unrelated saves');
 $settings->saveOperational($directoryDefaults);
+
+// The identity fixture owns only SQLite memory state. Roll back its additional native columns.
+DB::beginTransaction();
+try {
+    $schema = DB::connection()->getSchemaBuilder();
+    $schema->table('servers', function ($t) {
+        foreach (['allocation_id','nest_id','egg_id'] as $name) { $t->integer($name)->default(1); }
+    });
+    $schema->table('api_keys', function ($t) {
+        foreach (['r_servers','r_allocations'] as $name) { $t->integer($name)->default(1); }
+        $t->timestamp('expires_at')->nullable();
+    });
+    $schema->create('allocations', function ($t) {
+        foreach (['id','server_id','node_id','port'] as $name) { $t->integer($name); }
+        $t->string('ip');
+    });
+    DB::table('allocations')->insert(['id'=>1,'server_id'=>2,'node_id'=>$uploadServer->node_id,'port'=>25565,'ip'=>'2001:db8::1']);
+    DB::table('users')->where('id',1)->update(['root_admin'=>true]);
+    DB::table('nickhosting_users')->where('provider_id',$uploadUser->id)->update(['technical'=>true]);
+    $linked = DB::table('nickhosting_users')->where('provider_id',$uploadUser->id)->first();
+    $testKey = static function ($id, $type, $ownerId) {
+        DB::table('api_keys')->insert(['id'=>$id,'identifier'=>'fixture-key-'.$id,'key_type'=>$type,
+            'user_id'=>$ownerId,'token'=>'opaque-'.$id,'memo'=>'','allowed_ips'=>'[]']);
+        return Pterodactyl\Models\ApiKey::query()->findOrFail($id);
+    };
+    $appKey = $testKey(8001,2,1);
+    $clientKey = $testKey(8002,1,$uploadUser->id);
+    DB::table('nickhosting_instances')->where('id',$instance)->update(['api_key_id'=>$appKey->id]);
+    $proof = ['principal'=>Pterodactyl\BlueprintFramework\Extensions\nickhosting\Services\WorldScanAccess::principal($appKey),
+        'clientKeyIdentifier'=>$clientKey->identifier,
+        'instanceId'=>$instance,'nickUserId'=>$linked->nick_user_id,'ownerUuid'=>$uploadUser->uuid,
+        'ownerExternalId'=>$uploadUser->external_id,'server'=>Pterodactyl\BlueprintFramework\Extensions\nickhosting\Services\Protocol::identity($uploadServer),
+        'placement'=>[$uploadUser->id,1,1,1], 'allocations'=>[[1,'2001:db8:0:0::1',25565]]];
+    $worldRequest = static function ($dirs, $claim) use ($clientKey,$uploadServer,$uploadUser) {
+        $r=transferRequest('directory-list',['directories'=>$dirs,'worldScan'=>$claim],$uploadServer,$uploadUser);
+        $r->user()->withAccessToken($clientKey);
+        return $r;
+    };
+    $seen=[]; $controller = new DirectoryListController(directoryRepo([new Response(200,[],'[]')], $seen));
+    $success=$controller->worlds($worldRequest([''],$proof),$uploadServer)->getData(true);
+    $grant = $success['propertiesGrant']['urls'][0];
+    parse_str(parse_url($grant, PHP_URL_QUERY),$q);
+    $claims=$config->parser()->parse($q['token'])->claims();
+    check($success['schemaVersion']===1 && $claims->get('file_path')==='/server.properties'
+        && $claims->get('server_uuid')===$uploadServer->uuid && count($seen)===1,
+        'guarded root returns exact properties grant with one authenticated Client operation');
+    $exactPaths=[' world/level.dat','world/level.dat'];
+    $r=Pterodactyl\BlueprintFramework\Extensions\nickhosting\Http\Requests\DownloadUrlsRequest::create(
+        '/api/client/extensions/nickhosting/servers/fixture/world-download-urls','POST',[],[],[],
+        ['CONTENT_TYPE'=>'application/json'],json_encode(['paths'=>$exactPaths,'worldScan'=>$proof],JSON_THROW_ON_ERROR));
+    $r->setUserResolver($worldRequest([''],$proof)->getUserResolver());
+    (new Pterodactyl\Http\Middleware\TrimStrings())->handle($r,fn()=>null);
+    (new Illuminate\Foundation\Http\Middleware\ConvertEmptyStringsToNull())->handle($r,fn()=>null);
+    (new ReflectionMethod($r,'prepareForValidation'))->invoke($r);
+    $v=$validator->make($r->all(),$r->rules()); $v->validate(); $r->setContainer($app); $r->setValidator($v);
+    $worldTokens=$downloads->worlds($r,$uploadServer)->getData(true)['urls'];
+    foreach ($exactPaths as $i => $path) {
+        parse_str(parse_url($worldTokens[$i],PHP_URL_QUERY),$q);
+        check($config->parser()->parse($q['token'])->claims()->get('file_path')==='/'.$path,
+            'native guarded download signs exact untrimmed level.dat path at position '.$i);
+    }
+    foreach ([[''],['world','second-world']] as $samplePaths) {
+        $counts=[];
+        foreach (['ordinary', 'guarded'] as $kind) {
+            $r=$worldRequest($samplePaths,$proof);
+            $sampleSeen=[];
+            $sampleController=new DirectoryListController(directoryRepo(array_fill(0,count($samplePaths),new Response(200,[],'[]')),$sampleSeen));
+            DB::flushQueryLog(); DB::enableQueryLog();
+            $kind === 'ordinary' ? $sampleController($r,$uploadServer) : $sampleController->worlds($r,$uploadServer);
+            $counts[$kind]=count(DB::getQueryLog());
+            DB::disableQueryLog();
+            check(count($sampleSeen) === count($samplePaths), 'one Wings listing per sampled directory');
+        }
+        check($counts['guarded'] < 40, 'bounded native SQL for '.($samplePaths===['']?'root':'two-directory batch')
+            .' (ordinary '.$counts['ordinary'].', guarded '.$counts['guarded'].', includes post-Wings recheck)');
+    }
+    DB::table('api_keys')->where('id',8001)->update(['allowed_ips'=>'["192.0.2.10", "192.0.2.16/28"]']);
+    $restricted=$proof;
+    $restricted['principal']=Pterodactyl\BlueprintFramework\Extensions\nickhosting\Services\WorldScanAccess::principal($appKey->fresh());
+    foreach (['192.0.2.10','192.0.2.20','198.51.100.7'] as $ip) {
+        $r=$worldRequest(['world'],$restricted);
+        $r->server->set('REMOTE_ADDR',$ip);
+        $checkSource=fn()=>(new Pterodactyl\BlueprintFramework\Extensions\nickhosting\Services\WorldScanAccess())->authorize($r,$uploadServer);
+        if ($ip === '198.51.100.7') { denied($checkSource,403,'excluded Worker source IP is rejected'); }
+        else { check($checkSource()->id === $uploadUser->id,'shared discovery supports authorized Worker source '.$ip); }
+    }
+    DB::table('api_keys')->where('id',8001)->update(['allowed_ips'=>'[]']);
+    $seen=[];$controller = new DirectoryListController(directoryRepo([], $seen));
+    foreach (['instanceId'=>'wrong','ownerUuid'=>'wrong','server'=>array_replace($proof['server'],['nodeId'=>9]),
+            'placement'=>[$uploadUser->id,1,2,1],'allocations'=>[[1,'2001:db8::2',25565]]] as $field=>$value) {
+        denied(fn()=>$controller->worlds($worldRequest([''],array_replace($proof,[$field=>$value])),$uploadServer),
+            409,'guarded reads reject drift in '.$field);
+    }
+    DB::table('allocations')->insert(['id'=>2,'server_id'=>2,'node_id'=>$uploadServer->node_id,'port'=>25566,'ip'=>'127.0.0.1']);
+    denied(fn()=>$controller->worlds($worldRequest(['world'],$proof),$uploadServer),409,'guarded child listing rejects additional allocation');
+    $filesRequest=downloadRequest(['paths'=>['world/level.dat'],'worldScan'=>$proof],$uploadServer,$uploadUser);
+    $filesRequest->user()->withAccessToken($clientKey);
+    denied(fn()=>$downloads->worlds($filesRequest,$uploadServer),409,'guarded level.dat grants reject allocation drift before signing');
+    DB::table('allocations')->where('id',2)->delete();
+    $afterAccess=directoryRepo([], $seen);
+    $afterAccess->client=new GuzzleHttp\Client(['handler'=>function() {
+        DB::table('allocations')->where('id',1)->update(['port'=>25566]);
+        return GuzzleHttp\Promise\Create::promiseFor(new Response(200,[],'[]'));
+    }]);
+    denied(fn()=>(new DirectoryListController($afterAccess))->worlds($worldRequest([''],$proof),$uploadServer),
+        409,'changed allocation during Wings listing withholds both metadata and properties grant');
+    DB::table('allocations')->where('id',1)->update(['port'=>25565]);
+    DB::table('api_keys')->where('id',8001)->update(['r_allocations'=>0]);
+    denied(fn()=>$controller->worlds($worldRequest([''],$proof),$uploadServer),403,'revoked Application allocation ACL stops filesystem access');
+    DB::table('api_keys')->where('id',8001)->update(['r_allocations'=>1,'token'=>'rotated']);
+    denied(fn()=>$controller->worlds($worldRequest([''],$proof),$uploadServer),403,'rotated Application key revokes discovery principal');
+    DB::table('api_keys')->where('id',8001)->update(['token'=>'opaque-8001']);
+    DB::table('nickhosting_users')->where('provider_id',$uploadUser->id)->update(['technical'=>false]);
+    denied(fn()=>$controller->worlds($worldRequest([''],$proof),$uploadServer),412,'verified legacy account advertises standalone detail path');
+    check($seen===[],'world scan preconditions deny before Wings and properties grant');
+} finally { DB::rollBack(); }

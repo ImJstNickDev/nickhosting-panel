@@ -3,6 +3,7 @@ namespace Pterodactyl\BlueprintFramework\Extensions\{identifier}\Http\Controller
 
 use Illuminate\Http\Request;
 use Illuminate\Http\JsonResponse;
+use Symfony\Component\HttpKernel\Exception\HttpExceptionInterface;
 use Illuminate\Support\Str;
 use Illuminate\Support\Facades\DB;
 use Pterodactyl\Models\ApiKey;
@@ -46,7 +47,11 @@ final class BridgeController
 
     private function ids(Request $request, string $field, int $limit, bool $uuids): array
     {
-        $items = $request->input($field);
+        return $this->idList($request->input($field), $limit, $uuids);
+    }
+
+    private function idList(mixed $items, int $limit, bool $uuids): array
+    {
         abort_unless(is_array($items) && array_is_list($items) && count($items) <= $limit, 422);
         $seen = [];
         foreach ($items as $item) {
@@ -72,8 +77,11 @@ final class BridgeController
 
     private function recheckInventoryKey(ApiKey $key): void
     {
-        $fresh = $key->fresh();
+        $fresh = ApiKey::query()->useWritePdo()->whereHas('user', static fn ($user) => $user->where('root_admin', true))->find($key->id);
+        $lifetime = config('sanctum.expiration');
         abort_unless($fresh && $fresh->key_type === ApiKey::TYPE_APPLICATION
+            && (!$fresh->expires_at || !$fresh->expires_at->isPast())
+            && (!$lifetime || $fresh->created_at?->gt(now()->subMinutes($lifetime)))
             && $fresh->getRawOriginal('token') === $key->getRawOriginal('token')
             && $fresh->getRawOriginal('identifier') === $key->getRawOriginal('identifier')
             && $fresh->getRawOriginal('allowed_ips') === $key->getRawOriginal('allowed_ips')
@@ -82,17 +90,78 @@ final class BridgeController
             && AdminAcl::check($fresh, AdminAcl::RESOURCE_ALLOCATIONS, AdminAcl::READ), 403);
     }
 
+    private function instanceReadError(mixed $instance, ApiKey $key): ?int
+    {
+        if (!is_string($instance) || strlen($instance) !== 36 || !Str::isUuid($instance)) { return 422; }
+        try {
+            $query = DB::table('nickhosting_instances')->where('id', $instance)->where('api_key_id', $key->id)
+                ->select('id');
+            return GatewayTopology::sectionRows($query) ? null : 403;
+        } catch (\Throwable $error) { return 503; }
+    }
+
+    private function section(callable $read): array
+    {
+        $started = hrtime(true);
+        try {
+            $value = $read();
+            return hrtime(true) - $started > 250000000 ? ['error' => 503] : ['value' => $value];
+        } catch (HttpExceptionInterface $error) { return ['error' => $error->getStatusCode()]; }
+        catch (\Throwable $error) { return ['error' => 503]; }
+    }
+
+    private function coordinated(Request $request, ApiKey $key, array $wanted): array
+    {
+        $sections = [];
+        if (array_key_exists('capabilities', $wanted)) {
+            $sections['capabilities'] = $this->section(function () use ($request, $wanted) {
+                abort_unless($wanted['capabilities'] === true, 422);
+                return ['checkedAt' => now()->toISOString(), 'extension' => CapabilitiesController::discovery($request, true, true)];
+            });
+        }
+        if (!array_key_exists('health', $wanted) && !array_key_exists('snapshots', $wanted)) { return $sections; }
+        $instance = $wanted['instanceId'] ?? null;
+        $error = $this->instanceReadError($instance, $key);
+        foreach (['health', 'snapshots'] as $name) {
+            if (!array_key_exists($name, $wanted)) { continue; }
+            $sections[$name] = $error ? ['error' => $error] : $this->section(function () use ($name, $wanted, $instance) {
+                $uuids = $this->idList($wanted[$name], 100, true);
+                abort_unless($uuids, 422);
+                $result = ['schemaVersion' => 1, 'instanceId' => $instance];
+                if ($name === 'health') {
+                    $result['checkedAt'] = now()->toISOString();
+                    return $result + ['scopes' => $this->scopeHealth($instance, $uuids, true)];
+                }
+                return $result + ['servers' => app(ChangeFeed::class)->verifiedSnapshots($instance, $uuids)];
+            });
+        }
+        return $sections;
+    }
+
     public function gatewayRevision(Request $request): JsonResponse
     {
         $key = $this->inventoryKey($request);
         $input = $request->all();
-        abort_unless(count($input) === 5 && is_string($input['epoch'] ?? null) && Str::isUuid($input['epoch'])
+        abort_unless(!array_diff(array_keys($input), ['epoch', 'revision', 'waitMs', 'nodeIds', 'serverUuids', 'coordinated'])
+            && is_string($input['epoch'] ?? null) && Str::isUuid($input['epoch'])
             && is_string($input['revision'] ?? null) && preg_match('/^[1-9][0-9]{0,19}$/D', $input['revision'])
             && is_int($input['waitMs'] ?? null) && $input['waitMs'] >= 0 && $input['waitMs'] <= 7500, 422);
-        $receipt = GatewayTopology::wait($input['epoch'], $input['revision'], $input['waitMs'],
-            $this->ids($request, 'nodeIds', 256, false), $this->ids($request, 'serverUuids', 10000, true));
+        $nodes = $this->ids($request, 'nodeIds', 256, false);
+        $servers = $this->ids($request, 'serverUuids', 10000, true);
+        $started = hrtime(true);
+        $wanted = $input['coordinated'] ?? null;
+        $sections = is_array($wanted) ? $this->coordinated($request, $key, $wanted) : [];
+        $receipt = GatewayTopology::wait($input['epoch'], $input['revision'], $input['waitMs'], $nodes, $servers, $started);
+        if (isset($sections['health']['value']) || isset($sections['snapshots']['value'])) {
+            $error = $this->instanceReadError($wanted['instanceId'], $key);
+            if ($error) {
+                foreach (['health', 'snapshots'] as $name) {
+                    if (isset($sections[$name])) { $sections[$name] = ['error' => $error]; }
+                }
+            }
+        }
         $this->recheckInventoryKey($key);
-        return $this->reply($receipt);
+        return $this->reply($sections ? $receipt + ['coordinated' => $sections] : $receipt);
     }
 
     public function gatewayTopologySnapshot(Request $request): JsonResponse
@@ -209,19 +278,25 @@ final class BridgeController
             $uuids = explode(',', $raw);
             abort_if(count($uuids) > 100 || count(array_unique($uuids)) !== count($uuids), 422);
             foreach ($uuids as $uuid) { abort_unless(strlen($uuid) === 36 && Str::isUuid($uuid), 422); }
-            // One statement observes link revisions and pending claims in the same database snapshot.
-            $links = DB::table('nickhosting_servers as s')->where('s.instance_id', $instance)
-                ->leftJoin('servers as native', 'native.id', '=', 's.server_id')
-                ->whereIn('s.uuid', $uuids)->whereNotNull('s.owner_id')->select(['s.uuid', 's.revision', 's.valid', 's.owner_id',
-                    'native.owner_id as current_owner', 'native.uuid as current_uuid'])
-                ->selectRaw('EXISTS(SELECT 1 FROM nickhosting_outbox o WHERE o.instance_id = s.instance_id
-                    AND o.server_uuid = s.uuid AND o.delivered_at IS NULL AND o.quarantined_at IS NULL) AS pending')->get();
-            $health['scopes'] = $links->map(static fn ($s) => ['providerUuid' => $s->uuid,
-                'revision' => (int) $s->revision, 'ownerId' => (int) $s->owner_id,
-                'valid' => (bool) $s->valid && $s->current_uuid === $s->uuid && (int)$s->current_owner === (int)$s->owner_id,
-                'pending' => (bool) $s->pending])->all();
+            $health['scopes'] = $this->scopeHealth($instance, $uuids);
         }
         return $this->reply($health + ['checkedAt' => $observedAt]);
+    }
+
+    private function scopeHealth(string $instance, array $uuids, bool $coordinated = false): array
+    {
+        // Links and pending outbox claims must be observed in the same primary database statement.
+        $query = DB::table('nickhosting_servers as s')->useWritePdo()->where('s.instance_id', $instance)
+            ->leftJoin('servers as native', 'native.id', '=', 's.server_id')
+            ->whereIn('s.uuid', $uuids)->whereNotNull('s.owner_id')->select(['s.uuid', 's.revision', 's.valid', 's.owner_id',
+                'native.owner_id as current_owner', 'native.uuid as current_uuid'])
+            ->selectRaw('EXISTS(SELECT 1 FROM nickhosting_outbox o WHERE o.instance_id = s.instance_id
+                AND o.server_uuid = s.uuid AND o.delivered_at IS NULL AND o.quarantined_at IS NULL) AS pending');
+        $rows = $coordinated ? GatewayTopology::sectionRows($query) : $query->get()->all();
+        return array_map(static fn ($s) => ['providerUuid' => $s->uuid,
+            'revision' => (int) $s->revision, 'ownerId' => (int) $s->owner_id,
+            'valid' => (bool) $s->valid && $s->current_uuid === $s->uuid && (int)$s->current_owner === (int)$s->owner_id,
+            'pending' => (bool) $s->pending], $rows);
     }
 
     public function provisionUser(Request $request, string $instance, string $nickUser): JsonResponse

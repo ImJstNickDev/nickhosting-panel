@@ -8,6 +8,7 @@ import {
   PterodactylError,
 } from '@nickhosting/pterodactyl-adapter';
 import { type Kysely, sql } from 'kysely';
+import { standaloneHealthTargets } from './gateway-provider-heartbeat.js';
 import { backupSchemaAvailable } from './provider-backup-events.js';
 import { providerCapabilities, providerCredentialBinding } from './provider-capabilities.js';
 import {
@@ -325,9 +326,16 @@ export async function refreshProviderFeeds(
           .executeTakeFirstOrThrow();
         // An older extension ignores the query and supplies its single global drain fence.
         // A newer one returns revision evidence only for these managed links.
+        const standalone = await standaloneHealthTargets(
+          tx,
+          feed.instance_id,
+          binding,
+          healthTargets,
+        );
+        if (!standalone.length) return;
         const scopes = [];
         for (let offset = 0; ; offset += PROVIDER_SNAPSHOT_BATCH_SIZE) {
-          const ids = healthTargets.slice(offset, offset + PROVIDER_SNAPSHOT_BATCH_SIZE);
+          const ids = standalone.slice(offset, offset + PROVIDER_SNAPSHOT_BATCH_SIZE);
           const health = await bridge.health(feed.instance_id, ids);
           if (!health.scopes) {
             if (offset !== 0) throw new Error('Inconsistent provider health response');
@@ -339,10 +347,11 @@ export async function refreshProviderFeeds(
             break;
           }
           for (const scope of health.scopes) scopes.push({ ...scope, checkedAt: health.checkedAt });
-          if (offset + ids.length >= healthTargets.length) {
+          if (offset + ids.length >= standalone.length) {
             await markProviderFeedHealth(db, {
               ...health,
               scopes,
+              targetUuids: standalone.length < healthTargets.length ? standalone : undefined,
               credentialBinding: binding,
               expectedGeneration: cursor.generation,
             });

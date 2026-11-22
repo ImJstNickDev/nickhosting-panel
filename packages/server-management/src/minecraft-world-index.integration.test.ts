@@ -13,6 +13,7 @@ import {
   refreshMinecraftWorldIndex,
 } from './minecraft-world-index.js';
 import { createMinecraftWorldPreparation } from './minecraft-world-preparation.js';
+import { openScheduledWorldReader, readWorldScanPrincipal } from './minecraft-world-reader.js';
 import { minecraftManagementFixture } from './test-fixtures.js';
 
 let database: Awaited<ReturnType<typeof createTestDatabase>>;
@@ -154,6 +155,169 @@ async function fixture() {
   };
 }
 describe('persistent Minecraft world inventory', () => {
+  it('consumes only a current discovery for the configured Application key and provider', async () => {
+    const db = database.db,
+      principal = 'a'.repeat(64);
+    expect(await readWorldScanPrincipal(db, 'configured')).toBeUndefined();
+    await sql`update blueprint_capability_discovery set binding='configured',checked_at=now(),extension=${JSON.stringify({ worldReadPrincipal: principal })}::jsonb where singleton`.execute(
+      db,
+    );
+    expect(await readWorldScanPrincipal(db, 'configured')).toBe(principal);
+    expect(await readWorldScanPrincipal(db, 'rotated')).toBeUndefined();
+    await sql`update blueprint_capability_discovery set checked_at=now()-interval '61 seconds' where singleton`.execute(
+      db,
+    );
+    expect(await readWorldScanPrincipal(db, 'configured')).toBeUndefined();
+  });
+  it.each([
+    'current',
+    'legacy',
+    'missing-route',
+    'root-denied',
+    'properties-denied',
+    'child-mismatch',
+    'during-sftp',
+    'during-mapping',
+  ] as const)(
+    'uses guarded filesystem reads from the scheduled entry point (%s)',
+    async (scenario) => {
+      const f = await fixture();
+      if (scenario !== 'legacy') {
+        await sql`update provider_accounts set external_id='nh:'||instance_id::text||':'||user_id where user_id=${f.userId}`.execute(
+          f.db,
+        );
+      }
+      const listing = vi.fn(
+        async (
+          _identifier: string,
+          paths: string[],
+          guard: import('@nickhosting/pterodactyl-adapter').WorldScanGuard,
+        ) => {
+          expect(guard.server.providerUuid).toBe(f.remote.uuid);
+          expect(guard.server.identifier).toBe(f.remote.identifier);
+          expect(guard.placement).toEqual([
+            f.remote.user,
+            f.remote.nest,
+            f.remote.egg,
+            f.remote.allocation,
+          ]);
+          const allocation = f.remote.relationships?.allocations?.data[0]?.attributes;
+          if (!allocation) throw new Error('Missing fixture allocation');
+          expect(guard.allocations).toEqual([[allocation.id, allocation.ip, allocation.port]]);
+          if (scenario === 'missing-route')
+            throw new PterodactylError('not_found', 'client', 'rejected', 404);
+          if (scenario === 'root-denied' || scenario === 'properties-denied')
+            throw new PterodactylError('permission_denied', 'client', 'rejected', 403);
+          if (paths[0] !== '' && scenario === 'child-mismatch')
+            throw new PterodactylError('invalid_request', 'client', 'rejected', 409);
+          if (paths[0] !== '' && scenario === 'during-sftp') await f.dirty();
+          if (paths[0] !== '' && scenario === 'during-mapping')
+            await sql`update runtime_egg_mappings set egg_id=egg_id+1 where id=(select mapping_id from managed_servers where id=${f.serverId})`.execute(
+              f.db,
+            );
+          const isRoot = paths[0] === '';
+          return {
+            results: paths.map((directory) => ({
+              directory,
+              files: [
+                {
+                  name: isRoot ? 'survival' : 'level.dat',
+                  mode: '',
+                  size: 42,
+                  is_file: !isRoot,
+                  is_symlink: false,
+                  mimetype: '',
+                  created_at: '',
+                  modified_at: '2026-01-01T00:00:00Z',
+                },
+              ],
+            })),
+            properties: isRoot ? Buffer.from('level-name=survival') : undefined,
+          };
+        },
+      );
+      const grants = vi.fn(async () => [
+        async () => {
+          const bytes = await f.files.read({ path: 'survival/level.dat', maxBytes: 8 * 1024 ** 2 });
+          if (!bytes) throw new Error('Missing world fixture');
+          return bytes;
+        },
+      ]);
+      f.runtime.adapter.readWorldDirectories = listing;
+      f.runtime.adapter.prepareWorldFiles = grants;
+      const ordinary = vi.spyOn(f.runtime, 'fileReadPhase');
+      if (scenario === 'root-denied' || scenario === 'child-mismatch') {
+        await f.refresh();
+        ordinary.mockClear();
+        f.provider.mockClear();
+      }
+      const runtime = {
+        ...f.runtime,
+        scheduledWorldReadPhase: (
+          server: Parameters<typeof openScheduledWorldReader>[2],
+          signal: AbortSignal,
+        ) =>
+          openScheduledWorldReader(
+            f.db,
+            f.runtime.adapter,
+            server,
+            'a'.repeat(64),
+            signal,
+            (paths, read) => read(paths),
+          ),
+      };
+      await f.dirty();
+      const run = reconcileDueMinecraftWorldIndex(
+        f.db,
+        f.serverId,
+        runtime,
+        {},
+        new AbortController().signal,
+      );
+      if (scenario.endsWith('denied') || scenario === 'child-mismatch') {
+        await expect(run).rejects.toMatchObject({
+          code: scenario === 'child-mismatch' ? 'provenance_mismatch' : 'forbidden',
+        });
+        expect(await f.cached()).toBeUndefined();
+        expect(grants).not.toHaveBeenCalled();
+      } else {
+        await run;
+        if (scenario.startsWith('during-')) {
+          expect(await f.cached()).toBeUndefined();
+          expect(await dueMinecraftWorldIndexes(f.db, 1)).toContain(f.serverId);
+        } else {
+          expect((await f.cached())?.snapshot.selectedWorld).toBe('survival');
+        }
+      }
+      const legacy = scenario === 'legacy' || scenario === 'missing-route';
+      expect(f.provider).toHaveBeenCalledTimes(legacy ? 1 : 0);
+      expect(ordinary).toHaveBeenCalledTimes(legacy ? 1 : 0);
+      expect(listing.mock.calls.map((call) => call[1])).toEqual(
+        scenario === 'legacy'
+          ? []
+          : scenario === 'missing-route' || scenario.endsWith('denied')
+            ? [['']]
+            : [[''], ['survival']],
+      );
+      if (scenario === 'current') {
+        expect(grants).toHaveBeenCalledOnce();
+        // A second pass keeps level.dat validation on its existing mtime/size schedule.
+        await sql`update minecraft_world_indexes set next_scan_at=now() where server_id=${f.serverId}`.execute(
+          f.db,
+        );
+        await reconcileDueMinecraftWorldIndex(
+          f.db,
+          f.serverId,
+          runtime,
+          {},
+          new AbortController().signal,
+        );
+        expect(listing).toHaveBeenCalledTimes(4);
+        expect(grants).toHaveBeenCalledOnce();
+        expect(f.provider).not.toHaveBeenCalled();
+      }
+    },
+  );
   it.each(['fresh', 'expired', 'credential', 'egg', 'scan-revision', 'during-sftp'] as const)(
     'reuses a matching fleet identity only within the scheduled world scan (%s)',
     async (scenario) => {
