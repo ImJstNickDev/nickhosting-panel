@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { once } from 'node:events';
 import { createServer } from 'node:http';
+import { setTimeout as delay } from 'node:timers/promises';
 import { SecretCodec } from '@nickhosting/core';
 import { createTestDatabase } from '@nickhosting/database/testing';
 import type { GatewayHeartbeatRequest, ProviderChange } from '@nickhosting/pterodactyl-adapter';
@@ -515,7 +516,7 @@ async function heartbeatFixture(count: number) {
     };
     let response: unknown;
     if (route === 'revision') {
-      const input = JSON.parse(body) as { coordinated?: GatewayHeartbeatRequest };
+      const input = JSON.parse(body) as { coordinated?: GatewayHeartbeatRequest; waitMs: number };
       const request = input.coordinated;
       const coordinated: Record<string, unknown> = {};
       if (request) {
@@ -555,13 +556,23 @@ async function heartbeatFixture(count: number) {
                 value: {
                   schemaVersion: 1,
                   instanceId: f.instanceId,
-                  servers: request.snapshots.flatMap((id) => f.entries.get(id) ?? []),
+                  servers: request.snapshots.flatMap((id) => {
+                    const event = f.entries.get(id);
+                    return event ? [{ ...event, occurredAt: checkedAt }] : [];
+                  }),
                 },
               };
         if (request.capabilities)
           coordinated.capabilities = { value: { checkedAt, extension: discovery } };
       }
-      response = { ...receipt, waitedMs: 0, ...(state.shape === 'omitted' ? {} : { coordinated }) };
+      // Read at dispatch, keep the HTTP request open for its native wait, and
+      // publish the original timestamp. Worker ticks can occur inside the wait.
+      if (input.waitMs) await delay(input.waitMs);
+      response = {
+        ...receipt,
+        waitedMs: input.waitMs,
+        ...(state.shape === 'omitted' ? {} : { coordinated }),
+      };
     } else if (route === 'capabilities') response = discovery;
     else {
       const passthrough = await f.fetcher(endpoint.href, {
@@ -607,10 +618,16 @@ async function heartbeatFixture(count: number) {
       new Date(),
       providerCredentialBinding(origin, 'fixture'),
     );
-  const tick = async (intervalMs: number) => {
+  const tick = async (intervalMs: number, waitMs = 0) => {
     const plan = await api.prepareGatewayHeartbeat?.(intervalMs);
     if (!api.adapter.gatewayTopology) throw new Error('missing topology');
-    const result = await api.adapter.gatewayTopology.revision(receipt, [], [], 0, plan?.request);
+    const result = await api.adapter.gatewayTopology.revision(
+      receipt,
+      [],
+      [],
+      waitMs,
+      plan?.request,
+    );
     await plan?.accept(result.coordinated);
   };
   return { ...f, api, prepare, tick, refresh, cached, routes, batches, principals, state };
@@ -655,28 +672,69 @@ it('serves due feed work and discovery on the existing HTTP heartbeat with zero 
   expect(f.routes).toEqual(['revision', 'health']);
 });
 
-it.each([1, 7])('counts the steady 60s wire window with a worker offset of %is', async (offset) => {
-  const f = await heartbeatFixture(19);
+it.each([
+  { interval: 4000, offset: 500, polls: 15 },
+  { interval: 7500, offset: 4000, polls: 8 },
+])(
+  'shares $polls HTTP waits of $interval ms with four worker ticks offset by $offset ms',
+  async ({ interval, offset, polls }) => {
+    const f = await heartbeatFixture(19);
+    await f.api.adapter.supportsGatewayInventory();
+    const earlier = f.snapshots.slice(0, 9).map((s) => s.server.externalId);
+    await f.db
+      .updateTable('provider_server_projections')
+      .set({ synchronized_at: new Date() })
+      .execute();
+    await f.db
+      .updateTable('provider_server_projections')
+      .set({ synchronized_at: new Date(Date.now() - 22000) })
+      .where('server_id', 'in', earlier)
+      .execute();
+    await f.tick(interval);
+    f.routes.length = 0;
+    f.batches.length = 0;
+    const start = performance.now();
+    await Promise.all([
+      (async () => {
+        for (let poll = 0; poll < polls; poll++) await f.tick(interval, interval);
+      })(),
+      (async () => {
+        for (let i = 0; i < 4; i++) {
+          await delay(Math.max(0, start + offset + i * 15000 - performance.now()));
+          await f.refresh();
+        }
+      })(),
+    ]);
+    expect(f.routes).toEqual(Array(polls).fill('revision'));
+    expect(f.batches.filter((work) => work.capabilities)).toHaveLength(1);
+    expect(f.batches.flatMap((work) => work.snapshots ?? []).sort()).toEqual(
+      f.snapshots.map((s) => s.server.providerUuid).sort(),
+    );
+    expect(
+      f.batches.filter((work) => work.snapshots).map((work) => work.snapshots?.length),
+    ).toEqual([9, 10]);
+  },
+  85_000,
+);
+
+it('retains an active reservation and recovers an abandoned maximum-length wait', async () => {
+  const f = await heartbeatFixture(1);
+  const first = f.snapshots[0];
+  if (!first) throw new Error('missing test server');
   await f.api.adapter.supportsGatewayInventory();
-  await f.tick(4000);
-  f.routes.length = 0;
-  f.batches.length = 0;
-  // Shift stored observation clocks instead of sleeping. Each scheduled poll
-  // uses the real adapter and HTTP listener, including the 15th at t=60.
-  for (let t = 1; t <= 60; t++) {
-    await database.pool.query(`
-      update provider_server_projections set synchronized_at=synchronized_at-interval '1 second',
-        scope_healthy_at=scope_healthy_at-interval '1 second';
-      update gateway_feed_heartbeat set requested_at=requested_at-interval '1 second', checked_at=checked_at-interval '1 second';
-      update blueprint_capability_discovery set checked_at=checked_at-interval '1 second'`);
-    if (t % 4 === 0) await f.tick(4000);
-    if (t % 15 === offset) await f.refresh();
-  }
-  expect(f.routes).toEqual(Array(15).fill('revision'));
-  expect(f.batches.filter((work) => work.capabilities)).toHaveLength(1);
-  expect(f.batches.filter((work) => work.snapshots).map((work) => work.snapshots?.length)).toEqual([
-    19,
-  ]);
+  const original = await f.prepare();
+  await database.pool.query(
+    "update gateway_feed_heartbeat set requested_at=clock_timestamp()-interval '8 seconds'",
+  );
+  expect(await f.api.prepareGatewayHeartbeat?.(7500)).toBeUndefined();
+  await database.pool.query(
+    "update gateway_feed_heartbeat set requested_at=clock_timestamp()-interval '11 seconds'",
+  );
+  const next = await f.prepare();
+  await original.plan.accept(original.sections);
+  expect(await f.cached(first)).toBeNull();
+  await next.plan.accept(next.sections);
+  expect(await f.cached(first)).toEqual(first.limits);
 });
 
 it('rotates bounded chunks fairly and immediately falls back for the missing HTTP scope', async () => {

@@ -9,6 +9,9 @@ import {
 import { type Kysely, sql } from 'kysely';
 import { markProviderFeedHealth, refreshLinkedProviderSnapshots } from './provider-change-feed.js';
 
+// Only a random v4 token owns an outstanding request. A settled reservation
+// retains its dispatch time for fairness and its observation for the worker.
+const settled = '00000000-0000-0000-0000-000000000000';
 type Connection = Kysely<Database>;
 type Target = {
   id: string;
@@ -56,7 +59,11 @@ export async function prepareGatewayHeartbeat(
   intervalMs = 7500,
 ) {
   // Schedule before a snapshot crosses 60s between two bounded heartbeats.
-  const snapshotAgeMs = 60000 - 2 * Math.max(0, Math.min(intervalMs, 7500));
+  const interval = Math.max(0, Math.min(intervalMs, 7500));
+  const snapshotAgeMs = 60000 - 2 * interval;
+  // Skipping this dispatch costs one interval to the next chance and another
+  // before its receipt is published. Reserve half a second for local/HTTP work.
+  const healthAgeMs = Math.max(0, Math.min(10000, 15000 - 2 * interval - 500));
   const token = randomUUID();
   const plan = await db.transaction().execute(async (tx) => {
     await sql`set local statement_timeout = '100ms'`.execute(tx);
@@ -97,8 +104,11 @@ export async function prepareGatewayHeartbeat(
         where p.instance_id = ${instance} and not p.identity_invalidated
           and s.deleted_at is null and s.pterodactyl_id is not null
           and s.pterodactyl_identifier is not null and s.pterodactyl_uuid is not null
-          and (h.requested_at is null or h.requested_at <= clock_timestamp() - interval '10 seconds'
-            or h.requested_at > clock_timestamp() or ${dueAt} between h.requested_at and clock_timestamp())
+          and (h.requested_at is null or h.requested_at > clock_timestamp()
+            or (h.token<>${settled}::uuid and h.requested_at <= clock_timestamp()-interval '10.5 seconds')
+            or (h.token=${settled}::uuid and h.requested_at <= clock_timestamp()-interval '1 second' and (
+              coalesce(h.checked_at,h.requested_at) <= clock_timestamp() - ${healthAgeMs}::integer * interval '1 millisecond'
+              or ${dueAt} between h.requested_at and clock_timestamp())))
         order by h.requested_at nulls first, s.id limit ${PROVIDER_SNAPSHOT_BATCH_SIZE}
       `.execute(tx);
       targets = rows;
@@ -207,7 +217,7 @@ export async function prepareGatewayHeartbeat(
         targetUuids: current.map((t) => t.providerUuid),
         credentialBinding: binding,
       });
-      await sql`update gateway_feed_heartbeat set checked_at=${health && fresh ? health.checkedAt : null} where token=${token} and server_id=any(${current.map((row) => row.id)}::uuid[])`.execute(
+      await sql`update gateway_feed_heartbeat set token=${settled}, checked_at=${health && fresh ? health.checkedAt : null} where token=${token} and server_id=any(${current.map((row) => row.id)}::uuid[])`.execute(
         tx,
       );
     });
@@ -242,7 +252,7 @@ export async function standaloneHealthTargets(
   const recent = new Set(rows.map((row) => row.uuid));
   const remaining = ids.filter((id) => !recent.has(id));
   if (remaining.length)
-    await sql`update gateway_feed_heartbeat h set token=${randomUUID()}, checked_at=null
+    await sql`update gateway_feed_heartbeat h set token=${settled}, checked_at=null
     from managed_servers s where s.id=h.server_id and s.pterodactyl_uuid=any(${remaining}::uuid[])`.execute(
       db,
     );
