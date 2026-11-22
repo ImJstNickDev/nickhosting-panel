@@ -120,6 +120,31 @@ describe('Pterodactyl request coordination', () => {
     });
   });
 
+  it('attributes Blueprint reads sent via POST using bounded operation labels', () => {
+    const coordinator = createTransportCoordinator('worker');
+    const logger = { log: vi.fn() };
+    const stop = coordinator.startReadReporting(logger);
+    const origin = new URL(config.baseURL);
+    const { providerReadAgent } = coordinator;
+    const prefix = 'extensions/nickhosting/servers/test-id/';
+    for (const op of ['download-urls', 'directory-list']) {
+      expect(providerReadAgent('client', 'POST', prefix + op, origin)).toBe('NickPanel/worker');
+    }
+    expect(
+      providerReadAgent(
+        'application',
+        'POST',
+        'extensions/nickhosting/instances/test-id/server-snapshots',
+        origin,
+      ),
+    ).toBe('NickPanel/worker');
+    expect(providerReadAgent('client', 'POST', `${prefix}guarded-delete`, origin)).toBeUndefined();
+    stop();
+    expect(logger.log.mock.calls[0]?.[2].callers).toEqual({
+      worker: { directoryList: 1, downloadUrls: 1, serverSnapshots: 1 },
+    });
+  });
+
   it('isolates an ambiguous websocket 429 to that server, including other credentials', async () => {
     const coordinator = createTransportCoordinator();
     const fetcher = vi

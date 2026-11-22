@@ -128,7 +128,9 @@ Each active one-minute window has UTC `data.from` and `data.until` boundaries,
 GETs. `externalDetail`, `list`, `batch` and `bundle` count external-ID lookups, list
 pages, UUID-filtered list pages and Gateway inventory requests separately. For the Client API,
 `resources` and `backupList` count live resource samples and backup inventory pages.
-Other GETs are grouped under `otherApplication` or `otherClient`. Shutdown
+Blueprint directory batches, download URL batches and bulk server snapshots have dedicated
+`directoryList`, `downloadUrls` and `serverSnapshots` counters. Other GETs are grouped under
+`otherApplication` or `otherClient`. Shutdown
 flushes a final partial window. Each outgoing attempt counts once for its initiating
 caller, including upstream 429s. Joined readers and local cooldown rejections add zero.
 

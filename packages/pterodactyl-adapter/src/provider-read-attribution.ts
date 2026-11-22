@@ -28,12 +28,22 @@ export function withProviderReadCaller<T>(caller: ProviderReadCaller, operation:
 
 function readKind(scope: CredentialScope, method: string, path: string, url: URL) {
   if (scope === 'client') {
+    if (method === 'POST') {
+      if (/^extensions\/nickhosting\/servers\/[^/?]+\/directory-list$/.test(path))
+        return 'directoryList';
+      if (/^extensions\/nickhosting\/servers\/[^/?]+\/download-urls$/.test(path))
+        return 'downloadUrls';
+    }
     if (method !== 'GET') return;
     if (/^servers\/[^/?]+\/resources(?:\?|$)/.test(path)) return 'resources';
     if (/^servers\/[^/?]+\/backups(?:\?|$)/.test(path)) return 'backupList';
     return 'otherClient';
   }
-  if (method === 'POST' && path === 'extensions/nickhosting/gateway-inventory') return 'bundle';
+  if (method === 'POST') {
+    if (path === 'extensions/nickhosting/gateway-inventory') return 'bundle';
+    if (/^extensions\/nickhosting\/instances\/[^/?]+\/server-snapshots$/.test(path))
+      return 'serverSnapshots';
+  }
   if (method !== 'GET') return;
   if (/^servers\/\d+(?:\?|$)/.test(path)) return 'detail';
   if (path.startsWith('servers/external/')) return 'externalDetail';
