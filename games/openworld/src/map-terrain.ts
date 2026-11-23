@@ -52,7 +52,7 @@ export async function readNativeMapBytes(
     | 'info',
   params: Record<string, string | number>,
   limit: number,
-  allowMissing = false,
+  mode: 'required' | 'optional-tile' | 'stream-geometry' = 'required',
 ) {
   if (!native.token) throw invalid();
   const url = new URL(`/api/live/${path}`, native.origin);
@@ -64,18 +64,30 @@ export async function readNativeMapBytes(
       headers: { 'X-OW-Token': native.token },
     });
     if (!res.ok) {
-      if (res.status === 400 && allowMissing) {
+      if (res.status === 400 && mode !== 'required') {
         if (await outsideFace(res, params)) return null;
         throw invalid();
       }
       await res.body?.cancel();
+      if (mode === 'stream-geometry') {
+        if (res.status === 504) throw new DomainError('game_request_timeout');
+        if (res.status === 503) throw new DomainError('game_not_ready', 503);
+        if (res.status === 429) throw new DomainError('rate_limited');
+        if (res.status === 403) throw new DomainError('game_authentication_failed', 403);
+      }
       if (res.status === 401) throw new OpenworldTokenExpired();
-      if (res.status === 404 && allowMissing) return null;
+      if (res.status === 404 && mode !== 'required') return null;
       throw new DomainError(res.status === 503 ? 'game_not_ready' : 'integration_unavailable');
     }
     return await readNativeBytes(res, limit);
   } catch (e) {
     if (e instanceof DomainError) throw e;
+    if (
+      mode === 'stream-geometry' &&
+      native.signal.aborted &&
+      native.signal.reason?.name === 'TimeoutError'
+    )
+      throw new DomainError('game_request_timeout');
     throw invalid();
   }
 }
@@ -213,7 +225,7 @@ export async function readMapTile(
     'map/surface',
     { world, face, ci, cj, n: 8, lod: 4 },
     32 + 64 * (4 + 96),
-    true,
+    'optional-tile',
   );
   return bytes ? decodeMapTile(bytes, face, ci, cj) : emptyTile();
 }

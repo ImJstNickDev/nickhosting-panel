@@ -195,11 +195,13 @@ async function fixture() {
       body?: unknown,
       as: 'owner' | 'sub' = 'sub',
       area: 'map' | 'factories' = 'map',
+      signal?: AbortSignal,
     ) =>
       app.request(`/v1/servers/${id}/openworld/${area}${path}`, {
         headers: { 'content-type': 'application/json', 'X-Reader': as },
         method: body ? 'POST' : 'GET',
         body: body ? JSON.stringify(body) : undefined,
+        signal,
       });
   };
   const request = router();
@@ -820,6 +822,63 @@ it('streams scoped native geometry, honours its stamp and invalidates only touch
   expect(await (await f.request(mesh(8, 3))).json()).toEqual({ error: 'integration_unavailable' });
   await f.grant(manage);
   expect((await f.request(mesh(4, 3))).status).toBe(403);
+});
+
+it('shares native capacity across terrain and mesh routes, drops queued cancellations and checks a changed private binding before dispatch', async () => {
+  const f = await fixture();
+  await f.power('running');
+  await f.grant(read);
+  const q = `?world=earth&face=0&processRef=${await f.ref()}`;
+  const mesh = (i: number) => `/mesh${q}&i=${i}&j=0&lod=1`;
+  const terrain = `/terrain${q}&ci=0&cj=0&n=2&lod=5`;
+  f.state.asset = (url) => {
+    if (url.pathname.endsWith('/map/mesh') || url.pathname.endsWith('/map/surface'))
+      return new Response(null, { status: 504 });
+  };
+  for (const path of [terrain, mesh(0), `/meshes${q}&lod=1&cells=0,0`, terrain]) {
+    const failed = await f.request(path);
+    expect(failed.status).toBe(504);
+    expect(await failed.json()).toEqual({ error: 'game_request_timeout' });
+  }
+  expect(f.reads.filter((r) => r === 'map/surface')).toHaveLength(2);
+  f.state.asset = () => new Response(null, { status: 503 });
+  expect((await f.request(terrain)).status).toBe(503);
+  f.state.asset = () => new Response(null, { status: 404 });
+  const busy = Promise.withResolvers<void>(),
+    release = Promise.withResolvers<void>();
+  let sent = 0;
+  f.state.onRead = async (resource) => {
+    if (resource === 'map/mesh' || resource === 'map/surface') {
+      if (++sent === 3) busy.resolve();
+      await release.promise;
+    }
+  };
+  const inFlight = [terrain, mesh(1), mesh(2)].map((path) => f.request(path));
+  await busy.promise;
+  const enqueue = async (i: number, signal?: AbortSignal) => {
+    const checked = Promise.withResolvers<void>();
+    f.state.afterScopeQuery = checked.resolve;
+    const response = f.request(mesh(i), undefined, 'sub', 'map', signal);
+    await checked.promise;
+    f.state.afterScopeQuery = undefined;
+    await new Promise<void>((done) => setImmediate(done));
+    return { response };
+  };
+  const abort = new AbortController();
+  const abandoned = await enqueue(3, abort.signal);
+  abort.abort();
+  expect(await (await abandoned.response).json()).toEqual({ error: 'game_not_ready' });
+  const waiting = await enqueue(4);
+  await f.db
+    .updateTable('managed_servers')
+    .set({ pterodactyl_uuid: randomUUID() })
+    .where('id', '=', f.id)
+    .execute();
+  release.resolve();
+  for (const response of await Promise.all([...inFlight, waiting.response])) {
+    expect(await response.json()).toEqual({ error: 'provenance_mismatch' });
+  }
+  expect(sent).toBe(3);
 });
 
 it('requires both grants for seed overlays, binds the generation arguments and returns only the filtered data', async () => {

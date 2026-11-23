@@ -13,6 +13,7 @@ import { Link } from 'react-router';
 import { apiError } from '../../api/client.js';
 import { useT } from '../../app/i18n.js';
 import { ErrorNotice, Loading } from '../../components/ui.js';
+import type { AtlasTerrainStatus } from './atlas-backoff.js';
 import { canCaptureFlightKeyboard } from './atlas-pointer-lock.js';
 import { AtlasScene, AtlasUnsupported } from './atlas-scene.js';
 import type {
@@ -188,6 +189,7 @@ function AtlasViewport(props: ViewProps & { unavailable: () => void }) {
     return () => mouse.removeEventListener('change', update);
   }, []);
   const [point, setPoint] = useState<(AtlasPoint & { label?: string }) | null>(null);
+  const [terrainStatus, setTerrainStatus] = useState<AtlasTerrainStatus>(null);
   const [streamError, setStreamError] = useState<unknown>(null);
   const [fullscreen, setFullscreen] = useState(false);
   const moved = useRef(false);
@@ -277,6 +279,7 @@ function AtlasViewport(props: ViewProps & { unavailable: () => void }) {
       ? { x: p.focus.x, z: p.focus.z, span: Math.min(edge, 240) }
       : fit(edge, initialCore ?? p.extent, el.clientWidth / Math.max(1, el.clientHeight));
     let active = true;
+    setTerrainStatus(null);
     const fail = (error: unknown) => {
       if (!active) return;
       if (scopeLost(error)) current.current.props.onScopeError(error);
@@ -370,6 +373,9 @@ function AtlasViewport(props: ViewProps & { unavailable: () => void }) {
           if (active) current.current.props.unavailable();
         },
         onError: fail,
+        onTerrainStatus: (status) => {
+          if (active) setTerrainStatus(status);
+        },
       });
       scene.current = engine;
       setFrame(engine.getView());
@@ -845,6 +851,20 @@ function AtlasViewport(props: ViewProps & { unavailable: () => void }) {
         <p role="status" className="ow-map-layer-note">
           {t(k(features.wide ? 'atlas.featureZoom' : 'atlas.featureSample'))}
         </p>
+      )}
+      {!error && terrainStatus && (
+        <div className="ow-map-layer-note">
+          <span role="status">
+            {t(
+              k(terrainStatus === 'retrying' ? 'atlas.terrainRetrying' : 'atlas.terrainIncomplete'),
+            )}
+          </span>{' '}
+          {terrainStatus === 'incomplete' && (
+            <button type="button" className="secondary" onClick={() => scene.current?.retry()}>
+              {t('web.retry')}
+            </button>
+          )}
+        </div>
       )}
       {error && !scopeLost(error) ? (
         <ErrorNotice

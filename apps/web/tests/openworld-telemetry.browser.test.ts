@@ -2476,6 +2476,50 @@ it('frames a populated cluster, then reaches distant indexed columns without unb
   }
 });
 
+it('keeps streaming visible terrain after a tile timeout on opening and reloading the map', async () => {
+  const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
+  try {
+    await mapRoutes(page, { bridge: true, radius: 16 });
+    let failedTile = '';
+    let recovered = false;
+    const neighbors = new Set<string>();
+    await page.route('**/map/terrain?**', async (route) => {
+      const query = new URL(route.request().url()).searchParams;
+      const key = ['ci', 'cj', 'lod', 'n'].map((field) => query.get(field)).join('/');
+      if (!failedTile && query.get('lod') === '6') {
+        failedTile = key;
+        return route.fulfill({
+          status: 504,
+          json: {
+            error: {
+              code: 'game_request_timeout',
+              messageKey: 'errors.game_request_timeout',
+            },
+          },
+        });
+      }
+      if (key === failedTile) recovered = true;
+      else if (Number(query.get('lod')) < 6) neighbors.add(key);
+      return route.fallback();
+    });
+    for (const reload of [false, true]) {
+      failedTile = '';
+      recovered = false;
+      neighbors.clear();
+      if (reload) await page.reload();
+      else
+        await page.goto(
+          `${url}telemetry-fixture?section=map&reader#world=earth&face=0&x=256&z=256`,
+        );
+      await check.poll(() => neighbors.size, { timeout: 10000 }).toBeGreaterThan(6);
+      await check.poll(() => recovered, { timeout: 15000 }).toBe(true);
+      await check(page.locator('.ow-map-stage canvas')).toBeVisible();
+    }
+  } finally {
+    await page.close();
+  }
+});
+
 it('uses a bounded sample to frame a larger map and fetches the actual overview inside that region', async () => {
   const page = await browser.newPage();
   try {

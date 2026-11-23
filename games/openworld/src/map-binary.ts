@@ -154,7 +154,7 @@ export async function readMapSurfaceBinary(native: Native, q: Surface) {
     'map/surface',
     { world, face, ci, cj, lod, n },
     limit,
-    true,
+    'stream-geometry',
   );
   if (!bytes) return null;
   const v = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
@@ -189,7 +189,7 @@ export async function readMapMeshBinary(native: Native, q: Mesh) {
     'map/mesh',
     { world, face, i, j, lod },
     4 * 1024 * 1024,
-    true,
+    'stream-geometry',
   );
   if (!bytes) return null;
   const v = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);

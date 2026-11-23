@@ -37,6 +37,49 @@ it('lets a peer finish its current frame while new readers see the edited revisi
   expect(await cache.get('before', 's', 10, live(), load)).toEqual(new Uint8Array([42]));
   expect(load).not.toHaveBeenCalled();
 });
+it('shares a per-server queue, skips work abandoned before dispatch and releases slots on failure', async () => {
+  const cache = new OpenworldTerrainCache(
+    { ...options, active: 5, perServer: 4, parallelPerServer: 1, finishStarted: true },
+    Date.now,
+  );
+  const first = Promise.withResolvers<Uint8Array<ArrayBuffer>>();
+  const started: string[] = [];
+  const waiting = new AbortController();
+  const active = cache.get('s/a', 's', 100, live(), async (_, waited) => {
+    started.push('a');
+    expect(waited).toBe(false);
+    return first.promise;
+  });
+  const abandoned = vi.fn(async () => data);
+  const cancelled = cache.get('s/b', 's', 100, waiting.signal, abandoned);
+  const failure = cache.get('s/c', 's', 100, live(), async (_, waited) => {
+    started.push('c');
+    expect(waited).toBe(true);
+    throw new Error('native timeout');
+  });
+  const next = vi.fn(async (_: AbortSignal, waited: boolean) => {
+    started.push('d');
+    expect(waited).toBe(true);
+    return data;
+  });
+  const last = cache.get('s/d', 's', 100, live(), next);
+  const same = cache.get('s/d', 's', 100, live(), next);
+  expect(() => cache.get('s/e', 's', 100, live(), next)).toThrow();
+  await cache.get('t/a', 't', 100, live(), async (_, waited) => {
+    started.push('other-server');
+    expect(waited).toBe(false);
+    return data;
+  });
+  waiting.abort();
+  await expect(cancelled).rejects.toMatchObject({ code: 'game_not_ready' });
+  expect(started).toEqual(['a', 'other-server']);
+  const failed = expect(failure).rejects.toThrow('native timeout');
+  first.resolve(data);
+  await Promise.all([active, failed, last, same]);
+  expect(abandoned).not.toHaveBeenCalled();
+  expect(started).toEqual(['a', 'other-server', 'c', 'd']);
+  expect(await cache.get('s/c', 's', 100, live(), async () => data)).toEqual(data);
+});
 it('bounds recently used binary assets and counts accepted generator jobs through viewer cancellation', async () => {
   let now = 0;
   const cache = new OpenworldTerrainCache(

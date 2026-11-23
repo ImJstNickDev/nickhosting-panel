@@ -1,4 +1,5 @@
 import { expect, it, vi } from 'vitest';
+import { readMapMeshBinary, readMapSurfaceBinary } from './map-binary.js';
 import {
   readMapChanges,
   readMapColumns,
@@ -15,6 +16,43 @@ function fixture(body: Response) {
     fetcher: vi.fn<typeof fetch>(async () => body),
   };
 }
+
+it.each(['surface', 'mesh'] as const)(
+  'distinguishes native %s deadlines from invalid data and absence',
+  async (kind) => {
+    const read = (f: ReturnType<typeof fixture>) =>
+      kind === 'mesh'
+        ? readMapMeshBinary(f, { world: 'earth', face: 0, i: 0, j: 0, lod: 0 })
+        : readMapSurfaceBinary(f, { world: 'earth', face: 0, ci: 0, cj: 0, lod: 5, n: 2 });
+    const expired = fixture(new Response());
+    expired.signal = AbortSignal.abort(new DOMException('expired', 'TimeoutError'));
+    expired.fetcher.mockImplementation(async (_, init) => {
+      init?.signal?.throwIfAborted();
+      throw new Error('expected signal');
+    });
+    for (const source of [expired, fixture(new Response(null, { status: 504 }))]) {
+      await expect(read(source)).rejects.toMatchObject({
+        code: 'game_request_timeout',
+        status: 504,
+      });
+    }
+    expired.signal = AbortSignal.abort();
+    await expect(read(expired)).rejects.toMatchObject({ code: 'integration_unavailable' });
+    for (const [status, code] of [
+      [503, 'game_not_ready'],
+      [429, 'rate_limited'],
+      [403, 'game_authentication_failed'],
+    ] as const)
+      await expect(read(fixture(new Response(null, { status })))).rejects.toMatchObject({
+        code,
+        status,
+      });
+    await expect(read(fixture(new Response(new Uint8Array(4))))).rejects.toMatchObject({
+      code: 'integration_unavailable',
+    });
+    expect(await read(fixture(new Response(null, { status: 404 })))).toBeNull();
+  },
+);
 
 it('passes world keys as data and decodes little endian columns and revision deltas', async () => {
   const native = fixture(

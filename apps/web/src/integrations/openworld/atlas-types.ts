@@ -1,3 +1,5 @@
+import type { AtlasTerrainStatus } from './atlas-backoff.js';
+
 /** All coordinates are metres on a single planetary face. Heights use the game's vertical datum. */
 export type AtlasMode = 'plan' | 'iso' | 'fly';
 export type AtlasFlightLock = 'idle' | 'locked' | 'unavailable';
@@ -49,6 +51,7 @@ export type AtlasOptions = {
   onFlightKeyboardLockChange?: (active: boolean) => void;
   onCamera?: (frame: AtlasFrame) => void;
   onPick?: (px: number, py: number, point: AtlasPoint) => void;
+  onTerrainStatus?: (status: AtlasTerrainStatus) => void;
   onError?: (error: unknown) => void;
   onUnavailable?: () => void;
 };

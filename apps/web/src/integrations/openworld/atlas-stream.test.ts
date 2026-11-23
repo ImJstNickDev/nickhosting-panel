@@ -4,7 +4,7 @@ import { AtlasCamera } from './atlas-camera.js';
 import { decodeAtlas, sampleRaster } from './atlas-geometry.js';
 import { pickAtlas } from './atlas-pick.js';
 import type { Entry } from './atlas-stream.js';
-import { AtlasStream } from './atlas-stream.js';
+import { AtlasStream, requestKey } from './atlas-stream.js';
 import type { AtlasFrame, AtlasOptions } from './atlas-types.js';
 
 describe('Openworld atlas coordinates and geometry', () => {
@@ -298,6 +298,171 @@ describe('Openworld atlas streaming', () => {
     s.update(frame, 'iso');
     await vi.waitFor(() => expect(batches).toHaveLength(2));
     batches[1]?.done(batches[1].requests.map(() => null));
+  });
+  it('keeps loading neighbors after a terrain timeout and retries the missed tile at rest', async () => {
+    vi.useFakeTimers();
+    try {
+      const attempts = new Map<string, number>();
+      const onError = vi.fn(),
+        onTerrainStatus = vi.fn();
+      let slow: string | undefined;
+      const s = stream({
+        onError,
+        onTerrainStatus,
+        load: async (r) => {
+          const key = requestKey(r);
+          const count = (attempts.get(key) ?? 0) + 1;
+          attempts.set(key, count);
+          slow ??= key;
+          if (key === slow && count === 1) throw { status: 504 };
+          return null;
+        },
+      });
+      s.setCoverage(
+        Array.from({ length: 32 }, (_, i) => [i, i] as const),
+        1,
+      );
+      s.update(frame, 'plan');
+      await vi.advanceTimersByTimeAsync(3500);
+      expect(attempts.size).toBeGreaterThan(6);
+      if (!slow) throw new Error('No terrain requested');
+      expect(attempts.get(slow)).toBe(1);
+      s.setPaused(true);
+      await vi.advanceTimersByTimeAsync(10000);
+      expect(attempts.get(slow)).toBe(1);
+      s.setPaused(false);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(attempts.get(slow)).toBe(2);
+      expect(onTerrainStatus.mock.calls.map(([status]) => status)).toEqual(['retrying', null]);
+      expect(onError).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+  it('recovers a repeatedly timing-out survey preview by reading its visible children at the same LOD', async () => {
+    vi.useFakeTimers();
+    try {
+      const load = vi.fn<AtlasOptions['load']>(async (r) => {
+        if (r.kind === 'surface' && r.n === 32) throw { status: 504 };
+        return null;
+      });
+      const s = stream({ load });
+      const bounds = { i0: 0, j0: 0, i1: 255, j1: 255 };
+      const view = { ...frame, bounds };
+      s.setSurvey({ i0: 0, j0: 0, i1: 31, j1: 31 });
+      s.update(view, 'plan');
+      await vi.advanceTimersByTimeAsync(4100);
+      s.update(view, 'plan');
+      await vi.advanceTimersByTimeAsync(13000);
+      const previews = load.mock.calls.map(([r]) => r).filter((r) => r.kind === 'surface');
+      expect(previews.filter((r) => r.n === 32)).toHaveLength(2);
+      expect(
+        previews
+          .filter((r) => r.n === 16 && r.lod === 6)
+          .map(requestKey)
+          .sort(),
+      ).toEqual(['t/0/0/16/6', 't/0/16/16/6', 't/16/0/16/6', 't/16/16/16/6']);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+  it('gives an exhausted tile one new read after its native columns change', async () => {
+    vi.useFakeTimers();
+    try {
+      let healthy = false;
+      const load = vi.fn<AtlasOptions['load']>(async () => {
+        if (!healthy) throw { status: 503 };
+        return null;
+      });
+      const s = stream({ load });
+      s.setCoverage([[16, 16]], 1);
+      s.update(frame, 'plan');
+      await vi.advanceTimersByTimeAsync(120000);
+      const before = load.mock.calls.length;
+      healthy = true;
+      s.invalidate([[0, 0]]);
+      s.update(frame, 'plan');
+      await vi.advanceTimersByTimeAsync(12000);
+      expect(load.mock.calls.length).toBe(before);
+      s.invalidate([[16, 16]]);
+      s.update(frame, 'plan');
+      await vi.advanceTimersByTimeAsync(12000);
+      expect(load.mock.calls.length).toBeGreaterThan(before);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+  it('bounds persistent failures, clears off-screen warnings, and permits manual retry', async () => {
+    vi.useFakeTimers();
+    try {
+      const onTerrainStatus = vi.fn();
+      const load = vi.fn<AtlasOptions['load']>(async () => {
+        throw { status: 503 };
+      });
+      const s = stream({ load, onTerrainStatus });
+      s.setCoverage([[16, 16]], 1);
+      s.update(frame, 'plan');
+      await vi.advanceTimersByTimeAsync(120000);
+      const keys = load.mock.calls.map(([r]) => requestKey(r));
+      expect(keys.length).toBeGreaterThan(0);
+      for (const k of new Set(keys)) expect(keys.filter((key) => key === k)).toHaveLength(3);
+      expect(onTerrainStatus).toHaveBeenLastCalledWith('incomplete');
+      await vi.advanceTimersByTimeAsync(120000);
+      expect(load).toHaveBeenCalledTimes(keys.length);
+      s.retry();
+      s.update(frame, 'plan');
+      await vi.advanceTimersByTimeAsync(1);
+      expect(load.mock.calls.length).toBeGreaterThan(keys.length);
+      s.update({ ...frame, bounds: { i0: 40, i1: 60, j0: 40, j1: 60 } }, 'plan');
+      expect(onTerrainStatus).toHaveBeenLastCalledWith(null);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+  it('throttles a widespread terrain failure after the initial group of reads', async () => {
+    vi.useFakeTimers();
+    try {
+      const load = vi.fn<AtlasOptions['load']>(async () => {
+        throw { status: 504 };
+      });
+      const s = stream({ load });
+      s.setCoverage(
+        Array.from({ length: 32 }, (_, i) => [i, i] as const),
+        1,
+      );
+      s.update(frame, 'plan');
+      await vi.advanceTimersByTimeAsync(999);
+      expect(load).toHaveBeenCalledTimes(6);
+      await vi.advanceTimersByTimeAsync(2001);
+      expect(load).toHaveBeenCalledTimes(8);
+      s.destroy();
+      await vi.advanceTimersByTimeAsync(60000);
+      expect(load).toHaveBeenCalledTimes(8);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+  it('retries failed batches as individual meshes so a slow cell cannot mask its neighbors', async () => {
+    vi.useFakeTimers();
+    try {
+      const loadMeshes = vi.fn<NonNullable<AtlasOptions['loadMeshes']>>(async () => {
+        throw { status: 504 };
+      });
+      const load = vi.fn<AtlasOptions['load']>(async () => null);
+      const s = stream({ load, loadMeshes });
+      const cells = Array.from({ length: 6 }, (_, i) => [i + 12, 15] as const);
+      s.setCoverage(cells, 1);
+      s.update(frame, 'iso');
+      await vi.advanceTimersByTimeAsync(30000);
+      expect(loadMeshes).toHaveBeenCalled();
+      const batch = loadMeshes.mock.calls[0]?.[0];
+      if (!batch) throw new Error('No mesh batch requested');
+      expect(batch.length).toBeGreaterThan(1);
+      const singles = new Set(load.mock.calls.map(([r]) => requestKey(r)));
+      expect(batch.every((r) => singles.has(requestKey(r)))).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
   });
   it('a failure in seed requests does not stop verified live terrain or fan out across more seed tiles', async () => {
     let seedReads = 0,

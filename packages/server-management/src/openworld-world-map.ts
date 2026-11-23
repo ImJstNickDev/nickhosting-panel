@@ -125,7 +125,14 @@ export function createOpenworldWorldMap(options: OpenworldNativeOptions) {
     JSON.stringify([scope.liveKey, ...args]);
   const catalogs = sharedReads<MapCatalog>(24, now, 1500);
   const geometry = new OpenworldTerrainCache(
-    { bytes: 64 * 1024 * 1024, entries: 2048, active: 48, perServer: 16 },
+    {
+      bytes: 64 * 1024 * 1024,
+      entries: 2048,
+      active: 48,
+      perServer: 16,
+      parallelPerServer: 3,
+      finishStarted: true,
+    },
     now,
   );
   const textures = new OpenworldTerrainCache(
@@ -253,9 +260,10 @@ export function createOpenworldWorldMap(options: OpenworldNativeOptions) {
     const [i, j, n] = 'ci' in q ? [q.ci, q.cj, q.n] : [q.i, q.j, 0];
     const prefix = key(scope, q.world);
     const asset = `${prefix}|${[q.face, i, j, n, q.lod, q.stamp ?? ''].join(',')}`;
-    return geometry.get(asset, scope.serverId, 45000, signal, (abort) =>
-      withNative(scope, (native) => load(native, q), true, 8000, abort),
-    );
+    return geometry.get(asset, scope.serverId, 45000, signal, async (abort, waited) => {
+      if (waited) assertCurrentOpenworldScope(scope, await readOpenworldScope(db, scope.serverId));
+      return withNative(scope, (native) => load(native, q), true, 8000, abort);
+    });
   }
   function invalidateGeometry(
     scope: OpenworldScope,

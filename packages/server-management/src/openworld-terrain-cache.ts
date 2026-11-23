@@ -1,12 +1,19 @@
 import { DomainError } from '@nickhosting/core';
 
 type Asset = Uint8Array<ArrayBuffer> | null;
-type Pending = { controller: AbortController; promise: Promise<Asset>; readers: number };
+type Pending = {
+  controller: AbortController;
+  promise: Promise<Asset>;
+  readers: number;
+  start?: () => void;
+};
 type Options = {
   bytes: number;
   entries: number;
   active: number;
   perServer: number;
+  // Admit a bounded set of distinct assets, then start native reads in FIFO order.
+  parallelPerServer?: number;
   // The native generator can finish an accepted CPU job after its HTTP client
   // disappears. Keep it counted and reusable until the request actually settles.
   finishStarted?: boolean;
@@ -15,7 +22,7 @@ type Options = {
 export class OpenworldTerrainCache {
   private readonly cache = new Map<string, { value: Asset; expires: number }>();
   private readonly pending = new Map<string, Pending>();
-  private readonly counts = new Map<string, number>();
+  private readonly admitted = new Map<string, Set<Pending>>();
   private size = 0;
   private running = 0;
   constructor(
@@ -40,7 +47,7 @@ export class OpenworldTerrainCache {
     server: string,
     ttl: number,
     signal: AbortSignal,
-    read: (signal: AbortSignal) => Promise<Asset>,
+    read: (signal: AbortSignal, waited: boolean) => Promise<Asset>,
   ): Promise<Asset> {
     if (signal.aborted) return Promise.reject(new DomainError('game_not_ready'));
     const ready = this.cache.get(key);
@@ -52,14 +59,21 @@ export class OpenworldTerrainCache {
     this.remove(key);
     let task = this.pending.get(key);
     if (!task) {
-      const count = this.counts.get(server) ?? 0;
-      if (this.running >= this.options.active || count >= this.options.perServer)
+      const jobs = this.admitted.get(server) ?? new Set<Pending>();
+      if (this.running >= this.options.active || jobs.size >= this.options.perServer)
         throw new DomainError('rate_limited');
       this.running++;
-      this.counts.set(server, count + 1);
+      this.admitted.set(server, jobs);
       const controller = new AbortController();
-      const promise = Promise.resolve()
-        .then(() => read(controller.signal))
+      const slot = Promise.withResolvers<void>();
+      const parallel = this.options.parallelPerServer;
+      const waited =
+        parallel !== undefined && Array.from(jobs).filter((job) => !job.start).length >= parallel;
+      const promise = slot.promise
+        .then(() => {
+          controller.signal.throwIfAborted();
+          return read(controller.signal, waited);
+        })
         .then((value) => {
           if (controller.signal.aborted) throw new DomainError('conflict');
           if (
@@ -79,12 +93,23 @@ export class OpenworldTerrainCache {
         .finally(() => {
           if (this.pending.get(key)?.controller === controller) this.pending.delete(key);
           this.running--;
-          const remaining = (this.counts.get(server) ?? 1) - 1;
-          if (remaining) this.counts.set(server, remaining);
-          else this.counts.delete(server);
+          jobs.delete(job);
+          if (!jobs.size) this.admitted.delete(server);
+          else if (!job.start) {
+            for (const next of jobs) {
+              if (!next.start || next.controller.signal.aborted) continue;
+              next.start();
+              delete next.start;
+              break;
+            }
+          }
         });
-      task = { controller, promise, readers: 0 };
-      this.pending.set(key, task);
+      const job: Pending = { controller, promise, readers: 0 };
+      if (waited) job.start = slot.resolve;
+      else slot.resolve();
+      jobs.add(job);
+      this.pending.set(key, job);
+      task = job;
     }
     return this.subscribe(key, task, signal);
   }
@@ -100,9 +125,11 @@ export class OpenworldTerrainCache {
       };
       const abort = () => {
         detach();
-        if (task.readers === 0 && !this.options.finishStarted) {
+        if (task.readers === 0 && (task.start || !this.options.finishStarted)) {
           if (this.pending.get(key) === task) this.pending.delete(key);
           task.controller.abort();
+          // Release a cancelled waiter without spending a native slot on it.
+          task.start?.();
         }
         reject(new DomainError('game_not_ready'));
       };

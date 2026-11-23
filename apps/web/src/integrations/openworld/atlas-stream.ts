@@ -1,4 +1,4 @@
-import { AtlasBackoff } from './atlas-backoff.js';
+import { AtlasBackoff, AtlasTileRetries } from './atlas-backoff.js';
 import { clamp } from './atlas-camera.js';
 import { sampleRaster, type Terrain } from './atlas-geometry.js';
 import type {
@@ -26,7 +26,8 @@ export const requestKey = (r: AtlasRequest) =>
     : r.kind === 'mesh'
       ? `v/${r.i}/${r.j}/${r.lod}`
       : `s/${r.z}/${r.x}/${r.y}`;
-const chunkCount = [4, 8, 8, 16, 32, 32, 32] as const;
+// A cold native surface request may have to read every column in the block.
+const chunkCount = [2, 2, 4, 4, 8, 8, 8] as const;
 const cacheBudget = 96 * 1024 * 1024;
 const contains = (b: AtlasBounds, i: number, j: number) =>
   i >= b.i0 && i <= b.i1 && j >= b.j0 && j <= b.j1;
@@ -42,7 +43,10 @@ export class AtlasStream {
     number,
     { key: string; resolve: (value: Terrain) => void; reject: (error: unknown) => void }
   >();
-  private readonly failures = new Map<string, number>();
+  private readonly evictedUntil = new Map<string, number>();
+  private readonly tileRetries: AtlasTileRetries;
+  private readonly splitSurfaces = new Set<string>();
+  private readonly smallestSurface: number[] = [...chunkCount];
   private readonly worker: Worker;
   private wanted = new Map<string, Task>();
   private queue: Task[] = [];
@@ -78,6 +82,7 @@ export class AtlasStream {
         (e) => options.onError?.(e),
       );
     this.backoff = { live: backoff(), seed: backoff() };
+    this.tileRetries = new AtlasTileRetries(() => this.pump(), options.onTerrainStatus);
     this.seedEdge = options.edge;
     this.worker = new Worker(new URL('./atlas-worker.ts', import.meta.url), { type: 'module' });
     this.worker.onmessage = ({
@@ -128,10 +133,24 @@ export class AtlasStream {
     return this.stride === 1 && this.listed(i, j);
   }
   private surfaceAt(i: number, j: number, lod: number) {
-    const n = chunkCount[lod] ?? 32;
-    return this.cache.get(
-      requestKey({ kind: 'surface', ci: Math.floor(i / n) * n, cj: Math.floor(j / n) * n, n, lod }),
-    );
+    // Wide surveys can use larger previews. Keep them available while zooming in.
+    const size = chunkCount[lod] ?? 8;
+    const largest = lod === 6 ? 32 : size;
+    let stale: Entry | undefined;
+    for (let n = this.smallestSurface[lod] ?? size; n <= largest; n *= 2) {
+      const entry = this.cache.get(
+        requestKey({
+          kind: 'surface',
+          ci: Math.floor(i / n) * n,
+          cj: Math.floor(j / n) * n,
+          n,
+          lod,
+        }),
+      );
+      if (entry && !entry.stale) return entry;
+      if (entry && this.wanted.has(entry.key)) stale ??= entry;
+    }
+    return stale;
   }
   seedAllowed(i: number, j: number) {
     if (!this.seed || (this.audited && !contains(this.audited, i, j))) return false;
@@ -154,8 +173,10 @@ export class AtlasStream {
     this.paused = paused;
     this.backoff.live.pause(paused);
     this.backoff.seed.pause(paused);
-    if (paused) for (const job of this.pending.values()) job.abort.abort();
-    else this.pump();
+    if (paused) {
+      this.tileRetries.wakeAt(Infinity);
+      for (const job of this.pending.values()) job.abort.abort();
+    } else this.pump();
   }
   needsSeed(bounds: AtlasBounds, x: number, y: number, tileMetres: number) {
     const i0 = Math.max(bounds.i0, Math.floor((x * tileMetres) / 16));
@@ -205,13 +226,18 @@ export class AtlasStream {
         for (let i = r.ci; i < r.ci + r.n; i++) if (keys.has(`${i},${j}`)) return true;
       return false;
     };
+    this.tileRetries.invalidate((key) => {
+      const task = this.wanted.get(key);
+      return !!task && affected(task.request);
+    });
     for (const entry of this.cache.values()) if (affected(entry.request)) entry.stale = true;
     for (const job of this.pending.values()) if (affected(job.request)) job.abort.abort();
     this.generation++;
   }
   retry() {
     this.previousPlan = null;
-    this.failures.clear();
+    this.evictedUntil.clear();
+    this.tileRetries.reset();
     this.backoff.live.reset();
     this.backoff.seed.reset();
     this.generation++;
@@ -258,8 +284,14 @@ export class AtlasStream {
     const dist = (i: number, j: number) => Math.hypot(i - cx, j - cz);
     const rasterMpp = mode === 'plan' ? mpp : mpp * 4;
     const lod = clamp(Math.round(Math.log2(Math.max(0.25, rasterMpp) / 0.25)), 0, 6);
+    const spanColumns = Math.max(b.i1 - b.i0 + 1, b.j1 - b.j0 + 1);
+    const surveySize = spanColumns <= 96 ? 8 : spanColumns <= 192 ? 16 : 32;
+    const previewSize = this.survey
+      ? surveySize
+      : Math.min(32, Math.max(chunkCount[6], this.stride));
+    const tileSize = (level: number) => (level === 6 ? previewSize : (chunkCount[level] ?? 8));
     const terrain = (i: number, j: number, level: number, priority: number) => {
-      const n = chunkCount[level] ?? 32;
+      const n = tileSize(level);
       add(
         { kind: 'surface', ci: Math.floor(i / n) * n, cj: Math.floor(j / n) * n, n, lod: level },
         priority,
@@ -277,7 +309,7 @@ export class AtlasStream {
     const consider = (i: number, j: number, s: number) => {
       if (i > b.i1 || i + s <= b.i0 || j > b.j1 || j + s <= b.j0) return;
       const d = dist(i, j);
-      // Start with an entire 512m block. Finer requests can then replace it without a blank frame.
+      // Keep a preview visible until the finer terrain arrives.
       terrain(i, j, 6, d * 0.12);
       if (view.detailBounds && !contains(view.detailBounds, i, j)) {
         // Screen-space terrain for the distant skyline with true native height and materials.
@@ -286,14 +318,14 @@ export class AtlasStream {
           3,
           6,
         );
-        if (s <= (chunkCount[level] ?? 32)) terrain(i, j, level, d + 4);
+        if (s <= tileSize(level)) terrain(i, j, level, d + 4);
         return;
       }
       if (s === 1) {
         const hasVoxelDetail = mesh(i, j, d);
         terrain(i, j, hasVoxelDetail ? Math.max(4, lod) : lod, d + 2);
       } else {
-        const n = chunkCount[lod] ?? 32;
+        const n = tileSize(lod);
         if (s <= n) terrain(i, j, lod, d + 2);
       }
     };
@@ -305,23 +337,31 @@ export class AtlasStream {
         sj1 = Math.min(b.j1, this.survey.j1);
       if (si0 <= si1 && sj0 <= sj1) {
         // Bounded, centre-out exploration if the native face exceeds its safe enumeration limit.
-        const baseI = clamp(Math.floor(cx / 32), Math.floor(si0 / 32), Math.floor(si1 / 32)),
-          baseJ = clamp(Math.floor(cz / 32), Math.floor(sj0 / 32), Math.floor(sj1 / 32));
+        const baseI = clamp(
+            Math.floor(cx / previewSize),
+            Math.floor(si0 / previewSize),
+            Math.floor(si1 / previewSize),
+          ),
+          baseJ = clamp(
+            Math.floor(cz / previewSize),
+            Math.floor(sj0 / previewSize),
+            Math.floor(sj1 / previewSize),
+          );
         let visited = 0;
         const rMax = Math.max(
-          baseI - Math.floor(si0 / 32),
-          Math.floor(si1 / 32) - baseI,
-          baseJ - Math.floor(sj0 / 32),
-          Math.floor(sj1 / 32) - baseJ,
+          baseI - Math.floor(si0 / previewSize),
+          Math.floor(si1 / previewSize) - baseI,
+          baseJ - Math.floor(sj0 / previewSize),
+          Math.floor(sj1 / previewSize) - baseJ,
         );
-        const minI = Math.floor(si0 / 32) - baseI,
-          maxI = Math.floor(si1 / 32) - baseI;
-        const minJ = Math.floor(sj0 / 32) - baseJ,
-          maxJ = Math.floor(sj1 / 32) - baseJ;
+        const minI = Math.floor(si0 / previewSize) - baseI,
+          maxI = Math.floor(si1 / previewSize) - baseI;
+        const minJ = Math.floor(sj0 / previewSize) - baseJ,
+          maxJ = Math.floor(sj1 / previewSize) - baseJ;
         const visit = (di: number, dj: number) => {
-          const i = (baseI + di) * 32,
-            j = (baseJ + dj) * 32;
-          terrain(i, j, 6, dist(i + 16, j + 16) * 0.12);
+          const i = (baseI + di) * previewSize,
+            j = (baseJ + dj) * previewSize;
+          terrain(i, j, 6, dist(i + previewSize / 2, j + previewSize / 2) * 0.12);
           visited++;
         };
         for (let r = 0; r <= rMax && visited < 192; r++) {
@@ -390,7 +430,29 @@ export class AtlasStream {
         schedule(b, clamp(Math.floor(Math.log2(this.seedEdge / (width / 4))), 0, zoom));
       }
     }
+    // Keep the same LOD when a slow square must be read in smaller pieces.
+    // A split replaces one request with at most four visible children.
+    if (this.splitSurfaces.size) {
+      const visibleSplits = new Set<string>();
+      for (const [key, task] of wanted) {
+        const r = task.request;
+        if (r.kind !== 'surface' || !this.splitSurfaces.has(key)) continue;
+        wanted.delete(key);
+        visibleSplits.add(key);
+        const n = r.n / 2;
+        for (const ci of [r.ci, r.ci + n]) {
+          for (const cj of [r.cj, r.cj + n]) {
+            if (ci > b.i1 || cj > b.j1 || ci + n <= b.i0 || cj + n <= b.j0) continue;
+            add({ ...r, n, ci, cj }, task.priority + 0.001 * dist(ci + n / 2, cj + n / 2));
+          }
+        }
+      }
+      for (const key of this.splitSurfaces)
+        if (!visibleSplits.has(key)) this.splitSurfaces.delete(key);
+    }
     this.wanted = wanted;
+    this.tileRetries.retain(wanted);
+    for (const key of this.evictedUntil.keys()) if (!wanted.has(key)) this.evictedUntil.delete(key);
     this.queue = [...wanted.values()]
       .filter((task) => {
         const entry = this.cache.get(task.key);
@@ -432,17 +494,33 @@ export class AtlasStream {
     )
       return false;
     const cached = this.cache.get(task.key);
-    return (!cached || cached.stale) && (this.failures.get(task.key) ?? 0) <= Date.now();
+    return (!cached || cached.stale) && (this.evictedUntil.get(task.key) ?? 0) <= Date.now();
   }
   private pump() {
     if (this.disposed || this.paused) return;
     const pending = [...this.pending.values()];
+    const now = Date.now();
+    let wakeAt = Infinity;
+    let liveBusy = pending.some((job) => job.request.kind !== 'seed');
     let seedBusy = pending.some((job) => job.request.kind === 'seed');
     let slots = 6 - pending.filter((job) => !job.batch).length - Number(this.batchActive);
     for (const task of this.queue) {
       if (slots <= 0) break;
       if ((task.request.kind === 'seed' && seedBusy) || !this.eligible(task)) continue;
-      if (this.options.loadMeshes && task.request.kind === 'mesh') {
+      if (task.request.kind !== 'seed') {
+        if (this.tileRetries.probing && liveBusy) continue;
+        const at = this.tileRetries.readyAt(task.key);
+        if (at > now) {
+          wakeAt = Math.min(wakeAt, at);
+          continue;
+        }
+      }
+      if (
+        this.options.loadMeshes &&
+        task.request.kind === 'mesh' &&
+        !this.tileRetries.probing &&
+        !this.tileRetries.has(task.key)
+      ) {
         if (this.batchActive) continue;
         this.startBatch(task.request.lod, this.options.loadMeshes);
       } else {
@@ -451,8 +529,10 @@ export class AtlasStream {
         if (task.request.kind === 'seed') seedBusy = true;
         void this.load(task, abort);
       }
+      if (task.request.kind !== 'seed') liveBusy = true;
       slots--;
     }
+    this.tileRetries.wakeAt(wakeAt);
   }
   private startBatch(lod: number, loader: NonNullable<AtlasOptions['loadMeshes']>) {
     const batch = new AbortController();
@@ -460,7 +540,13 @@ export class AtlasStream {
     const jobs: { task: Task; abort: AbortController }[] = [];
     for (const task of this.queue) {
       const r = task.request;
-      if (r.kind !== 'mesh' || r.lod !== lod || !this.eligible(task)) continue;
+      if (
+        r.kind !== 'mesh' ||
+        r.lod !== lod ||
+        this.tileRetries.has(task.key) ||
+        !this.eligible(task)
+      )
+        continue;
       const abort = new AbortController();
       this.pending.set(task.key, { abort, request: r, batch: true });
       requests.push(r);
@@ -507,6 +593,7 @@ export class AtlasStream {
         : null;
       if (this.disposed || abort.signal.aborted) return;
       this.remove(task.key);
+      if (task.request.kind !== 'seed') this.tileRetries.succeed(task.key);
       const size =
         value?.kind === 'raster'
           ? value.pixels.byteLength
@@ -535,16 +622,35 @@ export class AtlasStream {
           this.remove(c.key);
           this.previousPlan = null;
           // Defer eviction victims in a scene that exceeds memory capacity.
-          if (this.wanted.has(c.key)) this.failures.set(c.key, Date.now() + 30000);
+          if (this.wanted.has(c.key)) this.evictedUntil.set(c.key, Date.now() + 30000);
         }
       }
       this.generation++;
       this.changed();
     } catch (e) {
       if (!this.disposed && !abort.signal.aborted) {
-        // One gesture must not fan a gateway/rate-limit failure out across every remaining tile.
-        const family = task.request.kind === 'seed' ? 'seed' : 'live';
-        this.backoff[family].fail(e);
+        const status = typeof e === 'object' && e !== null && 'status' in e ? e.status : null;
+        if (task.request.kind !== 'seed' && (status === 503 || status === 504)) {
+          const r = task.request;
+          const previouslyFailed = this.tileRetries.has(task.key);
+          this.tileRetries.fail(task.key);
+          if (
+            status === 504 &&
+            r.kind === 'surface' &&
+            r.n > 1 &&
+            previouslyFailed &&
+            this.splitSurfaces.size < 24
+          ) {
+            this.splitSurfaces.add(task.key);
+            this.smallestSurface[r.lod] = Math.min(this.smallestSurface[r.lod] ?? r.n, r.n / 2);
+            this.previousPlan = null;
+            this.generation++;
+            this.changed();
+          }
+        } else {
+          const family = task.request.kind === 'seed' ? 'seed' : 'live';
+          this.backoff[family].fail(e);
+        }
       }
     } finally {
       this.pending.delete(task.key);
@@ -586,7 +692,8 @@ export class AtlasStream {
     this.cache.clear();
     this.visible = [];
     this.queue = [];
-    this.failures.clear();
+    this.evictedUntil.clear();
+    this.tileRetries.reset();
   }
 }
 function sameBounds(a: AtlasBounds | undefined, b: AtlasBounds | undefined) {

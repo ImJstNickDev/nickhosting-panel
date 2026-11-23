@@ -1,4 +1,12 @@
 const messages: Record<string, [string, string]> = {
+  'map.atlas.terrainRetrying': [
+    'Retrying terrain tiles…',
+    'Nuovo tentativo di caricamento dei settori…',
+  ],
+  'map.atlas.terrainIncomplete': [
+    'Some terrain tiles could not be loaded.',
+    'Alcuni settori della mappa non sono stati caricati.',
+  ],
   'map.atlas.feature': ['Seed deposits and structures', 'Giacimenti e strutture del seed'],
   'map.atlas.featureOff': ['None', 'Nessuno'],
   'map.atlas.featureZoom': [
