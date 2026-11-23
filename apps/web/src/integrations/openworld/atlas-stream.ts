@@ -1,9 +1,11 @@
 import { AtlasBackoff, AtlasTileRetries } from './atlas-backoff.js';
 import { clamp } from './atlas-camera.js';
 import { sampleRaster, type Terrain } from './atlas-geometry.js';
+import { usesVoxelSprite } from './atlas-materials.js';
 import type {
   AtlasBounds,
   AtlasFrame,
+  AtlasMaterial,
   AtlasMode,
   AtlasOptions,
   AtlasPoint,
@@ -48,6 +50,7 @@ export class AtlasStream {
   private readonly splitSurfaces = new Set<string>();
   private readonly smallestSurface: number[] = [...chunkCount];
   private readonly worker: Worker;
+  private spriteIds = new Set<number>();
   private wanted = new Map<string, Task>();
   private queue: Task[] = [];
   // Coverage, scale and intersecting column boundaries govern the requested set.
@@ -102,6 +105,23 @@ export class AtlasStream {
       this.workers.clear();
       if (!this.disposed) this.options.onUnavailable?.();
     };
+  }
+  setPalette(materials: readonly AtlasMaterial[]) {
+    const next = new Set(materials.filter(usesVoxelSprite).map((m) => m.id));
+    const old = this.spriteIds;
+    if (old.size === next.size && [...old].every((id) => next.has(id))) return;
+    this.spriteIds = next;
+    // The palette may arrive after the first meshes or change on refresh.
+    for (const entry of this.cache.values()) {
+      if (
+        entry.value?.kind === 'quads' &&
+        entry.value.materials.some((id) => old.has(id) !== next.has(id))
+      )
+        entry.stale = true;
+    }
+    this.previousPlan = null;
+    this.generation++;
+    this.changed();
   }
   setCoverage(
     columns: readonly (readonly [number, number])[],
@@ -582,16 +602,30 @@ export class AtlasStream {
     try {
       const bytes = await (batched ?? this.options.load(task.request, abort.signal));
       if (this.disposed || abort.signal.aborted) return;
+      const spriteIds = this.spriteIds;
       const value = bytes
         ? await new Promise<Terrain>((resolve, reject) => {
             const id = ++this.serial;
             this.workers.set(id, { key: task.key, resolve, reject });
-            this.worker.postMessage({ id, request: task.request, face: this.options.face, bytes }, [
-              bytes,
-            ]);
+            this.worker.postMessage(
+              {
+                id,
+                request: task.request,
+                face: this.options.face,
+                spriteIds: task.request.kind === 'mesh' ? spriteIds : undefined,
+                bytes,
+              },
+              [bytes],
+            );
           })
         : null;
       if (this.disposed || abort.signal.aborted) return;
+      if (
+        value?.kind === 'quads' &&
+        spriteIds !== this.spriteIds &&
+        value.materials.some((id) => spriteIds.has(id) !== this.spriteIds.has(id))
+      )
+        return;
       this.remove(task.key);
       if (task.request.kind !== 'seed') this.tileRetries.succeed(task.key);
       const size =

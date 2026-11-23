@@ -211,6 +211,7 @@ export class AtlasScene implements AtlasController {
   setPalette(materials: readonly AtlasMaterial[], voxelSize = 0.25) {
     this.materials = materials;
     this.voxelSize = Number.isFinite(voxelSize) && voxelSize > 0 ? voxelSize : 0.25;
+    this.stream.setPalette(materials);
     this.gpu.setPalette(materials, this.voxelSize);
     this.redraw();
   }

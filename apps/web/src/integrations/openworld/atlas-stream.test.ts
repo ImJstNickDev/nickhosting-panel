@@ -176,6 +176,66 @@ describe('Openworld atlas streaming', () => {
     expect(s.visible).not.toBe(recorded);
     expect(load.mock.calls.length).toBeGreaterThan(count);
   });
+  it('discards a mesh decoded before its material palette arrives', async () => {
+    const requests: { sprite: boolean; finish: () => void }[] = [];
+    vi.stubGlobal(
+      'Worker',
+      class {
+        onmessage?: (event: { data: { id: number; terrain: unknown } }) => void;
+        terminate() {}
+        postMessage({ id, spriteIds }: { id: number; spriteIds: Set<number> }) {
+          const sprite = spriteIds.has(10);
+          requests.push({
+            sprite,
+            finish: () =>
+              this.onmessage?.({
+                data: {
+                  id,
+                  terrain: {
+                    kind: 'quads',
+                    minY: 0,
+                    maxY: 1,
+                    regionX: 16,
+                    regionZ: 16,
+                    materials: [10],
+                    opaque: new Uint16Array([0, 0, 0, 1, 1, 1, 10, sprite ? 8 : 2]),
+                    blend: new Uint16Array(),
+                  },
+                },
+              }),
+          });
+        }
+      },
+    );
+    const s = new AtlasStream(
+      {
+        edge: 512,
+        face: 0,
+        initialView: frame,
+        load: async (r) => (r.kind === 'mesh' ? new ArrayBuffer(32) : null),
+      },
+      () => {},
+    );
+    streams.push(s);
+    s.setCoverage([[16, 16]], 1);
+    s.update(frame, 'iso');
+    await vi.waitFor(() => expect(requests.map((r) => r.sprite)).toEqual([false]));
+    const palette = [{ id: 10, key: 'torch', color: '#a27f43', render: 'cutout' }];
+    s.setPalette(palette);
+    requests[0]?.finish();
+    await vi.waitFor(() => expect(requests.map((r) => r.sprite)).toEqual([false, true]));
+    s.update(frame, 'iso');
+    expect(s.visible.some((e) => e.request.kind === 'mesh')).toBe(false);
+    requests[1]?.finish();
+    await vi.waitFor(() => {
+      s.update(frame, 'iso');
+      const tile = s.visible.find((e) => e.request.kind === 'mesh')?.value;
+      expect(tile?.kind === 'quads' && tile.opaque[7]).toBe(8);
+    });
+    s.setPalette(palette);
+    s.update(frame, 'iso');
+    expect(requests).toHaveLength(2);
+  });
   it('honors Retry-After once per family, pauses in background and stops automatic retries', async () => {
     vi.useFakeTimers();
     try {

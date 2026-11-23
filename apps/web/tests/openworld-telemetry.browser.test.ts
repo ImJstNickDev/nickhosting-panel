@@ -2696,6 +2696,56 @@ it('keeps the same bridge across the three projections', async () => {
     await page.close();
   }
 }, 90_000);
+it('keeps water visible over the riverbed when textured detail replaces the preview', async () => {
+  const page = await browser.newPage({ viewport: { width: 1100, height: 850 } });
+  try {
+    const textures = completedMapTextures(page);
+    await mapRoutes(page, { bridge: true, radius: 3 });
+    await page.goto(
+      `${url}telemetry-fixture?section=map&cartographer#world=earth&face=0&x=239&z=252&y=17`,
+    );
+    const canvas = page.locator('.ow-map-stage canvas');
+    const pin = page.locator('.ow-map-location');
+    await check(pin).toBeVisible();
+    const waterColor = async () => {
+      await canvas.scrollIntoViewIfNeeded();
+      const point = await pin.evaluate((el) => {
+        const stage = el.closest('.ow-map-stage')?.querySelector('canvas')?.getBoundingClientRect();
+        if (!stage) throw Error('Missing map canvas');
+        const [x, y] = (el as HTMLElement).style.translate.split(' ').map(Number.parseFloat);
+        return { x: Math.round(stage.x + (x ?? 0)), y: Math.round(stage.y + (y ?? 0)) };
+      });
+      const patch = await page.screenshot({
+        clip: { x: point.x - 2, y: point.y - 2, width: 5, height: 5 },
+        style: '.ow-map-location { visibility: hidden !important; }',
+      });
+      return page.evaluate(async (image) => {
+        const blob = await (await fetch(`data:image/png;base64,${image}`)).blob();
+        const bitmap = await createImageBitmap(blob);
+        const ctx = new OffscreenCanvas(5, 5).getContext('2d');
+        if (!ctx) throw Error('Missing pixel sampler');
+        ctx.drawImage(bitmap, 0, 0, 5, 5);
+        bitmap.close();
+        const pixels = ctx.getImageData(0, 0, 5, 5).data;
+        let blueMinusRed = 0;
+        for (let p = 0; p < pixels.length; p += 4) {
+          blueMinusRed += (pixels[p + 2] ?? 0) - (pixels[p] ?? 0);
+        }
+        return blueMinusRed / 25;
+      }, patch.toString('base64'));
+    };
+    await check.poll(waterColor, { message: '2D river preview' }).toBeGreaterThan(8);
+    for (const mode of ['Isometric', 'Free flight']) {
+      await page.getByRole('button', { name: mode, exact: true }).click();
+      await check.poll(() => textures.has(3), { timeout: 20000 }).toBe(true);
+      await check
+        .poll(waterColor, { message: `${mode} textured water`, timeout: 12000 })
+        .toBeGreaterThan(8);
+    }
+  } finally {
+    await page.close();
+  }
+});
 it('keeps an isometric drag attached to its original plane while terrain streams', async () => {
   const page = await browser.newPage({
     viewport: { width: 1680, height: 1050 },

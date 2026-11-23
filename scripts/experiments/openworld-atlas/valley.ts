@@ -9,7 +9,7 @@ export const materialPalette = [
   { id: 0, key: 'air', color: '#000000', render: 'opaque' },
   { id: 1, key: 'grass', color: '#66974f', render: 'opaque' },
   { id: 2, key: 'stone', color: '#857d75', render: 'opaque' },
-  { id: 3, key: 'water', color: '#3989a7', render: 'blended', liquid: true },
+  { id: 3, key: 'water', color: '#599fea', render: 'blended', liquid: true },
   { id: 4, key: 'planks', color: '#b78753', render: 'opaque' },
   { id: 5, key: 'sand', color: '#d2bd84', render: 'opaque' },
   { id: 6, key: 'leaves', color: '#477943', render: 'opaque' },
@@ -240,7 +240,8 @@ export function texture(id: number): Buffer {
       const n = ((x * 11 + y * 31 + id * 13) % 19) - 9 + (id === 4 && y % 8 === 0 ? -30 : 0);
       for (let c = 0; c < 3; c++)
         pixel[at + c] = Math.min(255, Math.max(0, ((rgb >> ((2 - c) * 8)) & 255) + n));
-      pixel[at + 3] = id === 9 && (x + y) % 6 < 2 ? 0 : 255;
+      // The a1.2.9 water albedo has alpha 61 even in the middle of a river.
+      pixel[at + 3] = id === 3 ? 61 : id === 9 && (x + y) % 6 < 2 ? 0 : 255;
     }
   const pack = (tag: string, data: Buffer) => {
     const b = Buffer.alloc(12 + data.length);

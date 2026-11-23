@@ -1,6 +1,7 @@
 import { AtlasBackoff } from './atlas-backoff.js';
 import type { AtlasCamera } from './atlas-camera.js';
 import { type QuadBatch, type Raster, regionColumns } from './atlas-geometry.js';
+import { materialAppearance } from './atlas-materials.js';
 import { pickAtlas } from './atlas-pick.js';
 import {
   coverageFragment,
@@ -133,7 +134,7 @@ export class AtlasGpu {
   private readonly loadingImages = new Map<number, AbortController>();
   private readonly imageBackoff: AtlasBackoff;
   private readonly failedImages = new Set<number>();
-  private readonly textureLut = new Float32Array(256 * 256 * 2);
+  private readonly textureLut = new Float32Array(256 * 256 * 4);
   private readonly coverVao;
   private readonly coverBuffer;
   private coverSize = 0;
@@ -169,7 +170,7 @@ export class AtlasGpu {
     this.mask = texture(gl, gl.R8UI, 1, 1, gl.RED_INTEGER, gl.UNSIGNED_BYTE, new Uint8Array(1));
     this.palette = texture(gl, gl.RGBA8, 256, 256, gl.RGBA, gl.UNSIGNED_BYTE, null);
     this.biomes = texture(gl, gl.RGBA8, 256, 1, gl.RGBA, gl.UNSIGNED_BYTE, null);
-    this.textureIndex = texture(gl, gl.RG32F, 256, 256, gl.RG, gl.FLOAT, this.textureLut);
+    this.textureIndex = texture(gl, gl.RGBA32F, 256, 256, gl.RGBA, gl.FLOAT, this.textureLut);
     this.textures = gl.createTexture();
     this.slots = Math.min(512, gl.getParameter(gl.MAX_ARRAY_TEXTURE_LAYERS) as number);
     gl.bindTexture(gl.TEXTURE_2D_ARRAY, this.textures);
@@ -207,8 +208,11 @@ export class AtlasGpu {
       colors[p] = value >>> 16;
       colors[p + 1] = value >>> 8;
       colors[p + 2] = value;
-      colors[p + 3] = 255;
-      this.textureLut[m.id * 2 + 1] = m.tileMeters && m.tileMeters > 0 ? m.tileMeters : 1;
+      const appearance = materialAppearance(m);
+      colors[p + 3] = appearance.surfaceKind;
+      this.textureLut[p + 2] = appearance.opacity;
+      this.textureLut[p + 3] = appearance.glow;
+      this.textureLut[p + 1] = m.tileMeters && m.tileMeters > 0 ? m.tileMeters : 1;
       this.materialStatus.set(m.id, m);
     }
     gl.activeTexture(gl.TEXTURE1);
@@ -217,7 +221,7 @@ export class AtlasGpu {
     this.voxelSize = voxel;
     gl.activeTexture(gl.TEXTURE4);
     gl.bindTexture(gl.TEXTURE_2D, this.textureIndex);
-    gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, 256, 256, gl.RG, gl.FLOAT, this.textureLut);
+    gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, 256, 256, gl.RGBA, gl.FLOAT, this.textureLut);
   }
   setBiomes(biomes: readonly { id: number; color: string }[]) {
     const colors = new Uint8Array(256 * 4);
@@ -245,10 +249,10 @@ export class AtlasGpu {
       id >>> 8,
       1,
       1,
-      gl.RG,
+      gl.RGBA,
       gl.FLOAT,
       this.textureLut,
-      id * 2,
+      id * 4,
     );
   }
   setPaused(paused: boolean) {
@@ -291,6 +295,7 @@ export class AtlasGpu {
             resizeHeight: 32,
             resizeQuality: 'pixelated',
             imageOrientation: 'flipY',
+            premultiplyAlpha: 'none',
           });
           if (this.disposed || ac.signal.aborted) return;
           let slot = this.loadedImages.size;
@@ -299,7 +304,7 @@ export class AtlasGpu {
             if (unused === undefined) return;
             slot = this.loadedImages.get(unused) ?? 0;
             this.loadedImages.delete(unused);
-            this.textureLut[unused * 2] = 0;
+            this.textureLut[unused * 4] = 0;
             this.syncTextureIndex(unused);
           }
           const gl = this.gl;
@@ -322,7 +327,7 @@ export class AtlasGpu {
           }
           gl.bindFramebuffer(gl.READ_FRAMEBUFFER, null);
           this.loadedImages.set(id, slot);
-          this.textureLut[id * 2] = slot + 1;
+          this.textureLut[id * 4] = slot + 1;
           this.syncTextureIndex(id);
         } catch (error) {
           if (!ac.signal.aborted && !this.disposed) {
