@@ -166,11 +166,15 @@
   display: grid;
   gap: 9px;
 }
+.ow-factory-battery > div:first-child,
+.ow-factory-battery .ow-metrics {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  column-gap: 20px;
+  overflow-wrap: anywhere;
+}
 .ow-factory-battery > div:first-child {
-  display: flex;
   align-items: baseline;
-  justify-content: space-between;
-  gap: 12px;
   font-size: 0.88rem;
 }
 .ow-factory-battery h4 {
@@ -180,9 +184,6 @@
   width: 100%;
   height: 14px;
   accent-color: var(--ow-primary);
-}
-.ow-factory-battery .ow-metrics {
-  grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 .ow-factory-memory summary {
   cursor: pointer;

@@ -125,6 +125,31 @@ async function open(locale: 'en' | 'it', width: number) {
   );
   return page;
 }
+it.each([
+  { locale: 'en', width: 1280, capacityJ: 0 },
+  { locale: 'it', width: 360, capacityJ: 36000 },
+] as const)(
+  'aligns battery status and capacity at $width px',
+  async ({ locale, width, capacityJ }) => {
+    const page = await open(locale, width);
+    try {
+      await page.route('**/openworld/factories', (route) =>
+        route.fulfill({ json: { ...sample, power: { ...sample.power, capacityJ } } }),
+      );
+      await page.goto(url);
+      const battery = page.locator('.ow-factory-battery');
+      const status = battery.locator('strong').first();
+      await see(status).toBeVisible();
+      const left = (el: Element) => el.getBoundingClientRect().left;
+      expect(await status.evaluate(left)).toBeCloseTo(
+        await battery.locator('dt').nth(1).evaluate(left),
+        0,
+      );
+    } finally {
+      await page.close();
+    }
+  },
+);
 it('shows measured and target factory rates, power and transit; only valid planetary columns link to the map', async () => {
   const page = await open('en', 1280);
   try {
