@@ -36,6 +36,7 @@ export class AtlasScene implements AtlasController {
   private readonly keys = new Set<string>();
   private frameRequest = 0;
   private notifyTimer: ReturnType<typeof setTimeout> | undefined;
+  private settleTimer: ReturnType<typeof setTimeout> | undefined;
   private planDirty = true;
   private lastPlan = -Infinity;
   private previousTime = 0;
@@ -151,6 +152,13 @@ export class AtlasScene implements AtlasController {
     this.gpu.draw(this.camera, this.stream, frame);
     this.options.onFrame?.(frame.yaw);
     if (this.planDirty || this.activeKeys) this.redraw();
+    else if ((frame.flight?.leadX || frame.flight?.leadZ) && this.settleTimer === undefined) {
+      // On a warm return there may be no further arrivals to draw the stopped camera.
+      this.settleTimer = setTimeout(() => {
+        this.settleTimer = undefined;
+        this.terrainChanged();
+      }, Math.ceil(this.camera.remainingLeadMs));
+    }
   };
   private resize = () => {
     if (this.disposed) return;
@@ -556,6 +564,7 @@ export class AtlasScene implements AtlasController {
     this.events.abort();
     this.observer.disconnect();
     clearTimeout(this.notifyTimer);
+    clearTimeout(this.settleTimer);
     if (this.frameRequest) cancelAnimationFrame(this.frameRequest);
     this.pointers.clear();
     this.keys.clear();

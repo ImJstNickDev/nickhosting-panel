@@ -130,7 +130,7 @@ export class AtlasStream {
         entry.value?.kind === 'quads' &&
         entry.value.materials.some((id) => old.has(id) !== next.has(id))
       )
-        entry.stale = true;
+        this.cache.markStale(entry);
     }
     this.previousPlan = null;
     this.generation++;
@@ -281,7 +281,8 @@ export class AtlasStream {
     if (cells && cells.length * 24 < this.cache.size) {
       for (const [i, j] of cells) this.cache.invalidateColumn(i, j);
     } else {
-      for (const entry of this.cache.values()) if (affected(entry.request)) entry.stale = true;
+      for (const entry of this.cache.values())
+        if (affected(entry.request)) this.cache.markStale(entry);
     }
     for (const job of this.pending.values()) if (affected(job.request)) job.abort.abort();
     this.generation++;
@@ -737,6 +738,10 @@ export class AtlasStream {
 
   /** Select already decoded geometry on movement even between network planning ticks. */
   present(view: AtlasFrame, mode: AtlasMode) {
+    // A final stationary frame can be inside the angular/distance presentation threshold.
+    if (mode !== 'plan' && !view.flight?.leadX && !view.flight?.leadZ)
+      this.cache.focusOn(Math.floor(view.x / 16), Math.floor(view.z / 16));
+    else this.cache.focusOn();
     const last = this.presented;
     if (
       last &&

@@ -1,6 +1,7 @@
-import { expect, it } from 'vitest';
+import { expect, it, vi } from 'vitest';
+import { AtlasCamera } from './atlas-camera.js';
 import type { QuadBatch, Terrain } from './atlas-geometry.js';
-import type { Entry } from './atlas-stream.js';
+import { AtlasStream, type Entry } from './atlas-stream.js';
 import { AtlasTerrainCache, requestKey, terrainBytes } from './atlas-terrain-cache.js';
 import type { AtlasRequest } from './atlas-types.js';
 
@@ -142,4 +143,94 @@ it('invalidates every covering shape at a changed column, including empty result
   c.clear();
   expect([...c.inBounds({ i0: 0, j0: 0, i1: 50, j1: 50 })]).toEqual([]);
   expect([c.bytes, c.size, c.surfaces, c.meshes]).toEqual([0, 0, 0, 0]);
+});
+
+function voxels(bytes: number): QuadBatch {
+  return {
+    kind: 'quads',
+    minY: 10,
+    maxY: 20,
+    regionX: 0,
+    regionZ: 0,
+    materials: [],
+    opaque: new Uint16Array(bytes / 2),
+    blend: new Uint16Array(),
+  };
+}
+
+it.each([
+  { columns: 144, bytes: 128, retained: 128 },
+  { columns: 18, bytes: 2 * 1024 * 1024, retained: 6 },
+])(
+  'retains only the latest inspected drawable LOD1 within both limits (column payload $bytes bytes)',
+  ({ columns, bytes, retained }) => {
+    const c = new AtlasTerrainCache();
+    const old: Entry[] = [];
+    const tile = voxels(bytes);
+    c.focusOn(5000, 0);
+    const unusable = [
+      entry({ kind: 'mesh', i: 5000, j: 0, lod: 1 }, voxels(0), 0),
+      entry({ kind: 'mesh', i: 5000, j: 1, lod: 2 }, tile, 0),
+      entry({ kind: 'mesh', i: 4999, j: 0, lod: 1 }, tile, 0),
+    ];
+    for (const e of unusable) c.store(e);
+    c.invalidateColumn(4999, 0);
+    for (let k = 0; k < columns; k += 9) {
+      const i = k * 10;
+      // At each stop some neighbors existed before the camera arrived and others arrive later.
+      for (let n = 0; n < 9; n++) {
+        if (n === 3) c.focusOn(i, 8);
+        const e = entry(
+          { kind: 'mesh', i: i - 1 + (n % 3), j: 7 + Math.floor(n / 3), lod: 1 },
+          tile,
+          k + n,
+        );
+        c.store(e);
+        old.push(e);
+      }
+    }
+    c.focusOn();
+    // Current and recently observed peripheral meshes saturate the viewport's cache.
+    const fresh = voxels(256 * 1024);
+    const now = Date.now();
+    for (let n = 0; n < 500; n++) {
+      c.store({ ...entry({ kind: 'mesh', i: n, j: 3000, lod: 1 }, fresh, n), age: now });
+      if (c.needsTrim) c.trim(new Map(), new Set(), undefined, () => {});
+    }
+    expect(old.filter((e) => c.get(e.key)).map((e) => e.key)).toEqual(
+      old.slice(-retained).map((e) => e.key),
+    );
+    expect(unusable.every((e) => !c.get(e.key))).toBe(true);
+    expect(c.bytes).toBeLessThanOrEqual(96 * 1024 * 1024);
+  },
+);
+
+it('records a stop inside the presentation tolerance on an already warm frame', () => {
+  vi.stubGlobal(
+    'Worker',
+    class {
+      terminate() {}
+    },
+  );
+  const camera = new AtlasCamera(32000, { x: 1600, z: 1600, span: 64 });
+  camera.setMode('fly');
+  const stopped = camera.getFrame();
+  if (!stopped.flight) throw new Error('missing flight camera');
+  const stream = new AtlasStream(
+    { edge: 32000, face: 0, initialView: stopped, load: async () => null },
+    () => {},
+  );
+  const focus = vi.spyOn(AtlasTerrainCache.prototype, 'focusOn');
+  try {
+    stream.present({ ...stopped, flight: { ...stopped.flight, leadX: 1 } }, 'fly');
+    stream.present(stopped, 'fly');
+    expect(focus.mock.calls).toEqual([
+      [],
+      [Math.floor(stopped.x / 16), Math.floor(stopped.z / 16)],
+    ]);
+  } finally {
+    stream.destroy();
+    focus.mockRestore();
+    vi.unstubAllGlobals();
+  }
 });

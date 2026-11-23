@@ -690,3 +690,23 @@ it('holds at most two mesh groups across a returning request and a stalled decod
   await settle();
   expect(batches).toHaveLength(3);
 });
+
+it('lets new focal detail overtake a large batch still serving visible peripheral voxels', async () => {
+  const { s, batches } = replay();
+  const old = Array.from(
+    { length: 48 },
+    (_, k) => [125 + (k % 6), 103 + Math.floor(k / 6)] as const,
+  );
+  s.setCoverage(old, 1);
+  s.update(camera(128, 100), 'fly');
+  await settle();
+  batches[0]?.finish();
+  await settle();
+  const peripheral = batches[1];
+  expect(peripheral?.requests.length).toBeGreaterThan(3);
+  s.setCoverage([...old, ...cells(127, 92, 3)], 1);
+  s.update(camera(128, 92), 'fly');
+  await settle();
+  expect(peripheral?.signal.aborted).toBe(false);
+  expect(batches[2]?.requests[0]).toMatchObject({ j: 94, lod: 1 });
+});

@@ -10,6 +10,9 @@ const byteLimit = 96 * MiB;
 const previewLimit = 24 * MiB;
 const previewCount = 8192;
 const detailCount = 1800;
+// Keep the inspected centers of a short flight within the existing detail budget.
+const inspectedBytesLimit = 12 * MiB;
+const inspectedCount = 128;
 const blockSide = 64; // All native tiles align to their size, at most 32 columns.
 const surfaceKey = (i: number, j: number, n: number, lod: number) => `t/${i}/${j}/${n}/${lod}`;
 export const requestKey = (r: AtlasRequest) =>
@@ -44,6 +47,10 @@ export class AtlasTerrainCache {
   private readonly previews = new Set<Entry>();
   private readonly details = new Set<Entry>();
   private readonly seeds = new Set<Entry>();
+  private readonly inspected = new Set<Entry>();
+  private inspectedBytes = 0;
+  private focusI?: number;
+  private focusJ?: number;
   private readonly blocks = new Map<string, Block>();
   // A tile width is itself a power of two, so widths 1, 2, 4, ... form a bit mask.
   private readonly widths = new Uint8Array(7);
@@ -91,16 +98,46 @@ export class AtlasTerrainCache {
     }
     return stale;
   }
+  focusOn(ci?: number, cj?: number) {
+    if (ci === this.focusI && cj === this.focusJ) return;
+    this.focusI = ci;
+    this.focusJ = cj;
+    if (ci === undefined || cj === undefined) return;
+    for (let j = cj - 1; j <= cj + 1; j++) {
+      for (let i = ci - 1; i <= ci + 1; i++) {
+        const e = this.get(requestKey({ kind: 'mesh', i, j, lod: 1 }));
+        if (e) this.remember(e);
+      }
+    }
+  }
+  private forget(e: Entry) {
+    if (this.inspected.delete(e)) this.inspectedBytes -= e.bytes;
+  }
+  private remember(e: Entry) {
+    if (e.stale || !drawable(e) || e.bytes > inspectedBytesLimit) return;
+    this.forget(e);
+    this.inspected.add(e);
+    this.inspectedBytes += e.bytes;
+    for (const oldest of this.inspected) {
+      if (this.inspectedBytes <= inspectedBytesLimit && this.inspected.size <= inspectedCount)
+        break;
+      this.forget(oldest);
+    }
+  }
+  markStale(e: Entry) {
+    this.forget(e);
+    e.stale = true;
+  }
   invalidateColumn(i: number, j: number) {
     for (const lod of [1, 2, 4]) {
       const e = this.get(requestKey({ kind: 'mesh', i, j, lod }));
-      if (e) e.stale = true;
+      if (e) this.markStale(e);
     }
     for (let lod = 0; lod < this.widths.length; lod++)
       for (let widths = this.widths[lod] ?? 0; widths; widths &= widths - 1) {
         const n = widths & -widths;
         const e = this.get(surfaceKey(Math.floor(i / n) * n, Math.floor(j / n) * n, n, lod));
-        if (e) e.stale = true;
+        if (e) this.markStale(e);
       }
   }
   *inBounds(b: AtlasBounds) {
@@ -165,13 +202,26 @@ export class AtlasTerrainCache {
   }
   delete(key: string) {
     const e = this.entries.get(key);
-    if (e) this.track(e, false);
+    if (e) {
+      this.forget(e);
+      this.track(e, false);
+    }
     this.entries.delete(key);
   }
   store(e: Entry) {
     this.delete(e.key);
     this.entries.set(e.key, e);
     this.track(e, true);
+    const r = e.request;
+    if (
+      r.kind === 'mesh' &&
+      r.lod === 1 &&
+      this.focusI !== undefined &&
+      this.focusJ !== undefined &&
+      Math.abs(r.i - this.focusI) <= 1 &&
+      Math.abs(r.j - this.focusJ) <= 1
+    )
+      this.remember(e);
   }
 
   trim(
@@ -226,7 +276,8 @@ export class AtlasTerrainCache {
       if (entry.stale) continue;
       const active = Number.isFinite(priority);
       const warm = active && priority >= backgroundPriority;
-      if (drawable(entry) && (visible.has(entry) || (active && !warm && priority < 12))) c.rank = 6;
+      if (drawable(entry) && (visible.has(entry) || (active && !warm && priority < 12))) c.rank = 7;
+      else if (this.inspected.has(entry)) c.rank = 6;
       else if (warm && drawable(entry) && entry.bytes <= room && prepared < 1024) {
         c.rank = 5;
         room -= entry.bytes;
@@ -254,6 +305,9 @@ export class AtlasTerrainCache {
     this.details.clear();
     this.blocks.clear();
     this.seeds.clear();
+    this.inspected.clear();
+    this.inspectedBytes = 0;
+    this.focusI = this.focusJ = undefined;
     this.widths.fill(0);
     this.shapeCounts.fill(0);
     this.bytes = this.previewBytes = this.meshes = this.surfaces = 0;

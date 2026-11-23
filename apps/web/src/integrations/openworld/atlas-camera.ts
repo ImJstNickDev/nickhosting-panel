@@ -160,9 +160,13 @@ export class AtlasCamera {
       return null;
     return { x: origin[0] + dir[0] * travel, z: origin[2] + dir[2] * travel };
   }
+  get remainingLeadMs() {
+    if (this.mode !== 'fly' || (!this.leadX && !this.leadZ)) return 0;
+    return Math.max(0, 180 - (performance.now() - this.translatedAt));
+  }
   getFrame(): AtlasFrame {
     if (this.mode === 'fly') {
-      const moving = performance.now() - this.translatedAt <= 180;
+      const moving = this.remainingLeadMs > 0;
       const flight = makeFlightView(this, moving ? this.leadX : 0, moving ? this.leadZ : 0);
       const bounds = flightBounds(flight, this.edge, false);
       return {

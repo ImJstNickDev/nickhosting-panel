@@ -2660,6 +2660,43 @@ it('shows the map FPS counter only in debug and measures movement and idle frame
   }
 });
 
+it('draws the stopped flight position after releasing W without a terrain arrival', async () => {
+  const page = await browser.newPage();
+  try {
+    await page.route('**/flight-stop', (route) =>
+      route.fulfill({
+        contentType: 'text/html',
+        body: `<canvas tabindex="0"></canvas>
+          <script type="module">
+            import { AtlasScene } from '/src/integrations/openworld/atlas-scene.ts';
+            const canvas = document.querySelector('canvas');
+            const scene = new AtlasScene(canvas, {
+              edge: 65536, face: 0, initialView: { x: 1000, z: 1000, span: 96 },
+              load() { throw Error('Empty index should require no terrain reads'); },
+              onFrame() {
+                const f = scene.getView().flight;
+                if (!f) return;
+                if (f.leadX || f.leadZ) canvas.dataset.motion = 'moving';
+                else if (canvas.dataset.motion === 'moving') canvas.dataset.motion = 'stopped';
+              },
+            });
+            scene.setCoverage([], 1);
+            scene.setMode('fly');
+          </script>`,
+      }),
+    );
+    await page.goto(`${url}flight-stop`);
+    const canvas = page.locator('canvas');
+    await canvas.focus();
+    await page.keyboard.down('w');
+    await check(canvas).toHaveAttribute('data-motion', 'moving');
+    await page.keyboard.up('w');
+    await check(canvas).toHaveAttribute('data-motion', 'stopped');
+  } finally {
+    await page.close();
+  }
+});
+
 it('keeps the same bridge across the three projections', async () => {
   const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
   try {

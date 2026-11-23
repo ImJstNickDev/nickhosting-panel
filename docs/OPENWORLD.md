@@ -168,8 +168,10 @@ ground and loads nearby voxel detail alongside it. A native surface can confirm
 which columns have voxels before their finer surface arrives. Looking up or down
 from the same position reuses the same column index. The browser keeps coarse
 surfaces in a separate part of its terrain cache. On return to a cached area,
-the first frame can draw the ground while nearby voxel detail loads. Spare
-capacity prepares the surrounding surface and then the indexed terrain out
+the first frame can draw the ground while nearby voxel detail loads. At a stop,
+the nine columns around the focus have priority for reuse on a later visit.
+Up to 128 such columns share 12 MiB within the existing 96 MiB browser budget.
+Spare capacity prepares the surrounding surface and then the indexed terrain out
 to the horizon. Areas with only broad survey bounds are probed locally. A medium
 or detailed 2D view also prepares voxel meshes for the nearest confirmed columns.
 Switching to 3D or turning the camera can use resident geometry on the next draw. The 3D views
