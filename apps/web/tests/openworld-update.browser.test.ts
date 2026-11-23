@@ -167,6 +167,7 @@ it.each(['timed', 'when-empty', 'immediate'] as const)(
     const bounds = await route.evaluate((row) => {
       const { left, right } = row.getBoundingClientRect();
       const [from, arrow, to] = [...row.children].map((child) => child.getBoundingClientRect());
+      if (!from || !arrow || !to) throw new Error('Incomplete version comparison');
       return [from.left - left, (arrow.left + arrow.right - left - right) / 2, to.right - right];
     });
     expect(bounds.every((offset) => Math.abs(offset) < 1)).toBe(true);
