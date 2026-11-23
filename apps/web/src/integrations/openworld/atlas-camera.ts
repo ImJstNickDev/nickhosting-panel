@@ -174,7 +174,9 @@ export class AtlasCamera {
         yaw: this.yaw,
         flight,
         bounds,
-        coverageBounds: flightCoverageBounds(flight, this.edge, bounds),
+        // Looking down shortens the draw cone. Keep the same native column index
+        // for the trip back to the horizon, including the same bucket alignment.
+        coverageBounds: flightCoverageBounds(flight, this.edge, bounds, flight.levelHorizon),
         detailBounds: flightBounds(flight, this.edge, true),
       };
     }

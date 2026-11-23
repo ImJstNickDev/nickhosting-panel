@@ -39,7 +39,8 @@ export function makeFlightView(camera: AtlasCamera, leadX: number, leadZ: number
   const turnMesh = Math.min(112, Math.max(48, focalPixels * 0.12));
   const turnSurface = Math.max(256, turnMesh * 4);
   const meshReach = Math.min(768, Math.max(240, focalPixels * 0.9));
-  let horizon = Math.max(8192, distance * 2.5, (width / focalPixels) * distance);
+  const levelHorizon = Math.max(8192, distance * 2.5, (width / focalPixels) * distance);
+  let horizon = levelHorizon;
   // When even the padded top ray points down, intersect it with the lowest
   // representable height. The optional seed raster stores signed decimetres.
   const paddedTanV = Math.tan(flightHalfFov + guard / 2);
@@ -81,6 +82,7 @@ export function makeFlightView(camera: AtlasCamera, leadX: number, leadZ: number
     focalPixels,
     leadX,
     leadZ,
+    levelHorizon,
     horizon,
     meshReach,
     // Keep the transition from voxels to the distant skyline ready in every direction.

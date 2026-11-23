@@ -25,13 +25,23 @@ function replay(
   surface?: (r: Surface) => Promise<ArrayBuffer | null>,
   occupied: (i: number, j: number) => boolean = () => true,
   meshByteLength = 16,
+  faceEdge = edge,
+  waitingForDecode?: (() => void)[],
 ) {
   const opaque = new Uint16Array(meshByteLength / 2);
   vi.stubGlobal(
     'Worker',
     class {
       onmessage?: (event: { data: unknown }) => void;
-      postMessage({ id, request }: { id: number; request: AtlasRequest }) {
+      postMessage({
+        id,
+        request,
+        bytes,
+      }: {
+        id: number;
+        request: AtlasRequest;
+        bytes: ArrayBuffer;
+      }) {
         const present =
           request.kind === 'surface'
             ? Uint8Array.from({ length: request.n * request.n }, (_, k) =>
@@ -40,7 +50,7 @@ function replay(
                 ),
               )
             : undefined;
-        queueMicrotask(() =>
+        const decoded = () =>
           this.onmessage?.({
             data: {
               id,
@@ -66,17 +76,18 @@ function replay(
                       maxY: 65,
                       regionX: 0,
                       regionZ: 0,
-                      opaque,
+                      opaque: bytes.byteLength === 32 ? new Uint16Array(0) : opaque,
                       blend: new Uint16Array(0),
                     },
             },
-          }),
-        );
+          });
+        if (waitingForDecode && request.kind === 'mesh') waitingForDecode.push(decoded);
+        else queueMicrotask(decoded);
       }
       terminate() {}
     },
   );
-  const batches: { requests: Mesh[]; signal: AbortSignal; finish: () => void }[] = [];
+  const batches: { requests: Mesh[]; signal: AbortSignal; finish: (faces?: number) => void }[] = [];
   const surfaces: AtlasRequest[] = [];
   const load: AtlasOptions['load'] = async (req) => {
     surfaces.push(req);
@@ -84,7 +95,7 @@ function replay(
   };
   const s = new AtlasStream(
     {
-      edge,
+      edge: faceEdge,
       face: 0,
       initialView: camera(128, 100),
       load,
@@ -93,7 +104,7 @@ function replay(
           batches.push({
             requests,
             signal,
-            finish: () => resolve(requests.map(() => new ArrayBuffer(32))),
+            finish: (faces = 1) => resolve(requests.map(() => new ArrayBuffer(32 + faces * 16))),
           }),
         ),
     },
@@ -204,6 +215,27 @@ it('puts detailed ground first and coalesces a distant dense ridge, leaving an i
   const visible: number[] = [];
   s.forEachColumn({ i0: 128, i1: 128, j0: 416, j1: 417 }, (i, j) => visible.push(i, j));
   expect(visible).toEqual([128, 416, 128, 417]);
+});
+
+it('keeps a drawable mesh when its replacement LOD contains zero faces', async () => {
+  const { s, batches } = replay();
+  const close = camera(128, 100);
+  const farther = camera(128, 83);
+  s.setCoverage([[128, 102]], 1);
+  s.update(farther, 'fly');
+  await settle();
+  expect(batches[0]?.requests[0]?.lod).toBe(2);
+  batches[0]?.finish(0);
+  await settle();
+  s.update(close, 'fly');
+  await settle();
+  expect(batches[1]?.requests[0]?.lod).toBe(1);
+  batches[1]?.finish();
+  await settle();
+  s.present(farther, 'fly');
+  expect(s.visible.filter((e) => e.request.kind === 'mesh').map((e) => e.request)).toEqual([
+    { kind: 'mesh', i: 128, j: 102, lod: 1 },
+  ]);
 });
 
 it('retains far resident voxels until a current native surface actually covers the column', async () => {
@@ -558,4 +590,103 @@ it('bounds a dense 2D inspection to the nearest 192 unique mesh columns, with at
   expect(requests.some((r) => r.i === 200 && r.j === 200)).toBe(true);
   expect(Math.max(...requests.map((r) => Math.hypot(r.i - 200, r.j - 200)))).toBeLessThan(8);
   expect(s.getDebugTerrain().residentMeshes).toBe(192);
+});
+
+it('uses occupied columns from a refined raster before any coarse survey completes', async () => {
+  const { s, batches, surfaces } = replay(
+    (r) => (r.lod === 6 ? new Promise(() => {}) : Promise.resolve(new ArrayBuffer(24))),
+    (i, j) => i === 128 && j === 104,
+  );
+  const frame = camera(128, 100);
+  s.setCoverage([[128, 104]], 4);
+  s.update(frame, 'fly');
+  await settle();
+  expect(surfaces.some((r) => r.kind === 'surface' && r.lod < 6)).toBe(true);
+  s.update(frame, 'fly');
+  await settle();
+  expect(batches[0]?.requests).toContainEqual({ kind: 'mesh', i: 128, j: 104, lod: 1 });
+});
+
+it('dispatches a small visible preview and a full-detail group before broad native terrain reads on cold entry', async () => {
+  const { s, batches, surfaces } = replay(() => new Promise(() => {}));
+  const frame = camera(128, 100);
+  s.setCoverage([...cells(127, 100, 15), ...cells(127, 360, 30)], 1);
+  s.update(frame, 'fly');
+  await settle();
+  expect(surfaces[0]).toMatchObject({ kind: 'surface', n: 2, lod: 6 });
+  expect(batches[0]?.requests).toHaveLength(3);
+  expect(batches[0]?.requests.every((r) => r.lod === 1)).toBe(true);
+  expect(surfaces.length).toBeLessThanOrEqual(5);
+});
+
+it('adapts the next group to observed dense geometry including after a turn', async () => {
+  const { s, batches } = replay();
+  const here = camera(128, 100),
+    there = camera(512, 100);
+  const area = (i: number) =>
+    Array.from({ length: 48 }, (_, k) => [i + (k % 6), 102 + Math.floor(k / 6)] as const);
+  s.setCoverage([...area(128), ...area(512)], 1);
+  s.update(here, 'fly');
+  await settle();
+  expect(batches[0]?.requests).toHaveLength(3);
+  // A 3 MiB mesh is valid. Three such records exceed the combined 8 MiB route.
+  // The transport can split that first response; subsequent admissions learn its size.
+  batches[0]?.finish((3 * 1024 * 1024) / 16);
+  await settle();
+  expect(batches[1]?.requests).toHaveLength(1);
+  s.update(there, 'fly');
+  await settle();
+  expect(batches[2]?.requests).toHaveLength(1);
+  expect(batches[2]?.requests[0]?.i).toBeGreaterThanOrEqual(512);
+});
+
+it('promotes adjacent observed voxels on distant rows when the face size is still unknown', async () => {
+  const i = 128,
+    j = 2 ** 22;
+  const { s, batches } = replay(
+    async () => new ArrayBuffer(32),
+    (x, z) => (x === i || x === i + 1) && z === j,
+    16,
+    2 ** 35,
+  );
+  s.setCoverage([[i, j]], 4);
+  const frame = {
+    x: i * 16,
+    z: j * 16,
+    span: 64,
+    width: 800,
+    height: 480,
+    yaw: 0,
+    bounds: { i0: i, i1: i + 3, j0: j, j1: j + 3 },
+  };
+  s.update(frame, 'iso');
+  await settle();
+  s.update(frame, 'iso');
+  await settle();
+  expect(batches.flatMap((batch) => batch.requests)).toEqual([
+    { kind: 'mesh', i, j, lod: 1 },
+    { kind: 'mesh', i: i + 1, j, lod: 1 },
+  ]);
+});
+
+it('holds at most two mesh groups across a returning request and a stalled decoder', async () => {
+  const decoding: (() => void)[] = [];
+  const { s, batches } = replay(undefined, undefined, 16, edge, decoding);
+  s.setCoverage([...cells(127, 100, 3), ...cells(507, 100, 12)], 1);
+  s.update(camera(128, 100), 'fly');
+  await settle();
+  s.update(camera(512, 100), 'fly');
+  await settle();
+  expect(batches).toHaveLength(2);
+  batches[1]?.finish();
+  await settle();
+  expect(decoding).toHaveLength(3);
+  expect(batches).toHaveLength(2);
+  batches[0]?.finish();
+  await settle();
+  expect(decoding).toHaveLength(6);
+  expect(batches).toHaveLength(2);
+  for (const done of decoding.splice(0, 3)) done();
+  await settle();
+  expect(batches).toHaveLength(3);
 });

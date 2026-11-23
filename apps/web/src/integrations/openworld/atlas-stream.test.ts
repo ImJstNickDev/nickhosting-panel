@@ -360,7 +360,7 @@ describe('Openworld atlas streaming', () => {
     s.update(view, 'plan');
     await vi.waitFor(() => expect(seeds).toEqual(['1/1/3']));
   });
-  it('groups up to sixteen nearby meshes, cancels upstream only once all members leave the camera', async () => {
+  it('starts isometric detail with one native wave and cancels upstream only once all members leave the camera', async () => {
     const batches: { requests: Mesh[]; signal: AbortSignal; done: (out: null[]) => void }[] = [];
     const s = stream({
       loadMeshes: (requests, signal) =>
@@ -372,7 +372,7 @@ describe('Openworld atlas streaming', () => {
     await vi.waitFor(() => expect(batches).toHaveLength(1));
     const first = batches[0];
     if (!first) throw Error();
-    expect(first.requests).toHaveLength(16);
+    expect(first.requests).toHaveLength(3);
     expect(new Set(first.requests.map((r) => r.lod)).size).toBe(1);
     const kept = first.requests[0];
     if (!kept) throw Error();

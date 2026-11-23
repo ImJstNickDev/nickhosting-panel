@@ -1,5 +1,28 @@
 import { expect, it } from 'vitest';
+import { AtlasCamera } from './atlas-camera.js';
 import { footprintWindow } from './map-framing.js';
+
+it('reuses the same native column query through a stationary turn and steep tilt', () => {
+  const camera = new AtlasCamera(1_000_000, { x: 83_100, z: 54_700, span: 96 });
+  camera.width = 1280;
+  camera.height = 720;
+  camera.y = 250;
+  camera.setMode('fly');
+  const readView = () => {
+    const { flight, coverageBounds } = camera.getFrame();
+    if (!flight || !coverageBounds) throw Error('Expected free-flight index bounds');
+    return { horizon: flight.horizon, window: footprintWindow(coverageBounds) };
+  };
+  const level = readView();
+  camera.look(Math.PI, Math.PI / 3);
+  const downward = readView();
+  expect(downward.horizon).toBeLessThan(level.horizon / 2);
+  expect(downward.window).toEqual(level.window);
+  camera.look(-Math.PI, -Math.PI / 2);
+  expect(readView().window).toEqual(level.window);
+  camera.move(12_000, 0, 0);
+  expect(readView().window).not.toEqual(level.window);
+});
 
 it('covers the view and keeps padded, aligned requests within the dense index budget', () => {
   for (const [start, span] of [

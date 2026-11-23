@@ -163,12 +163,16 @@ flight share the viewport, selected point and terrain cache. Zoom or move toward
 place to see the game's voxel mesh, including overhangs, water and material textures
 when provided by the running release. The more distant landscape uses the game's
 saved surface at progressively coarser resolutions. In level flight, the renderer
-can show recorded terrain out to 8 km. Visible terrain loads first. While the camera
-is stationary, a spare request prepares an intermediate surface in every direction
-and then the indexed terrain out to the horizon. Areas with only broad survey
-bounds are probed locally. A medium or detailed 2D view also prepares voxel
-meshes for the nearest confirmed columns. Switching to
-3D or turning the camera can use resident geometry on the next draw. The 3D views
+can show recorded terrain out to 8 km. The browser prioritizes missing coarse
+ground and loads nearby voxel detail alongside it. A native surface can confirm
+which columns have voxels before their finer surface arrives. Looking up or down
+from the same position reuses the same column index. The browser keeps coarse
+surfaces in a separate part of its terrain cache. On return to a cached area,
+the first frame can draw the ground while nearby voxel detail loads. Spare
+capacity prepares the surrounding surface and then the indexed terrain out
+to the horizon. Areas with only broad survey bounds are probed locally. A medium
+or detailed 2D view also prepares voxel meshes for the nearest confirmed columns.
+Switching to 3D or turning the camera can use resident geometry on the next draw. The 3D views
 join the edges of adjacent recorded surfaces at different heights. Unexplored
 gaps remain open. On a device without WebGL 2 the interactive 2D overview remains
 available.
