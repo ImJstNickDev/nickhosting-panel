@@ -163,6 +163,13 @@ it.each(['timed', 'when-empty', 'immediate'] as const)(
     const empty = dialog.getByRole('switch', {
       name: mobile ? 'Attendi che il server sia vuoto' : 'Wait until the server is empty',
     });
+    const route = dialog.locator('.ow-update-route');
+    const bounds = await route.evaluate((row) => {
+      const { left, right } = row.getBoundingClientRect();
+      const [from, arrow, to] = [...row.children].map((child) => child.getBoundingClientRect());
+      return [from.left - left, (arrow.left + arrow.right - left - right) / 2, to.right - right];
+    });
+    expect(bounds.every((offset) => Math.abs(offset) < 1)).toBe(true);
     await check(timer).toHaveValue('90');
     await check(delay).toBeChecked();
     await check(dialog.getByRole('checkbox')).not.toBeChecked();
@@ -170,13 +177,17 @@ it.each(['timed', 'when-empty', 'immediate'] as const)(
       await empty.click();
       await check(delay).toBeDisabled();
       await check(delay).not.toBeChecked();
-      await check(timer).toBeDisabled();
+      await check(timer).toHaveCount(0);
       await empty.click();
       await check(delay).toBeChecked();
       await empty.click();
     } else if (mode === 'immediate') {
+      await timer.fill('45');
       await delay.click();
-      await check(timer).toBeDisabled();
+      await check(timer).toHaveCount(0);
+      await delay.click();
+      await check(timer).toHaveValue('45');
+      await delay.click();
     } else {
       await timer.fill('35');
       await dialog.getByRole('checkbox').check();

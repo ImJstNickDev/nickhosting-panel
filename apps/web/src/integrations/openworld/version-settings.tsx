@@ -130,17 +130,19 @@ function UpdateDialog({
             disabled={empty || frozen}
             onChange={setDelay}
           />
-          <Input
-            label={t(updateKey('duration'))}
-            value={seconds}
-            type="number"
-            min={1}
-            max={86400}
-            step={1}
-            required={mode === 'timed'}
-            disabled={mode !== 'timed' || frozen}
-            onChange={(e) => setSeconds(e.target.value)}
-          />
+          {mode === 'timed' && (
+            <Input
+              label={t(updateKey('duration'))}
+              value={seconds}
+              type="number"
+              min={1}
+              max={86400}
+              step={1}
+              required
+              disabled={frozen}
+              onChange={(e) => setSeconds(e.target.value)}
+            />
+          )}
           <Switch
             label={t(updateKey('empty'))}
             checked={empty}

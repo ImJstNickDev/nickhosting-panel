@@ -1,6 +1,5 @@
 .ow-version-row,
-.ow-version-choice,
-.ow-update-route {
+.ow-version-choice {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
@@ -44,7 +43,14 @@
 .ow-update-options .field {
   margin: 0;
 }
+.ow-update-route > div:last-child {
+  text-align: end;
+}
 .ow-update-route {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  align-items: center;
+  gap: 0.75rem;
   margin: 0;
   padding: 0.85rem 0 1rem;
   border-bottom: 1px solid var(--line);
