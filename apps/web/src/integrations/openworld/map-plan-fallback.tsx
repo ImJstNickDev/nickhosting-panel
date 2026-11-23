@@ -13,6 +13,8 @@ import type { OpenworldCreatureLayer } from '../../../../../games/openworld/src/
 import { maxOpenworldMapColumn } from '../../../../../games/openworld/src/world-map.js';
 import { useT } from '../../app/i18n.js';
 import { ErrorNotice } from '../../components/ui.js';
+import { planCameraSnapshot } from './atlas-camera.js';
+import type { AtlasCameraSnapshot } from './atlas-types.js';
 import { CheckpointGlyph, type MapCheckpoint, type MapPoint } from './map-checkpoints.js';
 import { MapFps } from './map-fps.js';
 import {
@@ -26,6 +28,7 @@ import {
 import { type MapPlayer, playerHref } from './map-players.js';
 import { mapKey as k, mapData, mapParams, mapScope, scopeLost } from './map-query.js';
 import { MapStatsMenu } from './map-stats-menu.js';
+import { ViewportTools } from './map-viewport-tools.js';
 import type { ServerView } from './telemetry.js';
 
 type Surface = { side: number; samples: number[] };
@@ -73,6 +76,10 @@ export type MapViewportProps = {
   selectedId: number | null;
   onSelect: (c: MapCheckpoint) => void;
   onCreate?: (p: MapPoint) => void;
+  placing: boolean;
+  onPlacingChange: (placing: boolean) => void;
+  initialCamera?: AtlasCameraSnapshot;
+  onCameraLeave?: (snapshot: AtlasCameraSnapshot) => void;
   onScopeError: (e: unknown) => void;
   onRefreshIndex: () => void;
 };
@@ -95,6 +102,10 @@ export function MapPlanFallback({
   selectedId,
   onSelect,
   onCreate,
+  placing: pick,
+  onPlacingChange: setPick,
+  initialCamera,
+  onCameraLeave,
   onScopeError,
   onRefreshIndex,
 }: MapViewportProps) {
@@ -173,7 +184,9 @@ export function MapPlanFallback({
   const completeFootprint = investigateFootprint && extent.count <= 4096;
   const core = useMemo(() => populatedExtent(extent, sample), [extent, sample]);
   const aspect = size.width / Math.max(1, size.height) || 1;
-  const [manual, setManual] = useState<Area | null>(null);
+  const [manual, setManual] = useState<Area | null>(
+    initialCamera ? { x: initialCamera.x, z: initialCamera.z, span: initialCamera.span } : null,
+  );
   const area =
       manual ??
       fit(edge, core ?? extent, aspect, checkpoints.find((c) => c.pos.face === face)?.pos),
@@ -189,13 +202,25 @@ export function MapPlanFallback({
     j1: clamp(Math.floor((minZ + zSpan) / 16), 0, colMax),
   };
   const [draftPan, setDraftPan] = useState<{ dx: number; dy: number } | null>(null);
-  const [pick, setPick] = useState(false);
+  const leaving = useRef({ area, onCameraLeave });
+  leaving.current = { area, onCameraLeave };
+  useEffect(() => {
+    return () => {
+      const { area, onCameraLeave } = leaving.current;
+      onCameraLeave?.(planCameraSnapshot(area));
+    };
+  }, []);
   const canPlace = onCreate !== undefined;
   useEffect(() => {
+    if (!pick) return;
     if (!canPlace) setPick(false);
-  }, [canPlace]);
+    else canvas.current?.focus({ preventScroll: true });
+  }, [pick, canPlace, setPick]);
   const drag = useRef<{ id: number; x: number; y: number } | null>(null);
+  const lastFocus = useRef<typeof focus>(initialCamera ? focus : null);
   useEffect(() => {
+    if (focus === lastFocus.current) return;
+    lastFocus.current = focus;
     if (focus?.face === face) {
       setManual({
         x: clamp(focus.x, 0, edge),
@@ -425,48 +450,31 @@ export function MapPlanFallback({
         ? 2 * scale
         : scale;
   return (
-    <div className="ow-map-plot">
+    <div className="ow-map-plot ow-walkable-map">
       <div className="ow-map-controls">
-        <div className="ow-map-zoom">
-          <button
-            type="button"
-            className="secondary"
-            aria-label={t(k('zoomOut'))}
-            onClick={() => zoom(2)}
-          >
-            −
-          </button>
-          <button
-            type="button"
-            className="secondary"
-            aria-label={t(k('zoomIn'))}
-            onClick={() => zoom(0.5)}
-          >
-            +
-          </button>
-          <button type="button" className="secondary" onClick={() => setManual(null)}>
-            {t(k('recenter'))}
-          </button>
-          {core && (
-            <button
-              type="button"
-              className="secondary"
-              onClick={() => setManual(fit(edge, extent, aspect))}
-            >
-              {t(k('showAllTerrain'))}
-            </button>
+        <ViewportTools
+          zoom={(factor) => zoom(1 / factor)}
+          center={() => setManual(null)}
+          fit={core ? () => setManual(fit(edge, extent, aspect)) : undefined}
+        >
+          <span>
+            <i />
+            {t(k('unknown'))}
+          </span>
+          {overview && (
+            <span>
+              <i className="known" />
+              {t(k('explored'))}
+            </span>
           )}
-        </div>
-        {onCreate && (
-          <button
-            type="button"
-            className="secondary"
-            aria-pressed={pick}
-            onClick={() => setPick(!pick)}
-          >
-            {t(k('placePin'))}
-          </button>
-        )}
+          {creatures && (
+            <span>
+              <i className="ow-creature-dot" />
+              {t(k('layers.markerLegend'))}
+            </span>
+          )}
+          <span>{t(k(pick ? 'placeHint' : 'panHint'))}</span>
+        </ViewportTools>
       </div>
       <div
         ref={host}
@@ -501,7 +509,7 @@ export function MapPlanFallback({
           aria-haspopup="menu"
           aria-keyshortcuts="Shift+F10"
           aria-label={t(k('stage'), { world, face })}
-          aria-description={t(k('panHint'))}
+          aria-description={t(k(pick ? 'placeHint' : 'panHint'))}
           onKeyDown={keyboard}
         />
         {debug && <MapFps frames={debugFrames} />}
@@ -582,6 +590,14 @@ export function MapPlanFallback({
           {scaleBar >= 1000 ? `${scaleBar / 1000} km` : `${scaleBar} m`}
         </div>
       </div>
+      {pick && (
+        <div className="ow-flight-controls">
+          <span role="status">{t(k('placeHint'))}</span>
+          <button type="button" className="secondary" onClick={() => setPick(false)}>
+            {t('web.cancel')}
+          </button>
+        </div>
+      )}
       {error && !scopeLost(error) && (
         <ErrorNotice
           error={error}
@@ -593,25 +609,6 @@ export function MapPlanFallback({
           }}
         />
       )}
-      <div className="ow-map-key">
-        <span>
-          <i />
-          {t(k('unknown'))}
-        </span>
-        {overview && (
-          <span>
-            <i className="known" />
-            {t(k('explored'))}
-          </span>
-        )}
-        {creatures && (
-          <span>
-            <i className="ow-creature-dot" />
-            {t(k('layers.markerLegend'))}
-          </span>
-        )}
-        <span>{t(k(pick ? 'placeHint' : 'panHint'))}</span>
-      </div>
     </div>
   );
 }

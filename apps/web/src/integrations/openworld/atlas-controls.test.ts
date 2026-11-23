@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { AtlasCamera } from './atlas-camera.js';
+import { AtlasCamera, planCameraSnapshot } from './atlas-camera.js';
 import { AtlasPointerLock, canCaptureFlightKeyboard } from './atlas-pointer-lock.js';
 
 function fixture() {
@@ -45,6 +45,35 @@ function fixture() {
 }
 
 describe('Openworld camera controls', () => {
+  it('preserves the wider zoom range of the 2D fallback when bookmarking', () => {
+    expect(planCameraSnapshot({ x: 50, z: 55, span: 275 })).toMatchObject({
+      mode: 'plan',
+      x: 50,
+      z: 55,
+      span: 275,
+    });
+  });
+
+  it.each(['plan', 'iso', 'fly'] as const)(
+    'restores the exact %s camera after leaving terrain',
+    (mode) => {
+      const camera = new AtlasCamera(300, { x: 8, z: 8, span: 160 });
+      camera.width = 800;
+      camera.height = 480;
+      camera.setMode(mode);
+      camera.y = 84;
+      camera.look(-Math.PI / 2, -0.54);
+      camera.move(3, 2, 7);
+      const before = camera.ray(400, 240);
+      const saved = camera.snapshot();
+      const restored = new AtlasCamera(300, saved);
+      restored.width = 800;
+      restored.height = 480;
+      expect(restored.snapshot()).toEqual(saved);
+      expect(restored.ray(400, 240)).toEqual(before);
+    },
+  );
+
   it('uses browser lock ownership, including native Escape, transient refusal and deliberate reacquisition', () => {
     const { doc, lock, grant, deny, notify, canvas } = fixture();
     lock.request();

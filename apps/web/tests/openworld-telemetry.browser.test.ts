@@ -1924,7 +1924,7 @@ async function mapRoutes(
     emptyWorlds?: boolean;
     failWrites?: boolean;
     deltaGate?: Promise<void>;
-    revoked?: () => boolean;
+    revoked?: (url: URL) => boolean;
   } = {},
 ) {
   await serve(page);
@@ -1948,7 +1948,7 @@ async function mapRoutes(
     const u = new URL(route.request().url());
     paths.push(u);
     const path = u.pathname.split('/map')[1];
-    if (options.revoked?.())
+    if (options.revoked?.(u))
       return route.fulfill({
         status: 403,
         json: { code: 'forbidden', messageKey: 'errors.forbidden' },
@@ -2174,6 +2174,215 @@ async function mapRoutes(
   });
   return { paths, writes };
 }
+it.each([
+  { width: 1440, height: 900, mobile: false },
+  { width: 390, height: 844, mobile: true },
+])(
+  'keeps the terrain fixed while opening map tools at $width px',
+  async ({ width, height, mobile }) => {
+    const page = await browser.newPage({
+      viewport: { width, height },
+      locale: mobile ? 'it-IT' : 'en-GB',
+      isMobile: mobile,
+      hasTouch: mobile,
+    });
+    try {
+      const { paths } = await mapRoutes(page);
+      await page.route('**/openworld/map', (r) =>
+        r.fulfill({
+          json: {
+            processRef: 'f'.repeat(64),
+            worlds: [{ key: 'earth', name: 'Earth', faceEdgeMeters: faceEdge }],
+          },
+        }),
+      );
+      await page.goto(`${url}telemetry-fixture?section=map&cartographer`);
+      const stage = page.locator('.ow-map-stage');
+      const layers = page.getByRole('button', { name: mobile ? 'Livelli' : 'Layers', exact: true });
+      const checkpoints = page.getByRole('button', {
+        name: mobile ? 'Checkpoint' : 'Checkpoints',
+        exact: true,
+      });
+      const geometry = () =>
+        stage.evaluate((el) => {
+          const b = el.getBoundingClientRect();
+          const section = el.closest('.ow-map');
+          if (!section) throw new Error('Missing map section');
+          const heights = [
+            ...section.querySelectorAll('.ow-map-toolbar :is(input, select, button)'),
+          ]
+            .map((control) => control.getBoundingClientRect())
+            .map((rect) => rect.y + rect.height / 2)
+            .sort((a, b) => a - b);
+          const rows: number[] = [];
+          for (const center of heights) {
+            if (!rows.length || center - (rows.at(-1) ?? 0) > 8) rows.push(center);
+          }
+          return {
+            toolbarRows: rows.length,
+            x: b.x,
+            y: b.y,
+            width: b.width,
+            height: b.height,
+            offset: b.y - section.getBoundingClientRect().top,
+          };
+        });
+      await check(stage).toBeVisible();
+      await check.poll(() => paths.some((p) => p.pathname.endsWith('/terrain'))).toBe(true);
+      await check(
+        page.getByRole('combobox', { name: mobile ? 'Mondo' : 'World', exact: true }),
+      ).toHaveCount(0);
+      const before = await geometry();
+      expect(before.toolbarRows).toBe(mobile ? 2 : 1);
+      expect(before.offset).toBeLessThanOrEqual(135);
+      await check(page.getByRole('searchbox')).toHaveAttribute(
+        'placeholder',
+        mobile ? /Cerca/i : /Search/i,
+      );
+      await writeFile(`${shots}/world-map-toolbar-${width}.json`, JSON.stringify(before));
+      await page.screenshot({ path: `${shots}/world-map-toolbar-${width}.png` });
+      await layers.focus();
+      await page.keyboard.press('Enter');
+      const markers = page.getByLabel(mobile ? 'Mostra giocatori' : 'Show players');
+      await check(markers).toBeInViewport();
+      expect(await geometry()).toEqual(before);
+      await page.screenshot({ path: `${shots}/world-map-layers-${width}.png` });
+      await page.keyboard.press('Escape');
+      await check(layers).toBeFocused();
+      await checkpoints.click();
+      await check(
+        page.getByRole('list').getByRole('button', { name: /Lakeside/ }),
+      ).toBeInViewport();
+      expect(await geometry()).toEqual(before);
+      await page.screenshot({ path: `${shots}/world-map-checkpoints-${width}.png` });
+      await fits(page);
+    } finally {
+      await page.close();
+    }
+  },
+);
+
+it('searches players only on demand with markers off and preserves the live-follow preference', async () => {
+  const page = await browser.newPage();
+  try {
+    await mapRoutes(page);
+    let reads = 0,
+      failNext = false;
+    await page.route('**/map/players?**', (r) => {
+      reads++;
+      if (failNext) {
+        failNext = false;
+        return r.fulfill({
+          status: 503,
+          json: { code: 'integration_unavailable', messageKey: 'errors.integration_unavailable' },
+        });
+      }
+      return r.fulfill({
+        json: {
+          processRef: 'f'.repeat(64),
+          players: [
+            {
+              id: 23,
+              name: 'Atlas Scout',
+              world: 'earth',
+              face: 0,
+              x: 140,
+              z: 120,
+              joinedAt: 1000,
+            },
+            { id: 33, name: 'Moon Scout', world: 'moon', face: 1, x: 90, z: 30, joinedAt: 2000 },
+          ],
+        },
+      });
+    });
+    await page.goto(`${url}telemetry-fixture?section=map`);
+    const search = page.getByRole('searchbox');
+    await search.fill('128, 131');
+    await check(page.getByRole('button', { name: /Go to / })).toBeVisible();
+    expect(reads).toBe(0);
+    await search.fill('Scout');
+    await check(page.getByRole('button', { name: 'Atlas Scout', exact: true })).toBeVisible();
+    await check(page.getByRole('button', { name: 'Moon Scout', exact: true })).toHaveCount(0);
+    await check(page.locator('.ow-map-player')).toHaveCount(0);
+    expect(reads).toBe(1);
+    await search.fill('Atlas Sc');
+    await page.clock.install();
+    await page.clock.fastForward(6500);
+    await check(page.getByRole('button', { name: 'Atlas Scout', exact: true })).toBeVisible();
+    expect(reads).toBe(1);
+    await page.getByRole('button', { name: 'Follow', exact: true }).click();
+    await check(page.getByRole('button', { name: /Stop following.*Atlas Scout/ })).toBeVisible();
+    failNext = true;
+    await page.clock.fastForward(5200);
+    const failure = page.getByRole('alert');
+    await check(failure).toBeVisible();
+    await check(page.getByRole('button', { name: /Stop following.*Atlas Scout/ })).toBeVisible();
+    await failure.getByRole('button').click();
+    await check(failure).toHaveCount(0);
+    await check(page.getByRole('button', { name: /Stop following.*Atlas Scout/ })).toBeVisible();
+    await page.getByRole('button', { name: 'Layers', exact: true }).click();
+    await check(page.getByLabel('Show players')).not.toBeChecked();
+    await page.evaluate(() =>
+      window.dispatchEvent(
+        new CustomEvent('fixture-revoke', { detail: 'game.openworld.players.inspect' }),
+      ),
+    );
+    await check(page.getByRole('button', { name: /Stop following/ })).toHaveCount(0);
+    await search.fill('Scout');
+    const afterRevoke = reads;
+    await page.clock.fastForward(6500);
+    await check(page.getByRole('button', { name: 'Atlas Scout', exact: true })).toHaveCount(0);
+    expect(reads).toBe(afterRevoke);
+  } finally {
+    await page.close();
+  }
+});
+
+it('returns from Space to the same rotated and panned isometric terrain', async () => {
+  const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
+  try {
+    await mapRoutes(page, { bridge: true, radius: 3 });
+    await page.goto(`${url}telemetry-fixture?section=map`);
+    const iso = page.getByRole('button', { name: 'Isometric', exact: true });
+    const stage = page.locator('.ow-map-stage');
+    const pin = stage.getByRole('button', { name: 'Footbridge', exact: true });
+    await iso.click();
+    await check(pin).toBeVisible();
+    const position = () =>
+      pin.evaluate((el) => {
+        const b = el.getBoundingClientRect();
+        return { x: b.x, y: b.y };
+      });
+    const original = await position();
+    const box = await stage.boundingBox();
+    if (!box) throw new Error('Missing map stage');
+    const x = box.x + box.width * 0.3,
+      y = box.y + box.height * 0.57;
+    for (const button of ['right', 'left'] as const) {
+      await page.mouse.move(x, y);
+      await page.mouse.down({ button });
+      await page.mouse.move(x + 85, y + 25, { steps: 5 });
+      await page.mouse.up({ button });
+    }
+    await check.poll(async () => Math.abs((await position()).x - original.x)).toBeGreaterThan(15);
+    const moved = await position();
+    await page.getByRole('button', { name: 'Space', exact: true }).click();
+    await check(page.getByRole('img', { name: /Orbital view/ })).toBeVisible();
+    await check(stage).toHaveCount(0);
+    await page.getByRole('button', { name: 'Terrain', exact: true }).click();
+    await check(iso).toHaveAttribute('aria-pressed', 'true');
+    await check(pin).toBeVisible();
+    await check
+      .poll(async () => {
+        const p = await position();
+        return Math.hypot(p.x - moved.x, p.y - moved.y);
+      })
+      .toBeLessThan(2);
+  } finally {
+    await page.close();
+  }
+});
+
 it('opens and edits a checkpoint at the linked player position, then requires confirmation to delete it', async () => {
   const context = await browser.newContext({
     locale: 'en-GB',
@@ -2190,6 +2399,7 @@ it('opens and edits a checkpoint at the linked player position, then requires co
     await check
       .poll(() => paths.filter((p) => p.pathname.endsWith('/terrain')).length)
       .toBeGreaterThan(0);
+    await page.getByRole('button', { name: 'Checkpoints', exact: true }).click();
     await page.getByRole('button', { name: 'Add checkpoint at this position' }).click();
     const dialog = page.getByRole('dialog');
     await check(dialog.getByLabel('X (m)', { exact: true })).toHaveValue('86');
@@ -2255,9 +2465,7 @@ it('shows the explored overview on mobile and limits player and private checkpoi
     await check
       .poll(() => paths.filter((p) => p.pathname.endsWith('/columns')).length)
       .toBeGreaterThan(0);
-    expect(
-      paths.some((p) => /\/(players|meshes|mesh|seed-tile|seed-legend)$/.test(p.pathname)),
-    ).toBe(false);
+    expect(paths.some((p) => /\/(players|seed-tile|seed-legend)$/.test(p.pathname))).toBe(false);
     const footprint = paths.find((p) => p.pathname.endsWith('/columns'));
     expect(footprint?.searchParams.get('sample')).toBe('1');
     await check(page.getByRole('button', { name: 'Aggiungi checkpoint', exact: true })).toHaveCount(
@@ -2269,7 +2477,7 @@ it('shows the explored overview on mobile and limits player and private checkpoi
     await check(page.getByRole('button', { name: /Supply cache/ })).toHaveCount(0);
     const search = page.getByRole('searchbox');
     await search.fill('wrong');
-    await check(page.getByText('Nessun checkpoint corrispondente.')).toBeVisible();
+    await check(page.getByText('Nessun risultato.')).toBeVisible();
     await search.fill('lake');
     await page
       .getByRole('list')
@@ -2299,29 +2507,43 @@ it('refreshes only changed visible tiles, suppresses reads offline and clears re
     resume = r;
   });
   try {
-    const { paths } = await mapRoutes(page, { deltaGate, revoked: () => revoked });
+    const { paths } = await mapRoutes(page, {
+      deltaGate,
+      revoked: (u) => revoked && u.searchParams.get('world') === 'moon',
+    });
     await page.goto(`${url}telemetry-fixture?section=map&offline`);
     await check(page.getByText(/offline/i)).toBeVisible();
     expect(paths).toEqual([]);
     await page.goto(`${url}telemetry-fixture?section=map`);
     await check(page.locator('canvas')).toBeVisible();
     const tiles = () => paths.filter((p) => p.pathname.endsWith('/terrain'));
+    const identity = (p: URL) =>
+      ['ci', 'cj', 'n', 'lod'].map((key) => p.searchParams.get(key)).join('/');
+    // Refinement may still be scheduling new LODs when the change arrives. Compare
+    // only already delivered tiles at the exact same LOD and dimensions.
+    const delivered = () =>
+      page.evaluate(() =>
+        performance
+          .getEntriesByType('resource')
+          .filter((entry) => entry.name.includes('/map/terrain?'))
+          .map((entry) => entry.name),
+      );
     await check
-      .poll(() =>
-        tiles().some(
-          (p) => Number(p.searchParams.get('ci')) === 0 && Number(p.searchParams.get('cj')) === 0,
-        ),
-      )
+      .poll(async () => {
+        const initial = (await delivered()).map((value) => new URL(value));
+        return (
+          initial.some(
+            (p) => p.searchParams.get('ci') === '0' && p.searchParams.get('cj') === '0',
+          ) &&
+          initial.some((p) => p.searchParams.get('ci') !== '0' || p.searchParams.get('cj') !== '0')
+        );
+      })
       .toBe(true);
+    const cached = new Set((await delivered()).map((value) => identity(new URL(value))));
     resume();
-    await check
-      .poll(() =>
-        tiles()
-          .filter((p) => p.searchParams.get('stamp') === '8')
-          .map((p) => `${p.searchParams.get('ci')},${p.searchParams.get('cj')}`)
-          .filter((v, i, a) => a.indexOf(v) === i),
-      )
-      .toEqual(['0,0']);
+    const refreshed = () =>
+      tiles().filter((p) => p.searchParams.get('stamp') === '8' && cached.has(identity(p)));
+    await check.poll(() => refreshed().length).toBeGreaterThan(0);
     await page.getByRole('button', { name: 'Layers', exact: true }).click();
     await page.getByLabel('Face', { exact: true }).selectOption('4');
     await check(page.getByText('No explored terrain on this face.')).toBeVisible();
@@ -2330,6 +2552,9 @@ it('refreshes only changed visible tiles, suppresses reads offline and clears re
     await page.getByLabel('World', { exact: true }).selectOption('moon');
     await check(page.getByRole('alert')).toBeVisible();
     await check(page.getByRole('list')).toHaveCount(0);
+    expect([
+      ...new Set(refreshed().map((p) => `${p.searchParams.get('ci')},${p.searchParams.get('cj')}`)),
+    ]).toEqual(['0,0']);
     expect(tiles().length).toBe(before);
   } finally {
     resume();
@@ -2624,6 +2849,10 @@ it('shows the map FPS counter only in debug and measures movement and idle frame
     await check
       .poll(() => counter.evaluate((el) => document.fullscreenElement?.contains(el)))
       .toBe(true);
+    // Map commands stay accessible while the terrain fills the remaining fullscreen height.
+    await check
+      .poll(() => canvas.evaluate((el) => el.clientHeight / window.innerHeight))
+      .toBeGreaterThan(0.85);
     await canvas.focus();
     await page.keyboard.down('ArrowRight');
     try {
@@ -3109,9 +3338,9 @@ it('falls back to the readable 2D map with checkpoint navigation when WebGL2 is 
         return kind === 'webgl2' ? null : Reflect.apply(actual, this, [kind, ...options]);
       } as typeof actual;
     });
-    const { paths } = await mapRoutes(page);
+    const { paths, writes } = await mapRoutes(page);
     await page.goto(
-      `${url}telemetry-fixture?section=map&reader&seedAccess#world=earth&face=0&x=128&z=120`,
+      `${url}telemetry-fixture?section=map&reader&seedAccess&cartographer#world=earth&face=0&x=128&z=120`,
     );
     await check(page.getByText('WebGL is unavailable. Showing the 2D terrain map.')).toBeVisible();
     const counter = page.locator('.ow-atlas-fps');
@@ -3125,9 +3354,36 @@ it('falls back to the readable 2D map with checkpoint navigation when WebGL2 is 
     await check(page.getByRole('heading', { name: 'Lakeside' })).toBeVisible();
     await page.getByRole('button', { name: 'Layers', exact: true }).click();
     await check(page.getByLabel('Seed preview')).toHaveCount(0);
-    await page
-      .locator('.ow-map-stage canvas')
-      .click({ button: 'right', position: { x: 100, y: 70 } });
+    await page.keyboard.press('Escape');
+    const stage = page.locator('.ow-map-stage canvas');
+    await page.getByRole('button', { name: 'Zoom in', exact: true }).click();
+    await stage.press('ArrowRight');
+    const marker = page.locator('.ow-map-stage').getByRole('button', { name: 'Lakeside' });
+    const framing = () =>
+      marker.evaluate((el) => ({
+        left: (el as HTMLElement).style.left,
+        top: (el as HTMLElement).style.top,
+        scale: el.closest('.ow-map-stage')?.querySelector('.ow-map-scale')?.textContent,
+      }));
+    const saved = await framing();
+    await page.getByRole('button', { name: 'Space', exact: true }).click();
+    await check(stage).toHaveCount(0);
+    await page.getByRole('button', { name: 'Terrain', exact: true }).click();
+    await check.poll(framing).toEqual(saved);
+    await page.getByRole('button', { name: 'Checkpoints', exact: true }).click();
+    await page.getByRole('button', { name: 'Place checkpoint', exact: true }).click();
+    await check(stage).toBeFocused();
+    await check(stage).toHaveAttribute('aria-description', /Select a point/);
+    await stage.press('Escape');
+    await check(page.locator('.ow-map-picking')).toHaveCount(0);
+    await page.getByRole('button', { name: 'Checkpoints', exact: true }).click();
+    await page.getByRole('button', { name: 'Place checkpoint', exact: true }).click();
+    await stage.press('Enter');
+    const dialog = page.getByRole('dialog');
+    await check(dialog).toBeVisible();
+    await dialog.getByRole('button', { name: 'Cancel' }).click();
+    expect(writes).toHaveLength(0);
+    await stage.click({ button: 'right', position: { x: 100, y: 70 } });
     await page.getByRole('menuitemcheckbox', { name: 'Stats for nerds' }).click();
     await check(counter).toHaveText('0 FPS');
     expect(paths.some((u) => /\/(mesh|meshes|seed-tile|seed-legend)$/.test(u.pathname))).toBe(
@@ -3147,12 +3403,16 @@ it('loads creature populations on demand, requests markers only when selected, a
   try {
     const { paths } = await mapRoutes(page);
     await page.goto(`${url}telemetry-fixture?section=map&cartographer`);
-    await check(page.getByRole('button', { name: 'Creatures', exact: true })).toBeVisible();
+    const layers = page.getByRole('button', { name: 'Layers', exact: true });
+    const creatures = page.getByRole('button', { name: 'Creatures', exact: true });
+    await check(layers).toBeVisible();
     expect(paths.filter((p) => /\/(creatures|space)$/.test(p.pathname))).toHaveLength(0);
     const place = page.getByRole('button', { name: 'Place checkpoint', exact: true });
+    await page.getByRole('button', { name: 'Checkpoints', exact: true }).click();
     await place.click();
-    await check(place).toHaveAttribute('aria-pressed', 'true');
-    await page.getByRole('button', { name: 'Creatures', exact: true }).click();
+    await check(page.locator('.ow-map-picking')).toBeVisible();
+    await layers.click();
+    await creatures.click();
     await check(page.getByRole('heading', { name: 'Active population in Earth' })).toBeVisible();
     await check(page.getByRole('row', { name: 'Marsh toad 7' })).toBeVisible();
     await check(
@@ -3164,12 +3424,9 @@ it('loads creature populations on demand, requests markers only when selected, a
         .map((p) => p.searchParams.get('markers')),
     ).toEqual([null]);
     await check(page.locator('.ow-map-picking')).toHaveCount(0);
-    await page.getByRole('button', { name: 'Terrain', exact: true }).click();
-    await check(place).toHaveAttribute('aria-pressed', 'false');
-    await page.getByRole('button', { name: 'Creatures', exact: true }).click();
-    await page.getByRole('button', { name: 'Layers', exact: true }).click();
     await page.getByLabel('Show creature positions').check();
-    await page.getByRole('button', { name: 'Layers', exact: true }).click();
+    await check(page.getByText('The map shows a sample of the creature positions.')).toBeVisible();
+    await page.keyboard.press('Escape');
     const toad = page.getByRole('button', { name: 'Creature · Marsh toad', exact: true });
     await toad.hover();
     await check(toad).toHaveAttribute('title', 'Marsh toad');
@@ -3181,13 +3438,14 @@ it('loads creature populations on demand, requests markers only when selected, a
     await page.mouse.up();
     await check.poll(async () => (await toad.boundingBox())?.x ?? 0).toBeGreaterThan(box.x + 25);
     await page.getByRole('button', { name: 'Recenter' }).click();
-    await check(page.getByText('The map shows a sample of the creature positions.')).toBeVisible();
     await fits(page);
     await page.screenshot({ path: `${shots}/world-map-creatures-en.png` });
     await page.getByRole('button', { name: 'Layers', exact: true }).click();
     await page.getByLabel('Face', { exact: true }).selectOption('3');
     await check(page.getByRole('button', { name: /^Creature ·/ })).toHaveCount(0);
     await page.getByLabel('World', { exact: true }).selectOption('moon');
+    await layers.click();
+    await creatures.click();
     await check(page.getByRole('heading', { name: 'Active population in Moon' })).toBeVisible();
     await check(page.getByText('No species recorded in this world.')).toBeVisible();
     expect(paths.filter((p) => p.pathname.endsWith('/space'))).toHaveLength(0);

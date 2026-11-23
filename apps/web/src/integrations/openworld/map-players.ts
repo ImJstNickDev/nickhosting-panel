@@ -1,6 +1,7 @@
-import { useQuery } from '@tanstack/react-query';
+import { skipToken, useQuery } from '@tanstack/react-query';
+import { useEffect, useState } from 'react';
 import type { MapPlayer } from '../../../../../games/openworld/src/map-terrain.js';
-import { ApiError, api } from '../../api/client.js';
+import { ApiError, readApi } from '../../api/client.js';
 import { playerPath } from './player-navigation.js';
 import type { ServerView } from './telemetry.js';
 
@@ -46,11 +47,34 @@ export function playerHref(serverId: string, p: MapPlayer, processRef: string) {
     connection: { id: p.id, name: p.name, joinedAt: p.joinedAt, processRef },
   });
 }
+export function mapSearchCoordinates(value: string) {
+  const match = /^(\d+(?:\.\d+)?)(?:\s*[,;]\s*|\s+)(\d+(?:\.\d+)?)$/.exec(value.trim());
+  if (!match) return null;
+  const x = Number(match[1]),
+    z = Number(match[2]);
+  return Number.isFinite(x) && Number.isFinite(z) ? { x, z } : null;
+}
+
 export function useMapPlayers(
   server: ServerView,
-  enabled: boolean,
-  processRef: string | null | undefined,
+  processRef: string,
+  { allowed, live, search }: { allowed: boolean; live: boolean; search: string },
 ) {
+  // The endpoint returns the whole roster. All search terms and live markers share it.
+  const term =
+    allowed && !mapSearchCoordinates(search) && !/^\s*\d+(?:\.\d+)?\s*[,;]\s*$/.test(search)
+      ? search.trim().toLocaleLowerCase()
+      : '';
+  const active = allowed && server.runtimeState === 'running' && !!processRef && (live || !!term);
+  const [settled, setSettled] = useState('');
+  useEffect(() => {
+    if (live || !term) {
+      setSettled('');
+      return;
+    }
+    const timeout = window.setTimeout(() => setSettled(term), 200);
+    return () => window.clearTimeout(timeout);
+  }, [term, live]);
   return useQuery({
     queryKey: [
       'openworld-map-players',
@@ -58,18 +82,23 @@ export function useMapPlayers(
       server.serverId,
       server.runtimeState,
       processRef,
+      active,
     ],
-    queryFn: ({ signal }) =>
-      api<{ players: MapPlayer[]; processRef: string }>(
-        `/v1/servers/${encodeURIComponent(server.serverId)}/openworld/map/players?processRef=${encodeURIComponent(processRef ?? '')}`,
-        { signal },
-      ),
-    enabled: enabled && server.runtimeState === 'running' && !!processRef,
-    staleTime: 0,
+    queryFn: active
+      ? ({ signal }) =>
+          readApi<{ players: MapPlayer[]; processRef: string }>(
+            `/v1/servers/${encodeURIComponent(server.serverId)}/openworld/map/players?processRef=${encodeURIComponent(processRef)}`,
+            signal,
+          )
+      : skipToken,
+    enabled: active && (live || term === settled),
+    staleTime: 5000,
     gcTime: 0,
     retry: false,
     refetchInterval: (q) =>
-      q.state.error instanceof ApiError && [401, 403, 404, 409].includes(q.state.error.status ?? 0)
+      !live ||
+      (q.state.error instanceof ApiError &&
+        [401, 403, 404, 409].includes(q.state.error.status ?? 0))
         ? false
         : 5000,
     refetchIntervalInBackground: false,

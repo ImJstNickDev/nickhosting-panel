@@ -158,8 +158,10 @@ of the same console stream to reconcile that clock with the file's UTC modificat
 time before publishing an attribution. Files without sufficient evidence remain in
 the server gallery.
 
-**Map** opens the explored terrain of a planetary face in 2D. Isometric and free
-flight share the viewport, selected point and terrain cache. Zoom or move toward a
+**Map** opens the explored terrain of a planetary face in 2D. The toolbar selects
+the world and face. Search, checkpoints and layers share a panel over the terrain,
+shown as a bottom sheet on small screens. Isometric and free flight share the
+viewport, selected point and terrain cache. Zoom or move toward a
 place to see the game's voxel mesh, including overhangs, water and material textures
 when provided by the running release. The more distant landscape uses the game's
 saved surface at progressively coarser resolutions. In level flight, the renderer
@@ -225,8 +227,10 @@ at the location opened from a live player card. The game stores its note, locati
 and visibility. NickPanel checks the checkpoint revision before editing or deleting it.
 
 Player markers require both roster and inspection access in addition to map access.
-Open a marker to see its current player card, or use **Show on map** on the card to
-return to the player's position. A reconnected player's previous marker cannot open
+With those permissions, searching by name reads the roster on demand even while
+markers are hidden. Showing markers or following a player refreshes their positions.
+Open a marker to see its current player card, or use **Show on map** on the card
+to return to the player's position. A reconnected player's previous marker cannot open
 the new session. The existing moderation grant still covers teleport to the game's
 checkpoint destinations.
 
@@ -235,14 +239,15 @@ measured and target frequency, step time (including p95), power production and
 consumption, battery storage, and items and fluids in transit. The most expensive
 columns link to their location when the reader also has map access.
 
-In **Map**, select **Creatures** to see the active population by species and the
+In **Map**, open **Layers → Creatures** to see the active population by species and the
 number of items on the ground in the selected world. Enable creature positions to
 request up to 256 markers. The population totals cover the active simulation even
 when the map displays a sample. Creatures stored in a save can be outside this
 population.
 
 Select **Space** to explore the celestial system and its checkpoints. A body with a
-terrain map can be opened directly. Orbital player positions require roster and
+terrain map can be opened directly. Returning to the same world restores the
+terrain camera and projection. Orbital player positions require roster and
 inspection access. Administrative checkpoints require the checkpoint management
 permission. The orbital view omits checkpoint notes. Opening the terrain map alone
 does not request the factory, creature or orbital feeds.

@@ -66,6 +66,7 @@ export class AtlasScene implements AtlasController {
     if (!gl) throw new AtlasUnsupported('WebGL2 unavailable');
     this.gl = gl;
     this.camera = new AtlasCamera(options.edge, options.initialView);
+    this.snapGround = !('mode' in options.initialView);
     this.gpu = new AtlasGpu(gl, options, this.redraw);
     try {
       this.stream = new AtlasStream(options, this.terrainChanged);
@@ -191,6 +192,10 @@ export class AtlasScene implements AtlasController {
   }
   getView() {
     return this.camera.getFrame();
+  }
+  snapshot() {
+    this.applyLook();
+    return this.camera.snapshot();
   }
   getDebugTerrain() {
     return {

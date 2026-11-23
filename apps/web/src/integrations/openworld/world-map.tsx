@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { type ReactNode, useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
 import {
   maxOpenworldMapColumn,
   type OpenworldMapWorld,
@@ -6,7 +6,7 @@ import {
 import { useFormat, useT } from '../../app/i18n.js';
 import { Check, ErrorNotice, Loading, Select } from '../../components/ui.js';
 import { Pagination, SearchField } from '../../components/workspace-controls.js';
-import type { AtlasMode } from './atlas-types.js';
+import type { AtlasCameraSnapshot, AtlasMode } from './atlas-types.js';
 import type { SeedLegend } from './map-atlas-data.js';
 import {
   CheckpointDialog,
@@ -18,7 +18,7 @@ import {
 } from './map-checkpoints.js';
 import { CreaturePopulation, useCreatureLayer } from './map-creatures.js';
 import { factoryMapPoint, useFactoryData } from './map-factories.js';
-import { mapFocusQuery, useMapPlayers } from './map-players.js';
+import { mapFocusQuery, mapSearchCoordinates, useMapPlayers } from './map-players.js';
 import { mapKey as k, mapParams, scopeLost, useMapData } from './map-query.js';
 import { SpaceView } from './map-space.js';
 import { type MapFace, MapViewport } from './map-viewport.js';
@@ -27,10 +27,35 @@ import './world-map.css';
 import './map-layers.css';
 import './map-explorer.css';
 
-type MapView = 'terrain' | 'creatures' | 'space';
+type MapPanel = 'checkpoints' | 'search' | 'layers' | 'creatures';
+type TerrainBookmark = { world: string; face: number; camera: AtlasCameraSnapshot };
 
 type WorldList = { processRef: string; worlds: OpenworldMapWorld[] };
 type Index = { stamp: number; faces: MapFace[] };
+
+function MapGlyph({ name }: { name: 'space' | 'checkpoints' | 'layers' }) {
+  const paths = {
+    space:
+      'M18 12a6 6 0 1 1-12 0 6 6 0 1 1 12 0ZM7 9c-3.7 2.5-6 5.1-5.1 6.5 1 1.7 6.3.8 12.1-2.1S23.4 7.6 22.4 6c-.6-1-2.6-1-5.3-.4',
+    checkpoints: 'M5 21V4m0 1c4-4 8 3 14-1v10c-6 4-10-3-14 1',
+    layers: 'm12 3 10 5-10 5L2 8l10-5ZM2 12l10 5 10-5M2 16l10 5 10-5',
+  };
+  return (
+    <svg
+      width="17"
+      height="17"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.65"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d={paths[name]} />
+    </svg>
+  );
+}
 
 function MapSection(props: TelemetryViewProps) {
   const t = useT();
@@ -45,43 +70,10 @@ function MapSection(props: TelemetryViewProps) {
     props.permissionKeys.includes('game.openworld.players.read') &&
     props.permissionKeys.includes('game.openworld.players.inspect');
   const entry = initial.factory || inspect ? initial.point : null;
-  const [view, setView] = useState<MapView>('terrain');
-  const [selection, setSelection] = useState(entry?.world ?? '');
-  const selected = worlds.data?.worlds.find((w) => w.key === selection) ?? worlds.data?.worlds[0];
   return (
-    <section className="ow-workspace ow-map">
+    <section className="ow-workspace ow-map" aria-label={t(k('title'))}>
       <div className="ow-panel">
-        <header className="ow-heading">
-          <h2>{t(k('title'))}</h2>
-          {view !== 'space' && canRead && running && !worlds.error && selected && worlds.data && (
-            <Select
-              label={t(k('world'))}
-              value={selected.key}
-              onChange={(e) => setSelection(e.target.value)}
-            >
-              {worlds.data.worlds.map((w) => (
-                <option key={w.key} value={w.key}>
-                  {w.name || w.key}
-                </option>
-              ))}
-            </Select>
-          )}
-        </header>
-        {canRead && running && !worlds.error && worlds.data && (
-          <fieldset className="ow-map-views" aria-label={t(k('layers.view'))}>
-            {(['terrain', 'creatures', 'space'] as const).map((mode) => (
-              <button
-                className="secondary"
-                key={mode}
-                type="button"
-                aria-pressed={view === mode}
-                onClick={() => setView(mode)}
-              >
-                {t(k(`layers.${mode}`))}
-              </button>
-            ))}
-          </fieldset>
-        )}
+        <h2 className="visually-hidden">{t(k('title'))}</h2>
         {!canRead ? (
           <p className="ow-empty">{t('errors.forbidden')}</p>
         ) : !running ? (
@@ -92,38 +84,20 @@ function MapSection(props: TelemetryViewProps) {
           <ErrorNotice error={worlds.error} retry={() => void worlds.refetch()} />
         ) : !worlds.data ? (
           <Loading />
-        ) : view === 'space' ? (
-          <SpaceView
-            key={worlds.data.processRef}
-            server={props}
-            worlds={worlds.data.worlds}
-            processRef={worlds.data.processRef}
-            onTerrain={(world) => {
-              setSelection(world);
-              setView('terrain');
-            }}
-            reloadWorlds={() => worlds.refetch()}
-          />
-        ) : !selected ? (
-          <p className="ow-empty">{t(k('noWorlds'))}</p>
         ) : (
-          <MapWorld
+          <WorldBrowser
             key={JSON.stringify([
               worlds.data.processRef,
-              selected.key,
               inspect,
               props.permissionKeys.includes('game.openworld.checkpoints.manage'),
               props.permissionKeys.includes('game.openworld.seed.inspect'),
               props.permissionKeys.includes('game.openworld.performance.read'),
             ])}
-            showCreatures={view === 'creatures'}
-            showDirectory={() => setView('terrain')}
-            playerFocus={!initial.factory && !!entry && entry.world === selected.key}
             server={props}
-            world={selected}
-            processRef={worlds.data.processRef}
-            entry={entry?.world === selected.key ? entry : null}
-            reloadWorlds={() => worlds.refetch()}
+            data={worlds.data}
+            entry={entry}
+            fromPlayer={!initial.factory && !!entry}
+            reloadWorlds={worlds.refetch}
           />
         )}
       </div>
@@ -132,9 +106,109 @@ function MapSection(props: TelemetryViewProps) {
 }
 export const OpenworldMap = withTelemetrySession(MapSection);
 
+function WorldBrowser({
+  server,
+  data,
+  entry,
+  fromPlayer,
+  reloadWorlds,
+}: {
+  server: TelemetryViewProps;
+  data: WorldList;
+  entry: ReturnType<typeof mapFocusQuery>;
+  fromPlayer: boolean;
+  reloadWorlds: () => Promise<unknown>;
+}) {
+  const t = useT();
+  const [space, setSpace] = useState(false);
+  const [selection, setSelection] = useState(entry?.world ?? '');
+  const selected = data.worlds.find((w) => w.key === selection) ?? data.worlds[0];
+  const bookmark = useRef<TerrainBookmark | null>(null);
+  const leavingTerrain = useRef(false);
+  function openSpace() {
+    leavingTerrain.current = true;
+    setSpace(true);
+  }
+  function openWorld(world?: string) {
+    leavingTerrain.current = false;
+    if (world && world !== selected?.key) {
+      bookmark.current = null;
+      setSelection(world);
+    }
+    setSpace(false);
+  }
+  if (space || !selected)
+    return (
+      <>
+        <header className="ow-space-heading">
+          <h3>{t(k(space ? 'layers.space' : 'layers.terrain'))}</h3>
+          {space && (
+            <button type="button" className="secondary" onClick={() => openWorld()}>
+              {t(k('layers.terrain'))}
+            </button>
+          )}
+          {!space && (
+            <button type="button" className="secondary" onClick={openSpace}>
+              {t(k('layers.space'))}
+            </button>
+          )}
+        </header>
+        {space ? (
+          <SpaceView
+            server={server}
+            worlds={data.worlds}
+            processRef={data.processRef}
+            onTerrain={openWorld}
+            reloadWorlds={reloadWorlds}
+          />
+        ) : (
+          <p className="ow-empty">{t(k('noWorlds'))}</p>
+        )}
+      </>
+    );
+  const saved = bookmark.current?.world === selected.key ? bookmark.current : null;
+  const worldControl =
+    data.worlds.length === 1 ? (
+      <strong className="ow-current-world" title={selected.name || selected.key}>
+        {selected.name || selected.key}
+      </strong>
+    ) : (
+      <select
+        aria-label={t(k('world'))}
+        value={selected.key}
+        onChange={(e) => openWorld(e.target.value)}
+      >
+        {data.worlds.map((w) => (
+          <option key={w.key} value={w.key}>
+            {w.name || w.key}
+          </option>
+        ))}
+      </select>
+    );
+  return (
+    <MapWorld
+      key={selected.key}
+      worldControl={worldControl}
+      openSpace={openSpace}
+      saved={saved}
+      remember={(face, camera) => {
+        if (leavingTerrain.current) bookmark.current = { world: selected.key, face, camera };
+      }}
+      playerFocus={!saved && fromPlayer && entry?.world === selected.key}
+      server={server}
+      world={selected}
+      processRef={data.processRef}
+      entry={!saved && entry?.world === selected.key ? entry : null}
+      reloadWorlds={reloadWorlds}
+    />
+  );
+}
+
 function MapWorld({
-  showCreatures,
-  showDirectory,
+  worldControl,
+  openSpace,
+  saved,
+  remember,
   playerFocus,
   server,
   world,
@@ -142,8 +216,10 @@ function MapWorld({
   entry,
   reloadWorlds,
 }: {
-  showCreatures: boolean;
-  showDirectory: () => void;
+  worldControl: ReactNode;
+  openSpace: () => void;
+  saved: TerrainBookmark | null;
+  remember: (face: number, camera: AtlasCameraSnapshot) => void;
   playerFocus: boolean;
   server: TelemetryViewProps;
   world: OpenworldMapWorld;
@@ -167,10 +243,42 @@ function MapWorld({
       : undefined;
   const [withFactories, setWithFactories] = useState(false);
   const [hasAtlas, setHasAtlas] = useState(true);
-  const [mode, setMode] = useState<AtlasMode>('plan');
-  const [directory, setDirectory] = useState(false);
-  const [layerPanel, setLayerPanel] = useState(false);
+  const [mode, setMode] = useState<AtlasMode>(saved?.camera.mode ?? 'plan');
+  const [panel, setPanel] = useState<MapPanel | null>(null);
+  const [placing, setPlacing] = useState(false);
+  const panelId = useId();
+  const restore = useRef(saved);
+  const workspace = useRef<HTMLDivElement>(null);
+  function focusTerrain() {
+    requestAnimationFrame(() =>
+      workspace.current
+        ?.querySelector<HTMLElement>('.ow-map-stage canvas')
+        ?.focus({ preventScroll: true }),
+    );
+  }
+  const aside = useRef<HTMLElement>(null);
+  const trigger = useRef<HTMLElement | null>(null);
+  const restoringFocus = useRef(false);
+  const showCreatures = panel === 'creatures';
+  function openPanel(next: MapPanel, opener?: HTMLElement) {
+    if (opener) trigger.current = opener;
+    setPlacing(false);
+    setFollowFailure(null);
+    setPanel(next);
+  }
+  const closePanel = useCallback((restoreFocus = true) => {
+    setPanel(null);
+    if (restoreFocus && trigger.current?.isConnected) {
+      restoringFocus.current = true;
+      trigger.current.focus({ preventScroll: true });
+      restoringFocus.current = false;
+    }
+  }, []);
+  useEffect(() => {
+    if (panel && panel !== 'search') aside.current?.focus({ preventScroll: true });
+  }, [panel]);
   const [species, setSpecies] = useState('');
+  const [followFailure, setFollowFailure] = useState<unknown>(null);
   const [following, setFollowing] = useState<{ id: number; joinedAt: number; name: string } | null>(
     null,
   );
@@ -202,7 +310,7 @@ function MapWorld({
     withCreatures,
   );
   const [search, setSearch] = useState(''),
-    [chosenFace, setFace] = useState<number | null>(entry?.face ?? null);
+    [chosenFace, setFace] = useState<number | null>(saved?.face ?? entry?.face ?? null);
   const [focus, setFocus] = useState<MapPoint | null>(entry),
     [selected, setSelected] = useState<number | null>(null);
   const [form, setForm] = useState<CheckpointForm | null>(null),
@@ -213,12 +321,15 @@ function MapWorld({
   const canTrack =
     grants.includes('game.openworld.players.read') &&
     grants.includes('game.openworld.players.inspect');
-  const playerFeed = useMapPlayers(server, canTrack && withPlayers && !scopeError, processRef);
+  const playerFeed = useMapPlayers(server, processRef, {
+    allowed: canTrack && !scopeError,
+    live: withPlayers || !!following,
+    search: panel === 'search' ? search : '',
+  });
   const tracked =
-    canTrack && withPlayers && playerFeed.data?.processRef === processRef && !playerFeed.error
+    canTrack && following && playerFeed.data?.processRef === processRef && !playerFeed.error
       ? playerFeed.data.players.find(
           (p) =>
-            following &&
             p.id === following.id &&
             p.name === following.name &&
             Math.abs(p.joinedAt - following.joinedAt) < 5000 &&
@@ -233,9 +344,14 @@ function MapWorld({
           ? previous
           : { face: tracked.face, x: tracked.x, z: tracked.z },
       );
-    } else if (following && (playerFeed.data || playerFeed.error || !withPlayers))
+    } else if (following && scopeLost(playerFeed.error)) {
+      setFollowFailure(playerFeed.error);
       setFollowing(null);
-  }, [tracked, following, playerFeed.data, playerFeed.error, withPlayers]);
+      setFocus(null);
+    } else if (following && !playerFeed.error && playerFeed.data) {
+      setFollowing(null);
+    }
+  }, [tracked, following, playerFeed.data, playerFeed.error]);
   const data =
       checkpoints.data?.checkpoints.filter((c) => canManage || c.visibility === 'players') ?? [],
     current = data.find((c) => c.id === selected);
@@ -252,30 +368,24 @@ function MapWorld({
     }
   }, [missingForm, lostSelection]);
   const [page, setPage] = useState(1);
-  const matches = data.filter((c) =>
-    c.name.toLocaleLowerCase().includes(search.trim().toLocaleLowerCase()),
-  );
+  const term = panel === 'search' ? search.trim() : '';
+  const matches = data.filter((c) => c.name.toLocaleLowerCase().includes(term.toLocaleLowerCase()));
   const availablePlayers =
-    canTrack && withPlayers && !playerFeed.error && playerFeed.data?.processRef === processRef
+    canTrack && !playerFeed.error && playerFeed.data?.processRef === processRef
       ? playerFeed.data.players
       : [];
-  const location = /^\s*(\d+(?:\.\d+)?)\s*[,; ]\s*(\d+(?:\.\d+)?)\s*$/.exec(search);
+  const location = mapSearchCoordinates(term);
   const located = location
-    ? {
-        face: chosenFace ?? index.data?.faces.find((f) => f.count > 0)?.face ?? 0,
-        x: Number(location[1]),
-        z: Number(location[2]),
-      }
+    ? { face: chosenFace ?? index.data?.faces.find((f) => f.count > 0)?.face ?? 0, ...location }
     : null;
   const canCenter =
     located != null &&
     located.x <= (world.faceEdgeMeters ?? 0x7fffffff) &&
     located.z <= (world.faceEdgeMeters ?? 0x7fffffff);
-  const matchingPlayers = search.trim()
+  const matchingPlayers = term
     ? availablePlayers.filter(
         (p) =>
-          p.world === world.key &&
-          p.name.toLocaleLowerCase().includes(search.trim().toLocaleLowerCase()),
+          p.world === world.key && p.name.toLocaleLowerCase().includes(term.toLocaleLowerCase()),
       )
     : [];
   const visibleCreatures = useMemo(() => {
@@ -314,6 +424,18 @@ function MapWorld({
     (withCheckpoints && scopeLost(checkpoints.error) && checkpoints.error) ||
     ((showCreatures || withCreatures) && scopeLost(creatures.error) && creatures.error) ||
     scopeError;
+  useEffect(() => {
+    const root = workspace.current;
+    if (!panel || form || readingError || !root) return;
+    function dismissOnEscape(event: KeyboardEvent) {
+      if (event.key === 'Escape' && !event.defaultPrevented) {
+        event.preventDefault();
+        closePanel();
+      }
+    }
+    root.addEventListener('keydown', dismissOnEscape);
+    return () => root.removeEventListener('keydown', dismissOnEscape);
+  }, [panel, form, readingError, closePanel]);
   if (readingError)
     return (
       <ErrorNotice
@@ -330,430 +452,547 @@ function MapWorld({
     );
   return (
     <>
-      <div className="ow-map-layout">
-        <section className="ow-map-terrain">
-          <div className="ow-map-filters">
+      <div className="ow-map-layout ow-terrain-workspace" ref={workspace}>
+        <header className="ow-map-toolbar">
+          <div className="ow-map-world-nav">
+            {worldControl}
+            <select
+              aria-label={t(k('face'))}
+              value={face}
+              onChange={(e) => {
+                setFace(Number(e.target.value));
+                setFocus(null);
+                setSelected(null);
+                setFollowing(null);
+                setPlacing(false);
+              }}
+            >
+              {faces.map((n) => (
+                <option key={n} value={n}>
+                  {t(k('faceNumber'), { face: n })}
+                </option>
+              ))}
+            </select>
+            <button type="button" className="ow-map-command secondary" onClick={openSpace}>
+              <MapGlyph name="space" /> {t(k('layers.space'))}
+            </button>
+          </div>
+          <div className="ow-map-search-nav">
             <SearchField
-              label={t(k('atlas.search'))}
+              label={t(k(canTrack ? 'atlas.search' : 'atlas.searchPlaces'))}
+              placeholder={t(k('atlas.searchShort'))}
               value={search}
-              onFocus={() => {
-                setDirectory(true);
-                setLayerPanel(false);
+              aria-controls={panel === 'search' ? panelId : undefined}
+              onClick={(e) => openPanel('search', e.currentTarget)}
+              onFocus={(e) => {
+                if (!restoringFocus.current) openPanel('search', e.currentTarget);
               }}
               onChange={(e) => {
                 setSearch(e.target.value);
                 setPage(1);
-                setDirectory(true);
+                openPanel('search', e.currentTarget);
+              }}
+              onKeyDown={(e) => {
+                if (e.key === 'ArrowDown') {
+                  e.preventDefault();
+                  aside.current
+                    ?.querySelector<HTMLElement>(
+                      '.ow-map-found button, .ow-search-coordinate, .ow-map-list button',
+                    )
+                    ?.focus();
+                }
               }}
             />
-            <button
-              className="secondary"
-              type="button"
-              aria-pressed={directory && !showCreatures}
-              onClick={() => {
-                setDirectory(showCreatures || !directory);
-                if (showCreatures) showDirectory();
-                setLayerPanel(false);
-              }}
-            >
-              {t(k('checkpoints'))}
-            </button>
-            <button
-              className="secondary"
-              type="button"
-              aria-expanded={layerPanel}
-              onClick={() => {
-                setLayerPanel(!layerPanel);
-                if (!layerPanel) setDirectory(false);
-              }}
-            >
-              {t(k('atlas.layers'))}
-            </button>
-          </div>
-          {layerPanel && (
-            <div className="ow-atlas-layers">
-              <Select
-                label={t(k('face'))}
-                value={face}
-                onChange={(e) => {
-                  setFace(Number(e.target.value));
-                  setFocus(null);
-                  setSelected(null);
-                  setFollowing(null);
-                }}
-              >
-                {faces.map((n) => (
-                  <option key={n} value={n}>
-                    {t(k('faceNumber'), { face: n })}
-                  </option>
-                ))}
-              </Select>
-              <Check
-                label={t(k('checkpoints'))}
-                checked={withCheckpoints}
-                onChange={(e) => {
-                  setWithCheckpoints(e.target.checked);
-                  if (!e.target.checked) {
-                    setSelected(null);
-                    setForm(null);
-                  }
-                }}
-              />
-              {canTrack && (
-                <Check
-                  label={t(k('playerMarkers'))}
-                  checked={withPlayers}
-                  onChange={(e) => {
-                    togglePlayers(e.target.checked);
-                    setFollowing(null);
-                  }}
-                />
-              )}
-              <Check
-                label={t(k('layers.markers'))}
-                checked={withCreatures}
-                onChange={(e) => setWithCreatures(e.target.checked)}
-              />
-              {withCreatures && creatures.data && !creatures.error && (
-                <Select
-                  label={t(k('layers.species'))}
-                  value={species}
-                  onChange={(e) => setSpecies(e.target.value)}
-                >
-                  <option value="">{t(k('atlas.allSpecies'))}</option>
-                  {creatures.data.species.map((s) => (
-                    <option key={s.id} value={s.id}>
-                      {s.name || s.key}
-                    </option>
-                  ))}
-                </Select>
-              )}
-              {hasAtlas && grants.includes('game.openworld.performance.read') && (
-                <Check
-                  label={t(k('atlas.factories'))}
-                  checked={withFactories}
-                  onChange={(e) => setWithFactories(e.target.checked)}
-                />
-              )}
-              {hasAtlas && grants.includes('game.openworld.seed.inspect') && (
-                <Check
-                  label={t(k('atlas.seed'))}
-                  checked={withSeed}
-                  onChange={(e) => {
-                    setWithSeed(e.target.checked);
-                    if (!e.target.checked) setFeature('');
-                  }}
-                />
-              )}
-              {withSeed && (
-                <Check
-                  label={t(k('atlas.biomes'))}
-                  checked={biomes}
-                  onChange={(e) => setBiomes(e.target.checked)}
-                />
-              )}
-              {withSeed && legend.data?.featureKinds?.length && !legend.error ? (
-                <Select
-                  label={t(k('atlas.feature'))}
-                  value={feature}
-                  onChange={(e) => setFeature(e.target.value)}
-                >
-                  <option value="">{t(k('atlas.featureOff'))}</option>
-                  {legend.data.featureKinds.map((f) => (
-                    <option key={f.key} value={f.key}>
-                      {f.name || f.key}
-                    </option>
-                  ))}
-                </Select>
-              ) : null}
-            </div>
-          )}
-          {withSeed && legend.error && (
-            <ErrorNotice error={legend.error} retry={() => void legend.refetch()} />
-          )}
-          {following && (
-            <button
-              type="button"
-              className="secondary ow-follow-active"
-              onClick={() => setFollowing(null)}
-            >
-              {t(k('atlas.stopFollow'), { name: following.name })}
-            </button>
-          )}
-          {index.error && <ErrorNotice error={index.error} retry={() => void index.refetch()} />}
-          {!index.data ? (
-            index.error ? null : (
-              <Loading />
-            )
-          ) : (
-            <MapViewport
-              key={`${face}/${terrainEdge}/${viewportRevision}`}
-              debug={debug}
-              onToggleDebug={toggleDebug}
-              server={server}
-              world={world.key}
-              edge={terrainEdge}
-              checkpointEdge={checkpointEdge}
-              face={face}
-              extent={extent}
-              stamp={index.data.stamp}
-              processRef={processRef}
-              seed={withSeed}
-              biomes={biomes}
-              legend={withSeed && !legend.error ? legend.data : undefined}
-              feature={kind}
-              tracking={following?.id}
-              stopFollowing={() => setFollowing(null)}
-              mode={mode}
-              onModeChange={setMode}
-              onFallback={() => {
-                setHasAtlas(false);
-                setWithSeed(false);
-                setWithFactories(false);
-                setMode('plan');
-              }}
-              factories={factoryPins}
-              onCheckpointOpen={() => {
-                showDirectory();
-                setDirectory(true);
-                setLayerPanel(false);
-              }}
-              checkpoints={withCheckpoints && !checkpoints.error ? data : []}
-              creatures={visibleCreatures}
-              players={
-                canTrack &&
-                withPlayers &&
-                !playerFeed.error &&
-                playerFeed.data?.processRef === processRef
-                  ? playerFeed.data.players
-                  : []
-              }
-              focus={focus}
-              selectedId={selected}
-              onSelect={(c) => select(c, false)}
-              onCreate={
-                !showCreatures &&
-                withCheckpoints &&
-                canManage &&
-                !checkpoints.error &&
-                checkpoints.data
-                  ? (p) => setForm({ kind: 'create', point: p })
-                  : undefined
-              }
-              onScopeError={setScopeError}
-              onRefreshIndex={refreshIndex}
-            />
-          )}
-          {!showCreatures &&
-            entry &&
-            focus === entry &&
-            selected === null &&
-            face === entry.face &&
-            canManage &&
-            withCheckpoints &&
-            checkpoints.data &&
-            !checkpoints.error && (
-              <button
-                className="secondary ow-map-place-from-player"
-                type="button"
-                onClick={() => setForm({ kind: 'create', point: entry })}
-              >
-                {t(k('createAtPosition'))}
-              </button>
-            )}
-          {withFactories && factoryFeed.error && (
-            <ErrorNotice error={factoryFeed.error} retry={() => void factoryFeed.refetch()} />
-          )}
-          {!showCreatures && withCreatures && creatures.error && (
-            <ErrorNotice error={creatures.error} retry={() => void creatures.refetch()} />
-          )}
-          {canTrack && withPlayers && playerFeed.error && (
-            <ErrorNotice error={playerFeed.error} retry={() => void playerFeed.refetch()} />
-          )}
-        </section>
-        {(directory || showCreatures) && (
-          <aside className="ow-map-side ow-atlas-directory">
-            <button
-              type="button"
-              className="secondary ow-directory-close"
-              aria-label={t('web.close')}
-              onClick={() => {
-                setDirectory(false);
-                if (showCreatures) showDirectory();
-              }}
-            >
-              ×
-            </button>
-            {canCenter && located && (
-              <button
-                type="button"
-                className="secondary"
-                onClick={() => {
-                  setFollowing(null);
-                  setSelected(null);
-                  setFace(located.face);
-                  setFocus({ ...located });
-                  setDirectory(false);
-                }}
-              >
-                {t(k('atlas.goTo'), { x: located.x, z: located.z })}
-              </button>
-            )}
-            {matchingPlayers.map((p) => (
-              <div className="ow-map-found" key={p.id}>
+            {(['checkpoints', 'layers'] as const).map((name) => {
+              const label = t(k(name === 'layers' ? 'atlas.layers' : 'checkpoints'));
+              const active = panel === name || (name === 'layers' && showCreatures);
+              return (
                 <button
+                  key={name}
                   type="button"
-                  className="secondary"
-                  onClick={() => {
-                    setSelected(null);
-                    setFollowing(null);
-                    setFace(p.face);
-                    setFocus({ face: p.face, x: p.x, z: p.z });
+                  className="ow-map-command secondary"
+                  aria-label={label}
+                  aria-expanded={active}
+                  aria-controls={active ? panelId : undefined}
+                  title={label}
+                  onClick={(e) => {
+                    if (active) closePanel();
+                    else {
+                      setPage(1);
+                      openPanel(name, e.currentTarget);
+                    }
                   }}
                 >
-                  {p.name}
+                  <MapGlyph name={name} />
+                  <span>{label}</span>
                 </button>
-                <button
-                  type="button"
-                  className="secondary"
-                  onClick={() => {
-                    setSelected(null);
-                    setFollowing({ id: p.id, name: p.name, joinedAt: p.joinedAt });
-                    setDirectory(false);
-                  }}
-                >
-                  {t(k('atlas.follow'))}
+              );
+            })}
+          </div>
+        </header>
+        <div className="ow-map-frame">
+          <section className="ow-map-terrain" aria-label={t(k('layers.terrain'))}>
+            {withSeed && legend.error && (
+              <ErrorNotice error={legend.error} retry={() => void legend.refetch()} />
+            )}
+            {following && (
+              <button
+                type="button"
+                className="secondary ow-follow-active"
+                onClick={() => setFollowing(null)}
+              >
+                {t(k('atlas.stopFollow'), { name: following.name })}
+              </button>
+            )}
+            {index.error && <ErrorNotice error={index.error} retry={() => void index.refetch()} />}
+            {!index.data ? (
+              index.error ? null : (
+                <Loading />
+              )
+            ) : (
+              <MapViewport
+                key={`${face}/${terrainEdge}/${viewportRevision}`}
+                initialCamera={restore.current?.face === face ? restore.current.camera : undefined}
+                onCameraLeave={(camera) => {
+                  restore.current = null;
+                  remember(face, camera);
+                }}
+                placing={placing}
+                onPlacingChange={setPlacing}
+                debug={debug}
+                onToggleDebug={toggleDebug}
+                server={server}
+                world={world.key}
+                edge={terrainEdge}
+                checkpointEdge={checkpointEdge}
+                face={face}
+                extent={extent}
+                stamp={index.data.stamp}
+                processRef={processRef}
+                seed={withSeed}
+                biomes={biomes}
+                legend={withSeed && !legend.error ? legend.data : undefined}
+                feature={kind}
+                tracking={following?.id}
+                stopFollowing={() => setFollowing(null)}
+                mode={mode}
+                onModeChange={setMode}
+                onFallback={() => {
+                  setHasAtlas(false);
+                  setWithSeed(false);
+                  setWithFactories(false);
+                  setMode('plan');
+                }}
+                factories={factoryPins}
+                onCheckpointOpen={() => {
+                  openPanel(
+                    'checkpoints',
+                    document.activeElement instanceof HTMLElement
+                      ? document.activeElement
+                      : undefined,
+                  );
+                }}
+                checkpoints={withCheckpoints && !checkpoints.error ? data : []}
+                creatures={visibleCreatures}
+                players={
+                  canTrack &&
+                  withPlayers &&
+                  !playerFeed.error &&
+                  playerFeed.data?.processRef === processRef
+                    ? playerFeed.data.players
+                    : []
+                }
+                focus={focus}
+                selectedId={selected}
+                onSelect={(c) => select(c, false)}
+                onCreate={
+                  withCheckpoints && canManage && !checkpoints.error && checkpoints.data
+                    ? (p) => setForm({ kind: 'create', point: p })
+                    : undefined
+                }
+                onScopeError={setScopeError}
+                onRefreshIndex={refreshIndex}
+              />
+            )}
+            {withFactories && factoryFeed.error && (
+              <ErrorNotice error={factoryFeed.error} retry={() => void factoryFeed.refetch()} />
+            )}
+            {!showCreatures && withCreatures && creatures.error && (
+              <ErrorNotice error={creatures.error} retry={() => void creatures.refetch()} />
+            )}
+            {followFailure != null && !withPlayers && (
+              <div className="ow-map-follow-failure">
+                <ErrorNotice error={followFailure} />
+                <button type="button" className="secondary" onClick={() => setFollowFailure(null)}>
+                  {t('web.close')}
                 </button>
               </div>
-            ))}
-
-            {showCreatures ? (
-              <CreaturePopulation
-                query={creatures}
-                worldName={world.name || world.key}
-                markers={withCreatures}
-              />
-            ) : (
-              <>
-                <div className="ow-map-side-head">
-                  <h3>{t(k('checkpoints'))}</h3>
-                  {canManage && withCheckpoints && checkpoints.data && !checkpoints.error && (
-                    <button
-                      className="secondary"
-                      type="button"
-                      onClick={() => setForm({ kind: 'create' })}
-                    >
-                      {t(k('new'))}
-                    </button>
-                  )}
-                </div>
-                {checkpoints.error ? (
-                  <ErrorNotice error={checkpoints.error} retry={() => void checkpoints.refetch()} />
-                ) : !withCheckpoints ? (
+            )}
+            {canTrack && (withPlayers || following) && panel !== 'search' && playerFeed.error && (
+              <ErrorNotice error={playerFeed.error} retry={() => void playerFeed.refetch()} />
+            )}
+          </section>
+          {panel && (
+            <aside
+              className="ow-map-side ow-atlas-directory"
+              ref={aside}
+              tabIndex={-1}
+              id={panelId}
+              aria-labelledby={`${panelId}-title`}
+            >
+              <header className="ow-drawer-heading">
+                {showCreatures && (
                   <button
                     type="button"
-                    className="secondary"
-                    onClick={() => setWithCheckpoints(true)}
+                    className="secondary ow-panel-back"
+                    aria-label={t(k('atlas.layers'))}
+                    onClick={() => openPanel('layers')}
                   >
-                    {t(k('atlas.showCheckpoints'))}
+                    ‹
                   </button>
-                ) : !checkpoints.data ? (
-                  <Loading />
-                ) : (
-                  <>
-                    {!matches.length && !matchingPlayers.length && !canCenter ? (
-                      <p className="ow-empty">{t(k(data.length ? 'noMatches' : 'empty'))}</p>
-                    ) : (
-                      <ul className="ow-map-list">
-                        {matches.slice((currentPage - 1) * 30, currentPage * 30).map((c) => (
-                          <li key={c.id}>
+                )}
+                <h3 id={`${panelId}-title`}>
+                  {t(
+                    k(
+                      panel === 'search'
+                        ? 'atlas.results'
+                        : panel === 'layers'
+                          ? 'atlas.layers'
+                          : showCreatures
+                            ? 'layers.creatures'
+                            : 'checkpoints',
+                    ),
+                  )}
+                </h3>
+                <button
+                  type="button"
+                  className="secondary ow-directory-close"
+                  aria-label={t('web.close')}
+                  onClick={() => closePanel()}
+                >
+                  ×
+                </button>
+              </header>
+              {panel === 'layers' && (
+                <div className="ow-atlas-layers">
+                  <Check
+                    label={t(k('checkpoints'))}
+                    checked={withCheckpoints}
+                    onChange={(e) => {
+                      setWithCheckpoints(e.target.checked);
+                      if (!e.target.checked) {
+                        setSelected(null);
+                        setForm(null);
+                        setPlacing(false);
+                      }
+                    }}
+                  />
+                  {canTrack && (
+                    <Check
+                      label={t(k('playerMarkers'))}
+                      checked={withPlayers}
+                      onChange={(e) => {
+                        togglePlayers(e.target.checked);
+                      }}
+                    />
+                  )}
+                  {hasAtlas && grants.includes('game.openworld.performance.read') && (
+                    <Check
+                      label={t(k('atlas.factories'))}
+                      checked={withFactories}
+                      onChange={(e) => setWithFactories(e.target.checked)}
+                    />
+                  )}
+                  {hasAtlas && grants.includes('game.openworld.seed.inspect') && (
+                    <Check
+                      label={t(k('atlas.seed'))}
+                      checked={withSeed}
+                      onChange={(e) => {
+                        setWithSeed(e.target.checked);
+                        if (!e.target.checked) setFeature('');
+                      }}
+                    />
+                  )}
+                  {withSeed && (
+                    <Check
+                      label={t(k('atlas.biomes'))}
+                      checked={biomes}
+                      onChange={(e) => setBiomes(e.target.checked)}
+                    />
+                  )}
+                  {withSeed && legend.data?.featureKinds?.length && !legend.error ? (
+                    <Select
+                      label={t(k('atlas.feature'))}
+                      value={feature}
+                      onChange={(e) => setFeature(e.target.value)}
+                    >
+                      <option value="">{t(k('atlas.featureOff'))}</option>
+                      {legend.data.featureKinds.map((f) => (
+                        <option key={f.key} value={f.key}>
+                          {f.name || f.key}
+                        </option>
+                      ))}
+                    </Select>
+                  ) : null}
+
+                  <button
+                    type="button"
+                    className="ow-layer-creatures secondary"
+                    onClick={() => openPanel('creatures')}
+                  >
+                    {t(k('layers.creatures'))}
+                    <span aria-hidden="true">›</span>
+                  </button>
+                </div>
+              )}
+              {showCreatures && (
+                <>
+                  <div className="ow-atlas-layers">
+                    <Check
+                      label={t(k('layers.markers'))}
+                      checked={withCreatures}
+                      onChange={(e) => setWithCreatures(e.target.checked)}
+                    />
+                    {withCreatures && creatures.data && !creatures.error && (
+                      <Select
+                        label={t(k('layers.species'))}
+                        value={species}
+                        onChange={(e) => setSpecies(e.target.value)}
+                      >
+                        <option value="">{t(k('atlas.allSpecies'))}</option>
+                        {creatures.data.species.map((s) => (
+                          <option key={s.id} value={s.id}>
+                            {s.name || s.key}
+                          </option>
+                        ))}
+                      </Select>
+                    )}
+                  </div>
+                  <CreaturePopulation
+                    query={creatures}
+                    worldName={world.name || world.key}
+                    markers={withCreatures}
+                  />
+                </>
+              )}
+              {(panel === 'search' || panel === 'checkpoints') && (
+                <>
+                  {panel === 'search' && canTrack && playerFeed.isEnabled && playerFeed.error && (
+                    <ErrorNotice error={playerFeed.error} retry={() => void playerFeed.refetch()} />
+                  )}
+                  {panel === 'search' && playerFeed.isFetching && !playerFeed.data && <Loading />}
+                  {canCenter && located && (
+                    <button
+                      type="button"
+                      className="secondary ow-search-coordinate"
+                      onClick={() => {
+                        setFollowing(null);
+                        setSelected(null);
+                        setFace(located.face);
+                        setFocus({ ...located });
+                        closePanel(false);
+                        focusTerrain();
+                      }}
+                    >
+                      {t(k('atlas.goTo'), { x: located.x, z: located.z })}
+                    </button>
+                  )}
+                  {matchingPlayers.map((p) => (
+                    <div className="ow-map-found" key={p.id}>
+                      <button
+                        type="button"
+                        className="secondary"
+                        onClick={() => {
+                          setSelected(null);
+                          setFollowing(null);
+                          setFace(p.face);
+                          setFocus({ face: p.face, x: p.x, z: p.z });
+                          closePanel(false);
+                          focusTerrain();
+                        }}
+                      >
+                        {p.name}
+                      </button>
+                      <button
+                        type="button"
+                        className="secondary"
+                        onClick={() => {
+                          setSelected(null);
+                          setFollowFailure(null);
+                          setFace(p.face);
+                          setFocus({ face: p.face, x: p.x, z: p.z });
+                          setFollowing({ id: p.id, name: p.name, joinedAt: p.joinedAt });
+                          closePanel(false);
+                          focusTerrain();
+                        }}
+                      >
+                        {t(k('atlas.follow'))}
+                      </button>
+                    </div>
+                  ))}
+
+                  {panel === 'checkpoints' &&
+                    canManage &&
+                    withCheckpoints &&
+                    checkpoints.data &&
+                    !checkpoints.error && (
+                      <div className="ow-map-actions ow-checkpoint-create">
+                        {entry && focus === entry && selected === null && face === entry.face && (
+                          <button
+                            className="secondary"
+                            type="button"
+                            onClick={() => setForm({ kind: 'create', point: entry })}
+                          >
+                            {t(k('createAtPosition'))}
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          className="secondary"
+                          disabled={!index.data}
+                          onClick={() => {
+                            closePanel(false);
+                            setPlacing(true);
+                          }}
+                        >
+                          {t(k('placePin'))}
+                        </button>
+                        <button
+                          type="button"
+                          className="secondary"
+                          onClick={() => setForm({ kind: 'create' })}
+                        >
+                          {t(k('new'))}
+                        </button>
+                      </div>
+                    )}
+                  {checkpoints.error ? (
+                    <ErrorNotice
+                      error={checkpoints.error}
+                      retry={() => void checkpoints.refetch()}
+                    />
+                  ) : !withCheckpoints ? (
+                    <button
+                      type="button"
+                      className="secondary"
+                      onClick={() => setWithCheckpoints(true)}
+                    >
+                      {t(k('atlas.showCheckpoints'))}
+                    </button>
+                  ) : !checkpoints.data ? (
+                    <Loading />
+                  ) : (
+                    <>
+                      {!matches.length &&
+                      !matchingPlayers.length &&
+                      !canCenter &&
+                      !(panel === 'search' && (playerFeed.isFetching || playerFeed.error)) ? (
+                        <p className="ow-empty">{t(k(term ? 'atlas.noResults' : 'empty'))}</p>
+                      ) : (
+                        <ul className="ow-map-list">
+                          {matches.slice((currentPage - 1) * 30, currentPage * 30).map((c) => (
+                            <li key={c.id}>
+                              <button
+                                type="button"
+                                aria-pressed={selected === c.id}
+                                onClick={() => {
+                                  select(c, true);
+                                  if (panel === 'search') openPanel('checkpoints');
+                                }}
+                              >
+                                <i style={{ backgroundColor: c.color }} aria-hidden="true">
+                                  <CheckpointGlyph icon={c.icon} />
+                                </i>
+                                <span>
+                                  <strong>{c.name}</strong>
+                                  <small>
+                                    {t(k('faceNumber'), { face: c.pos.face })} ·{' '}
+                                    {t(k(c.visibility))}
+                                  </small>
+                                </span>
+                              </button>
+                            </li>
+                          ))}
+                        </ul>
+                      )}
+                      {pages > 1 && (
+                        <Pagination
+                          label={t(k('checkpoints'))}
+                          previousLabel={t('web.previous')}
+                          nextLabel={t('web.next')}
+                          summary={t(telemetryKey('pageNumber'), {
+                            page: currentPage,
+                            total: pages,
+                          })}
+                          canPrevious={currentPage > 1}
+                          canNext={currentPage < pages}
+                          onPrevious={() => setPage(currentPage - 1)}
+                          onNext={() => setPage(currentPage + 1)}
+                        />
+                      )}
+                      {panel === 'checkpoints' && current && (
+                        <section className="ow-map-checkpoint-detail">
+                          <h4>{current.name}</h4>
+                          {canManage && current.note && (
+                            <p className="ow-map-note">{current.note}</p>
+                          )}
+                          <dl>
+                            <div>
+                              <dt>{t('games.openworld.telemetry.latitude')}</dt>
+                              <dd>{format.number(current.geo.lat, 4)}°</dd>
+                            </div>
+                            <div>
+                              <dt>{t('games.openworld.telemetry.longitude')}</dt>
+                              <dd>{format.number(current.geo.lon, 4)}°</dd>
+                            </div>
+                          </dl>
+                          <div className="ow-map-actions">
                             <button
                               type="button"
-                              aria-pressed={selected === c.id}
-                              onClick={() => select(c, true)}
+                              className="secondary"
+                              onClick={() => {
+                                select(current, true);
+                                closePanel(false);
+                                focusTerrain();
+                              }}
                             >
-                              <i style={{ backgroundColor: c.color }} aria-hidden="true">
-                                <CheckpointGlyph icon={c.icon} />
-                              </i>
-                              <span>
-                                <strong>{c.name}</strong>
-                                <small>
-                                  {t(k('faceNumber'), { face: c.pos.face })} · {t(k(c.visibility))}
-                                </small>
-                              </span>
+                              {t(k('showOnMap'))}
                             </button>
-                          </li>
-                        ))}
-                      </ul>
-                    )}
-                    {pages > 1 && (
-                      <Pagination
-                        label={t(k('checkpoints'))}
-                        previousLabel={t('web.previous')}
-                        nextLabel={t('web.next')}
-                        summary={t(telemetryKey('pageNumber'), { page: currentPage, total: pages })}
-                        canPrevious={currentPage > 1}
-                        canNext={currentPage < pages}
-                        onPrevious={() => setPage(currentPage - 1)}
-                        onNext={() => setPage(currentPage + 1)}
-                      />
-                    )}
-                    {current && (
-                      <section className="ow-map-checkpoint-detail">
-                        <h4>{current.name}</h4>
-                        {canManage && current.note && <p className="ow-map-note">{current.note}</p>}
-                        <dl>
-                          <div>
-                            <dt>{t('games.openworld.telemetry.latitude')}</dt>
-                            <dd>{format.number(current.geo.lat, 4)}°</dd>
+                            {canManage && (
+                              <>
+                                <button
+                                  type="button"
+                                  className="secondary"
+                                  onClick={() => setForm({ kind: 'update', checkpoint: current })}
+                                >
+                                  {t(k('edit'))}
+                                </button>
+                                <button
+                                  type="button"
+                                  className="secondary danger-text"
+                                  onClick={() => setForm({ kind: 'delete', checkpoint: current })}
+                                >
+                                  {t(k('delete'))}
+                                </button>
+                              </>
+                            )}
                           </div>
-                          <div>
-                            <dt>{t('games.openworld.telemetry.longitude')}</dt>
-                            <dd>{format.number(current.geo.lon, 4)}°</dd>
-                          </div>
-                        </dl>
-                        <div className="ow-map-actions">
-                          <button
-                            type="button"
-                            className="secondary"
-                            onClick={() => select(current, true)}
-                          >
-                            {t(k('showOnMap'))}
-                          </button>
-                          {canManage && (
-                            <>
-                              <button
-                                type="button"
-                                className="secondary"
-                                onClick={() => setForm({ kind: 'update', checkpoint: current })}
-                              >
-                                {t(k('edit'))}
-                              </button>
-                              <button
-                                type="button"
-                                className="secondary danger-text"
-                                onClick={() => setForm({ kind: 'delete', checkpoint: current })}
-                              >
-                                {t(k('delete'))}
-                              </button>
-                            </>
-                          )}
-                        </div>
-                      </section>
-                    )}
-                  </>
-                )}
-                {notice && (
-                  <p role="status" className="ow-map-notice">
-                    {notice}
-                  </p>
-                )}
-              </>
-            )}
-          </aside>
-        )}
+                        </section>
+                      )}
+                    </>
+                  )}
+                  {notice && (
+                    <p role="status" className="ow-map-notice">
+                      {notice}
+                    </p>
+                  )}
+                </>
+              )}
+            </aside>
+          )}
+        </div>
       </div>
-      {!showCreatures && canManage && form && !missingForm && !checkpoints.error && (
+      {canManage && form && !missingForm && !checkpoints.error && (
         <CheckpointDialog
           form={form}
           world={world.key}

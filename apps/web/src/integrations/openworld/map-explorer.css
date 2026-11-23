@@ -1,54 +1,184 @@
-.ow-map .ow-map-layout {
-  position: relative;
+/* Map navigation and search share a line whenever the terrain has room. */
+.ow-map .ow-terrain-workspace {
   display: block;
+  container-type: inline-size;
+  gap: 0;
 }
-.ow-map .ow-map-filters {
-  gap: 7px;
-  justify-content: start;
+.ow-map .ow-panel {
+  padding: 12px;
 }
-.ow-map-filters .workspace-search {
-  flex: 1 1 180px;
-  max-width: 38rem;
-  margin-inline-end: auto;
-}
-.ow-atlas-layers {
+.ow-map-toolbar,
+.ow-map-world-nav,
+.ow-map-search-nav,
+.ow-space-heading,
+.ow-drawer-heading {
   display: flex;
-  flex-wrap: wrap;
   align-items: center;
-  gap: 10px 18px;
-  padding: 12px;
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  margin-bottom: 12px;
+  gap: 8px;
+  min-width: 0;
 }
-.ow-atlas-directory {
+.ow-map-toolbar {
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+.ow-map-world-nav {
+  min-width: 0;
+}
+.ow-current-world {
+  max-width: 16ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 1rem;
+}
+.ow-map-world-nav select {
+  width: auto;
+  min-width: 0;
+  max-width: 16ch;
+  min-height: 38px;
+  padding-block: 4px;
+}
+.ow-map-search-nav {
+  flex: 1;
+  justify-content: flex-end;
+}
+.ow-map-search-nav .workspace-search {
+  flex: 1 1 9rem;
+  max-width: 22rem;
+}
+.ow-map .ow-map-command {
+  flex: none;
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+  justify-content: center;
+  min-height: 38px;
+  padding: 5px 9px;
+  font-size: 0.84rem;
+}
+.ow-map-command[aria-expanded="true"] {
+  color: var(--ow-primary);
+  border-color: currentColor;
+}
+.ow-map-frame {
+  position: relative;
+  min-width: 0;
+}
+.ow-map .ow-atlas-directory {
   position: absolute;
-  z-index: 4;
-  width: min(300px, 46%);
-  max-height: calc(100% - 130px);
+  z-index: 5;
+  top: 52px;
+  right: 8px;
+  width: min(310px, 48%);
+  max-height: calc(100% - 60px);
   overflow: auto;
-  right: 12px;
-  top: 108px;
-  padding: 12px;
+  overscroll-behavior: contain;
+  padding: 0 12px 12px;
   border: 1px solid var(--line);
   border-radius: 8px;
   background: var(--surface);
-  box-shadow: 0 5px 22px #14201924;
+  box-shadow: 0 4px 18px #14201928;
 }
-.ow-atlas-directory .ow-map-side-head {
-  padding-inline-end: 28px;
+.ow-drawer-heading {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  padding-block: 6px;
+  min-height: 38px;
+  margin-bottom: 4px;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface);
 }
-.ow-directory-close {
-  position: absolute;
-  right: 6px;
-  top: 6px;
+.ow-drawer-heading h3 {
+  flex: 1;
 }
-.ow-atlas-point button,
-.ow-atlas-directory .ow-directory-close {
+.ow-drawer-heading button.secondary {
+  min-width: 34px;
+  min-height: 34px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+  font-size: 1.3rem;
+}
+.ow-atlas-layers {
+  display: grid;
+  align-items: center;
+  gap: 4px;
+}
+.ow-atlas-layers .check {
+  min-height: 36px;
+}
+.ow-atlas-layers .field {
+  padding-block: 4px;
+}
+.ow-layer-creatures {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  justify-content: space-between;
+}
+.ow-layer-creatures span {
+  font-size: 1.2rem;
+}
+.ow-checkpoint-create {
+  margin-block: 8px;
+}
+.ow-atlas-directory .ow-map-list {
+  max-height: none;
+}
+.ow-space-heading {
+  margin-bottom: 12px;
+  justify-content: space-between;
+}
+.ow-space-heading h3 {
+  margin: 0;
+}
+.ow-atlas-point button {
   min-height: 28px;
   min-width: 28px;
   padding: 0 5px;
   font-size: 1.1rem;
+}
+@container (max-width: 44rem) {
+  .ow-map-toolbar {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 4px;
+  }
+  .ow-map-world-nav > button {
+    margin-inline-start: auto;
+  }
+  .ow-map-search-nav .workspace-search {
+    max-width: none;
+  }
+}
+@container (max-width: 28rem) {
+  .ow-map-command {
+    min-width: 40px;
+  }
+  .ow-map-search-nav .ow-map-command span {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+  .ow-map .ow-atlas-directory {
+    top: auto;
+    bottom: 8px;
+    left: 6px;
+    right: 6px;
+    width: auto;
+    max-height: min(55%, 45dvh);
+    border-radius: 10px;
+  }
+  .ow-map-world-nav select,
+  .ow-current-world {
+    max-width: 40%;
+  }
 }
 .ow-atlas .ow-map-controls {
   padding: 8px;
@@ -87,32 +217,29 @@
   overflow: auto;
   padding: 12px;
 }
+.ow-map
+  .ow-panel:fullscreen
+  :is(.ow-terrain-workspace, .ow-map-frame, .ow-map-terrain, .ow-walkable-map) {
+  display: flex;
+  flex: 1 1 0;
+  flex-direction: column;
+  min-height: 0;
+}
 .ow-map .ow-panel:fullscreen .ow-map-stage {
-  height: calc(100dvh - 235px);
+  flex: 1 1 0;
+  height: auto;
+  min-height: 0;
   max-height: none;
 }
-.ow-map .ow-panel:fullscreen .ow-atlas[data-flying] {
-  position: fixed;
-  inset: 0;
-  height: 100dvh;
-  z-index: 1;
-  display: flex;
-  flex-direction: column;
-  background: var(--surface);
+.ow-map .ow-panel:fullscreen:has(.ow-atlas[data-flying]) {
+  padding: 0;
 }
-.ow-panel:fullscreen .ow-atlas[data-flying] .ow-map-controls {
+.ow-map .ow-panel:fullscreen:has(.ow-atlas[data-flying]) :is(.ow-map-toolbar, .ow-atlas-directory) {
   display: none;
 }
 .ow-map .ow-panel:fullscreen .ow-atlas[data-flying] .ow-map-stage {
-  flex: 1;
-  height: auto;
-  min-height: 0;
   border-radius: 0;
   outline: 0;
-}
-.ow-panel:fullscreen .ow-atlas[data-flying] .ow-map-key {
-  margin: 0;
-  padding: 6px 12px;
 }
 .ow-atlas-pins {
   position: absolute;
@@ -273,24 +400,6 @@
   .ow-atlas .ow-map-stage {
     height: clamp(330px, 60svh, 580px);
   }
-  .ow-atlas-directory {
-    position: relative;
-    top: auto;
-    right: auto;
-    width: 100%;
-    max-height: 35svh;
-    margin-top: -5rem;
-    border-radius: 12px 12px 6px 6px;
-    box-sizing: border-box;
-    box-shadow: 0 -3px 12px #14201926;
-  }
-  .ow-atlas-directory .ow-map-list {
-    max-height: 145px;
-  }
-  .ow-map-filters .workspace-search {
-    flex-basis: 100%;
-    max-width: none;
-  }
   .ow-atlas .ow-map-key span:last-child {
     flex-basis: 100%;
   }
@@ -338,24 +447,4 @@
   left: auto;
   top: auto;
   transform: none;
-}
-
-.ow-map-tool-icon {
-  display: none;
-}
-@media (max-width: 700px) {
-  .ow-map-tool-text {
-    display: none;
-  }
-  .ow-map-tool-icon {
-    display: block;
-  }
-  .ow-atlas .ow-map-zoom {
-    flex-wrap: nowrap;
-  }
-  .ow-atlas .ow-map-zoom button {
-    display: grid;
-    place-items: center;
-    min-width: 36px;
-  }
 }

@@ -5,7 +5,7 @@ import {
   flightNearClip,
   makeFlightView,
 } from './atlas-flight-plan.js';
-import type { AtlasFrame, AtlasMode, AtlasView } from './atlas-types.js';
+import type { AtlasCameraSnapshot, AtlasFrame, AtlasMode, AtlasView } from './atlas-types.js';
 
 export type Vec3 = [number, number, number];
 export const clamp = (n: number, min: number, max: number) => Math.max(min, Math.min(max, n));
@@ -13,6 +13,11 @@ const tanHalfFov = Math.tan(flightHalfFov);
 const isoPitch = Math.PI / 6;
 const isoYaw = (3 * Math.PI) / 4;
 const dot = (a: Vec3, b: Vec3) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+
+// The canvas fallback has its own zoom range, and may later reopen with WebGL.
+export function planCameraSnapshot(view: AtlasView): AtlasCameraSnapshot {
+  return { ...view, mode: 'plan', y: 0, yaw: isoYaw, pitch: isoPitch };
+}
 
 export class AtlasCamera {
   mode: AtlasMode = 'plan';
@@ -32,9 +37,23 @@ export class AtlasCamera {
 
   constructor(
     readonly edge: number,
-    start: AtlasView,
+    start: AtlasView | AtlasCameraSnapshot,
   ) {
-    this.setView(start);
+    if ('mode' in start) {
+      // Free flight can look beyond the face while the eye remains inside it.
+      // A saved focal point must not be clamped like a new navigation target.
+      this.x = start.x;
+      this.y = start.y;
+      this.z = start.z;
+      this.span = start.span;
+      this.mode = start.mode;
+      this.yaw = start.yaw;
+      this.pitch = start.pitch;
+    } else this.setView(start);
+  }
+  snapshot(): AtlasCameraSnapshot {
+    const { x, y, z, span, mode, yaw, pitch } = this;
+    return { x, y, z, span, mode, yaw, pitch };
   }
   setView(view: AtlasView) {
     this.translatedAt = Number.NEGATIVE_INFINITY;

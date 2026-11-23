@@ -1,0 +1,153 @@
+.ow-map-plot.ow-walkable-map {
+  position: relative;
+  container-type: inline-size;
+}
+.ow-walkable-map.ow-map-plot > .ow-map-controls {
+  position: absolute;
+  z-index: 2;
+  inset: 8px 8px auto;
+  display: flex;
+  align-items: start;
+  flex-wrap: nowrap;
+  justify-content: space-between;
+  padding: 0;
+  border: 0;
+  background: none;
+  pointer-events: none;
+}
+.ow-walkable-map.ow-map-plot > .ow-map-controls > * {
+  pointer-events: auto;
+}
+.ow-walkable-map.ow-map-plot .ow-atlas-modes,
+.ow-viewport-tools {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 3px;
+  border-radius: 7px;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  box-shadow: 0 1px 4px #111b182e;
+}
+.ow-walkable-map.ow-map-plot .ow-atlas-modes button.secondary {
+  min-height: 32px;
+  padding: 4px 9px;
+  border: 0;
+  color: var(--muted);
+}
+.ow-walkable-map.ow-map-plot .ow-atlas-modes button.secondary[aria-pressed="true"] {
+  background-color: color-mix(in srgb, var(--ow-primary) 12%, var(--surface));
+  box-shadow: none;
+  color: var(--ow-primary);
+}
+.ow-walkable-map .ow-map-controls .ow-viewport-tools button,
+.ow-viewport-help > summary {
+  box-sizing: border-box;
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  min-height: 32px;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+.ow-walkable-map .ow-map-controls .ow-viewport-tools button:hover,
+.ow-viewport-help > summary:hover,
+.ow-viewport-help[open] > summary {
+  background-color: color-mix(in srgb, var(--ow-primary) 10%, var(--surface));
+}
+.ow-viewport-help > summary::-webkit-details-marker {
+  display: none;
+}
+.ow-walkable-map .ow-map-controls :is(button, summary):focus-visible {
+  outline: 2px solid var(--ow-primary);
+  outline-offset: -2px;
+}
+.ow-viewport-tools {
+  margin-inline-start: auto;
+}
+.ow-viewport-tools .ow-viewport-legend {
+  position: absolute;
+  inset: calc(100% + 6px) 0 auto auto;
+  width: max-content;
+  max-width: min(19rem, calc(100cqw - 20px));
+  box-sizing: border-box;
+  margin: 0;
+  padding: 9px 12px;
+  display: grid;
+  gap: 6px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  box-shadow: 0 2px 7px #111b182e;
+  pointer-events: auto;
+}
+.ow-viewport-tools .ow-viewport-legend > span:last-child {
+  margin: 0;
+}
+.ow-map-plot.ow-walkable-map .ow-map-stage {
+  border-radius: 7px;
+}
+.ow-walkable-map .ow-atlas-motion,
+.ow-walkable-map .ow-map-cluster-list,
+.ow-walkable-map .ow-map-status,
+.ow-walkable-map .ow-atlas-fps {
+  top: 56px;
+}
+.ow-walkable-map[data-flying] .ow-atlas-fps {
+  top: 10px;
+}
+.ow-walkable-map .ow-map-status {
+  left: auto;
+  right: 8px;
+}
+.ow-flight-controls {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  padding-block: 5px;
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+.ow-flight-controls .secondary {
+  min-height: 32px;
+  padding: 3px 8px;
+  font-size: inherit;
+}
+.ow-map .ow-panel:fullscreen .ow-walkable-map[data-flying] > .ow-map-controls {
+  display: none;
+}
+.ow-map .ow-panel:fullscreen .ow-walkable-map[data-flying] .ow-flight-controls {
+  justify-content: center;
+  padding: 5px 12px;
+}
+@container (max-width: 525px) {
+  .ow-walkable-map.ow-map-plot .ow-atlas-modes button.secondary {
+    min-height: 36px;
+    padding-inline: 7px;
+  }
+  .ow-viewport-tools {
+    flex-direction: column;
+  }
+  .ow-walkable-map .ow-map-controls .ow-viewport-tools button,
+  .ow-viewport-help > summary {
+    width: 36px;
+    height: 36px;
+  }
+  .ow-viewport-tools .ow-viewport-legend {
+    inset: 50px 50px auto auto;
+    max-width: min(17rem, calc(100cqw - 72px));
+  }
+  .ow-walkable-map .ow-atlas-fps,
+  .ow-walkable-map .ow-map-status {
+    right: 56px;
+  }
+  .ow-walkable-map .ow-atlas-motion {
+    right: 54px;
+  }
+}

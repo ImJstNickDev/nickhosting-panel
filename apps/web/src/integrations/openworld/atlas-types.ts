@@ -7,6 +7,12 @@ export type AtlasMode = 'plan' | 'iso' | 'fly';
 export type AtlasFlightLock = 'idle' | 'locked' | 'unavailable';
 export type AtlasPointerPosition = Pick<MouseEvent, 'clientX' | 'clientY' | 'screenX' | 'screenY'>;
 export type AtlasView = { x: number; z: number; span: number };
+export type AtlasCameraSnapshot = AtlasView & {
+  mode: AtlasMode;
+  y: number;
+  yaw: number;
+  pitch: number;
+};
 export type AtlasBounds = { i0: number; j0: number; i1: number; j1: number };
 export type AtlasFrame = AtlasView & {
   width: number;
@@ -42,7 +48,7 @@ export type AtlasPixel = { x: number; y: number; visible: boolean };
 export type AtlasOptions = {
   face: number;
   edge: number;
-  initialView: AtlasView;
+  initialView: AtlasView | AtlasCameraSnapshot;
   load: (request: AtlasRequest, signal: AbortSignal) => Promise<ArrayBuffer | null>;
   loadMeshes?: (
     requests: Extract<AtlasRequest, { kind: 'mesh' }>[],
@@ -63,6 +69,7 @@ export type AtlasSeedStyle = 'surface' | 'biomes';
 export interface AtlasController {
   setView(view: AtlasView): void;
   getView(): AtlasFrame;
+  snapshot(): AtlasCameraSnapshot;
   getDebugTerrain(): OpenworldMapDebugTerrain;
   setMode(mode: AtlasMode): void;
   setFlightInspection(enabled: boolean): void;

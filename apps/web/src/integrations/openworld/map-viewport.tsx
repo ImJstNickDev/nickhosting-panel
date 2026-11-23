@@ -40,39 +40,13 @@ import type { MapViewportProps } from './map-plan-fallback.js';
 import { playerHref } from './map-players.js';
 import { mapKey as k, mapBase, mapParams, scopeLost, useMapData } from './map-query.js';
 import { MapStatsMenu } from './map-stats-menu.js';
+import { ViewportTools } from './map-viewport-tools.js';
 
 export type { MapFace } from './map-framing.js';
 
 const Fallback = lazy(() =>
   import('./map-plan-fallback.js').then((m) => ({ default: m.MapPlanFallback })),
 );
-function MapToolLabel({ name, icon }: { name: string; icon: 'center' | 'extent' | 'full' }) {
-  const paths = {
-    center:
-      'M12 2v4m0 12v4M2 12h4m12 0h4m-3 0a7 7 0 1 1-14 0 7 7 0 1 1 14 0m-5.5 0a1.5 1.5 0 1 1-3 0 1.5 1.5 0 1 1 3 0',
-    extent: 'M4 9V4h5m6 0h5v5m0 6v5h-5m-6 0H4v-5m4-2 3-5 5 7H7z',
-    full: 'M3 9V3h6m6 0h6v6m0 6v6h-6m-6 0H3v-6',
-  };
-  return (
-    <>
-      <svg
-        className="ow-map-tool-icon"
-        viewBox="0 0 24 24"
-        width="18"
-        height="18"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="1.6"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-        aria-hidden="true"
-      >
-        <path d={paths[icon]} />
-      </svg>
-      <span className="ow-map-tool-text">{name}</span>
-    </>
-  );
-}
 function cameraHint(
   mode: AtlasMode,
   lock: AtlasFlightLock,
@@ -168,7 +142,7 @@ function AtlasViewport(props: ViewProps & { unavailable: () => void }) {
   const plot = useRef<HTMLDivElement>(null);
   const scene = useRef<AtlasController | null>(null);
   const [frame, setFrame] = useState<AtlasFrame>();
-  const [pick, setPick] = useState(false);
+  const { placing: pick, onPlacingChange: setPick } = props;
   const [inspect, setInspect] = useState(false);
   const [lockState, setLockState] = useState<AtlasFlightLock>('idle');
   const [keyboardCaptured, setKeyboardCaptured] = useState(false);
@@ -196,7 +170,7 @@ function AtlasViewport(props: ViewProps & { unavailable: () => void }) {
   const [terrainStatus, setTerrainStatus] = useState<AtlasTerrainStatus>(null);
   const [streamError, setStreamError] = useState<unknown>(null);
   const [fullscreen, setFullscreen] = useState(false);
-  const moved = useRef(false);
+  const moved = useRef(!!props.initialCamera);
   const coverage = useAtlasCoverage(
     server,
     world,
@@ -279,9 +253,11 @@ function AtlasViewport(props: ViewProps & { unavailable: () => void }) {
     const el = canvas.current;
     if (!el) return;
     const { props: p, core: initialCore } = current.current;
-    const initialView = p.focus
-      ? { x: p.focus.x, z: p.focus.z, span: Math.min(edge, 240) }
-      : fit(edge, initialCore ?? p.extent, el.clientWidth / Math.max(1, el.clientHeight));
+    const initialView =
+      p.initialCamera ??
+      (p.focus
+        ? { x: p.focus.x, z: p.focus.z, span: Math.min(edge, 240) }
+        : fit(edge, initialCore ?? p.extent, el.clientWidth / Math.max(1, el.clientHeight)));
     let active = true;
     setTerrainStatus(null);
     const fail = (error: unknown) => {
@@ -364,7 +340,7 @@ function AtlasViewport(props: ViewProps & { unavailable: () => void }) {
             at.x <= live.checkpointEdge &&
             at.z <= live.checkpointEdge
           ) {
-            setPick(false);
+            live.onPlacingChange(false);
             setPoint(null);
             live.onCreate({
               face,
@@ -394,6 +370,7 @@ function AtlasViewport(props: ViewProps & { unavailable: () => void }) {
     return () => {
       active = false;
       scene.current = null;
+      p.onCameraLeave?.(engine.snapshot());
       engine.destroy();
     };
   }, [edge, face, world, processRef, server.serverId, projectPins]);
@@ -441,7 +418,7 @@ function AtlasViewport(props: ViewProps & { unavailable: () => void }) {
       );
   }, [core, focus, edge]);
   const lastTracking = useRef<number>(undefined);
-  const lastFocus = useRef<typeof focus>(null);
+  const lastFocus = useRef<typeof focus>(props.initialCamera ? focus : null);
   useEffect(() => {
     const following = props.tracking !== undefined && lastTracking.current === props.tracking;
     lastTracking.current = props.tracking;
@@ -456,9 +433,15 @@ function AtlasViewport(props: ViewProps & { unavailable: () => void }) {
       setPoint(null);
     }
   }, [focus, edge, face, props.tracking]);
+  const canPlace = !!props.onCreate;
   useEffect(() => {
-    if (!props.onCreate) setPick(false);
-  }, [props.onCreate]);
+    if (!pick) return;
+    if (!canPlace) setPick(false);
+    else {
+      setInspect(false);
+      canvas.current?.focus({ preventScroll: true });
+    }
+  }, [pick, canPlace, setPick]);
   const errors = [palette.error, coverage.error, features.error, streamError];
   const error = errors.find(scopeLost) ?? errors.find(Boolean);
   useEffect(() => {
@@ -543,7 +526,11 @@ function AtlasViewport(props: ViewProps & { unavailable: () => void }) {
   const pointBiome =
     point?.source === 'seed' ? legend?.biomes.find((b) => b.id === point.biome)?.name : null;
   return (
-    <div ref={plot} className="ow-map-plot ow-atlas" data-flying={locked || undefined}>
+    <div
+      ref={plot}
+      className="ow-map-plot ow-atlas ow-walkable-map"
+      data-flying={locked || undefined}
+    >
       <div className="ow-map-controls">
         <fieldset aria-label={t(k('atlas.camera'))} className="ow-atlas-modes">
           {(['plan', 'iso', 'fly'] as const).map((m) => (
@@ -561,67 +548,34 @@ function AtlasViewport(props: ViewProps & { unavailable: () => void }) {
             </button>
           ))}
         </fieldset>
-        <div className="ow-map-zoom">
-          <button
-            type="button"
-            className="secondary"
-            aria-label={t(k('zoomOut'))}
-            onClick={() => {
-              moved.current = true;
-              scene.current?.zoom(0.5);
-            }}
-          >
-            −
-          </button>
-          <button
-            type="button"
-            className="secondary"
-            aria-label={t(k('zoomIn'))}
-            onClick={() => {
-              moved.current = true;
-              scene.current?.zoom(2);
-            }}
-          >
-            +
-          </button>
-          <button
-            type="button"
-            className="secondary"
-            aria-label={t(k('recenter'))}
-            title={t(k('recenter'))}
-            onClick={() => recenter()}
-          >
-            <MapToolLabel icon="center" name={t(k('recenter'))} />
-          </button>
-          {core && (
-            <button
-              type="button"
-              className="secondary"
-              aria-label={t(k('showAllTerrain'))}
-              title={t(k('showAllTerrain'))}
-              onClick={() => recenter(true)}
-            >
-              <MapToolLabel icon="extent" name={t(k('showAllTerrain'))} />
-            </button>
+        <ViewportTools
+          zoom={(factor) => {
+            moved.current = true;
+            scene.current?.zoom(factor);
+          }}
+          center={() => recenter()}
+          fit={core ? () => recenter(true) : undefined}
+          fullscreen={fullscreen}
+          toggleFullscreen={
+            document.fullscreenEnabled
+              ? () => {
+                  (fullscreen
+                    ? document.exitFullscreen()
+                    : plot.current?.closest('.ow-panel')?.requestFullscreen()
+                  )?.catch(setStreamError);
+                }
+              : undefined
+          }
+        >
+          <span>
+            <i />
+            {t(k('unknown'))}
+          </span>
+          {props.seed && legend && (
+            <span className="ow-atlas-seed-key">{t(k('atlas.source.seed'))}</span>
           )}
-          {document.fullscreenEnabled && (
-            <button
-              type="button"
-              className="secondary"
-              aria-pressed={fullscreen}
-              aria-label={t(k(fullscreen ? 'atlas.exitFull' : 'atlas.full'))}
-              title={t(k(fullscreen ? 'atlas.exitFull' : 'atlas.full'))}
-              onClick={() => {
-                (fullscreen
-                  ? document.exitFullscreen()
-                  : plot.current?.closest('.ow-panel')?.requestFullscreen()
-                )?.catch(setStreamError);
-              }}
-            >
-              <MapToolLabel icon="full" name={t(k(fullscreen ? 'atlas.exitFull' : 'atlas.full'))} />
-            </button>
-          )}
-        </div>
+          <span>{t(k(flightHint))}</span>
+        </ViewportTools>
       </div>
       <div
         className={`ow-map-stage${pick || (mode === 'fly' && inspect) ? ' ow-map-picking' : ''}`}
@@ -813,58 +767,47 @@ function AtlasViewport(props: ViewProps & { unavailable: () => void }) {
           </div>
         )}
       </div>
-      <div className="ow-map-key">
-        <span>
-          <i />
-          {t(k('unknown'))}
-        </span>
-        {props.seed && legend && (
-          <span className="ow-atlas-seed-key">{t(k('atlas.source.seed'))}</span>
-        )}
-        {mode === 'fly' && mouseAvailable && !locked && (
-          <>
-            <button
-              type="button"
-              className="secondary"
-              onClick={(event) => {
-                setInspect(false);
-                setPick(false);
-                scene.current?.setFlightInspection(false);
-                scene.current?.requestFlightLock(event.detail ? event.nativeEvent : undefined);
-              }}
-            >
-              {t(k('atlas.capture'))}
-            </button>
-            <button
-              type="button"
-              className="secondary"
-              aria-pressed={inspect}
-              onClick={() => {
-                setPick(false);
-                setInspect(!inspect);
-                canvas.current?.focus({ preventScroll: true });
-              }}
-            >
-              {t(k('atlas.inspect'))}
-            </button>
-          </>
-        )}
-        {props.onCreate && !locked && (
-          <button
-            type="button"
-            className="secondary"
-            aria-pressed={pick}
-            onClick={() => {
-              setInspect(false);
-              setPick(!pick);
-              canvas.current?.focus({ preventScroll: true });
-            }}
-          >
-            {t(k('placePin'))}
-          </button>
-        )}
-        <span role="status">{t(k(flightHint))}</span>
-      </div>
+      {(pick || locked || (mode === 'fly' && mouseAvailable)) && (
+        <div className="ow-flight-controls">
+          {pick && (
+            <>
+              <span role="status">{t(k('placeHint'))}</span>
+              <button type="button" className="secondary" onClick={() => setPick(false)}>
+                {t('web.cancel')}
+              </button>
+            </>
+          )}
+          {locked && <span role="status">{t(k(flightHint))}</span>}
+          {mode === 'fly' && mouseAvailable && !locked && !pick && (
+            <>
+              <button
+                type="button"
+                className="secondary"
+                onClick={(event) => {
+                  setInspect(false);
+                  setPick(false);
+                  scene.current?.setFlightInspection(false);
+                  scene.current?.requestFlightLock(event.detail ? event.nativeEvent : undefined);
+                }}
+              >
+                {t(k('atlas.capture'))}
+              </button>
+              <button
+                type="button"
+                className="secondary"
+                aria-pressed={inspect}
+                onClick={() => {
+                  setPick(false);
+                  setInspect(!inspect);
+                  canvas.current?.focus({ preventScroll: true });
+                }}
+              >
+                {t(k('atlas.inspect'))}
+              </button>
+            </>
+          )}
+        </div>
+      )}
       {props.feature && (features.wide || features.tile.truncated) && (
         <p role="status" className="ow-map-layer-note">
           {t(k(features.wide ? 'atlas.featureZoom' : 'atlas.featureSample'))}
