@@ -101,7 +101,17 @@ describe('Openworld atlas coordinates and geometry', () => {
       ...deck,
       key: 't',
       request: { kind: 'surface', ci: 9, cj: 12, n: 1, lod: 3 },
-      value: { kind: 'raster', x: 144, z: 192, mpp: 2, side: 8, seed: false, pixels },
+      value: {
+        kind: 'raster',
+        x: 144,
+        z: 192,
+        mpp: 2,
+        side: 8,
+        seed: false,
+        minHeight: 120,
+        maxHeight: 120,
+        pixels,
+      },
     };
     const ray = { origin: [151, 27, 199], dir: [0, 1, 0] } as const;
     expect(

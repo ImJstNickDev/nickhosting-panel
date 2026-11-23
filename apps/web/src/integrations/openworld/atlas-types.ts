@@ -1,4 +1,5 @@
 import type { AtlasTerrainStatus } from './atlas-backoff.js';
+import type { AtlasFlightView } from './atlas-flight-plan.js';
 
 /** All coordinates are metres on a single planetary face. Heights use the game's vertical datum. */
 export type AtlasMode = 'plan' | 'iso' | 'fly';
@@ -11,6 +12,7 @@ export type AtlasFrame = AtlasView & {
   height: number;
   bounds: AtlasBounds;
   detailBounds?: AtlasBounds;
+  flight?: AtlasFlightView;
   yaw: number;
 };
 export type AtlasMaterial = {

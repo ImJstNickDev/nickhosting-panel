@@ -125,19 +125,30 @@ export class AtlasScene implements AtlasController {
     this.previousTime = now;
     this.applyLook();
     if (this.activeKeys) this.stepKeys(dt);
+    let frame = this.camera.getFrame();
     if (this.planDirty && now - this.lastPlan >= 40) {
-      this.stream.update(this.camera.getFrame(), this.camera.mode);
       this.planDirty = false;
       this.lastPlan = now;
       if (this.snapGround) {
         const sample = this.stream.sample(this.camera.x, this.camera.z, this.voxelSize);
         if (sample.y !== undefined) {
           this.camera.y = sample.y;
+          frame = this.camera.getFrame();
           this.snapGround = false;
         }
       }
+      if (frame.flight) {
+        const ground = this.stream.sample(frame.flight.eyeX, frame.flight.eyeZ, this.voxelSize).y;
+        if (ground !== this.camera.groundHeight) {
+          this.camera.groundHeight = ground;
+          frame = this.camera.getFrame();
+        }
+      }
+      this.stream.update(frame, this.camera.mode);
     }
-    this.gpu.draw(this.camera, this.stream);
+    // A turn or a return flight can draw resident detail before the next network plan.
+    this.stream.present(frame, this.camera.mode);
+    this.gpu.draw(this.camera, this.stream, frame);
     this.options.onFrame?.();
     if (this.planDirty || this.activeKeys) this.redraw();
   };
@@ -223,6 +234,7 @@ export class AtlasScene implements AtlasController {
     maxZoom = 15,
   ) {
     this.seedStyle = style;
+    this.camera.seedTerrain = enabled;
     this.biomes = biomes;
     this.gpu.seedStyle = style;
     this.gpu.setBiomes(biomes);

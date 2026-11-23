@@ -6,6 +6,9 @@ export type Raster = {
   z: number;
   mpp: number;
   side: number;
+  /** Native voxel heights for surfaces, decimetres for seed tiles. */
+  minHeight: number;
+  maxHeight: number;
   seed: boolean;
   /** 16-bit RGBA: native altitude, material, water depth, presence | native light (or seed biome). */
   pixels: Uint16Array;
@@ -58,6 +61,8 @@ function surface(
   const columnSamples = s * s;
   const length = columnSamples * (version === 2 ? 6 : 5);
   let pos = 32;
+  let minHeight = 65535;
+  let maxHeight = 0;
   for (let cz = 0; cz < n; cz++) {
     for (let cx = 0; cx < n; cx++) {
       if (pos + 4 > bytes.byteLength) fail();
@@ -70,7 +75,10 @@ function surface(
         let out = 4 * ((cz * s + rz) * side + cx * s);
         for (let rx = 0; rx < s; rx++, out += 4) {
           const p = rz * s + rx;
-          pixels[out] = v.getUint16(pos + 2 * p, true);
+          const height = v.getUint16(pos + 2 * p, true);
+          pixels[out] = height;
+          minHeight = Math.min(minHeight, height);
+          maxHeight = Math.max(maxHeight, height);
           pixels[out + 1] = v.getUint16(pos + 2 * columnSamples + 2 * p, true);
           pixels[out + 2] = v.getUint8(pos + 4 * columnSamples + p);
           pixels[out + 3] =
@@ -89,6 +97,9 @@ function surface(
     mpp: 16 / s,
     pixels,
     present,
+    // At a hole the surface shader can interpolate toward a missing neighbour at zero.
+    minHeight: present.includes(0) ? 0 : minHeight,
+    maxHeight,
     seed: false,
   };
 }
@@ -110,16 +121,20 @@ function seed(bytes: ArrayBuffer): Raster {
   )
     fail();
   const pixels = new Uint16Array(count * 4);
+  let minHeight = 32767;
+  let maxHeight = -32768;
   for (let p = 0; p < count; p++) {
     const ground = v.getInt16(32 + 2 * p, true),
       water = v.getInt16(32 + 2 * count + 2 * p, true);
     const level = Math.max(water, ground);
+    minHeight = Math.min(minHeight, level);
+    maxHeight = Math.max(maxHeight, level);
     pixels[p * 4] = level + 32768;
     pixels[p * 4 + 1] = v.getUint16(32 + 4 * count + 2 * p, true);
     pixels[p * 4 + 2] = Math.max(0, water - ground);
     pixels[p * 4 + 3] = validSample | v.getUint8(32 + 6 * count + p);
   }
-  return { kind: 'raster', x, z, mpp, side, seed: true, pixels };
+  return { kind: 'raster', x, z, mpp, side, minHeight, maxHeight, seed: true, pixels };
 }
 
 /** Pack a native merged face as one GPU instance. Vertices are expanded by the vertex shader. */

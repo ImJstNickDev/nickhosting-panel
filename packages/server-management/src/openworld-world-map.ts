@@ -46,6 +46,7 @@ import {
   sharedReads,
 } from './openworld-telemetry.js';
 import { OpenworldTerrainCache } from './openworld-terrain-cache.js';
+import { OpenworldTerrainHistory } from './openworld-terrain-history.js';
 
 type Native = Parameters<typeof readMapIndex>[0];
 type MapQuery = { world: string; processRef: string };
@@ -135,6 +136,29 @@ export function createOpenworldWorldMap(options: OpenworldNativeOptions) {
     },
     now,
   );
+  const history = new OpenworldTerrainHistory(
+    { bytes: 48 * 1024 * 1024, entries: 4096, ttl: 600_000 },
+    now,
+  );
+  // Only a cursor reported by the native process *before* reading an asset can
+  // serve as its baseline. Browser stamps remain ordinary hot-cache key parts.
+  const cursors = new Map<string, number>();
+  function observeCursor(worldKey: string, stamp: number) {
+    const previous = cursors.get(worldKey);
+    if (previous !== undefined && stamp < previous) {
+      // The index can expose a rewind before any viewer asks for changes.
+      const prefix = `${worldKey}|`;
+      const inWorld = (k: string) => k.startsWith(prefix);
+      geometry.invalidate(inWorld);
+      history.invalidate(inWorld);
+    }
+    cursors.delete(worldKey);
+    cursors.set(worldKey, stamp);
+    if (cursors.size > 64) {
+      const oldest = cursors.keys().next().value;
+      if (oldest !== undefined) cursors.delete(oldest);
+    }
+  }
   const textures = new OpenworldTerrainCache(
     { bytes: 16 * 1024 * 1024, entries: 2048, active: 24, perServer: 8 },
     now,
@@ -259,35 +283,91 @@ export function createOpenworldWorldMap(options: OpenworldNativeOptions) {
   ) {
     const [i, j, n] = 'ci' in q ? [q.ci, q.cj, q.n] : [q.i, q.j, 0];
     const prefix = key(scope, q.world);
-    const asset = `${prefix}|${[q.face, i, j, n, q.lod, q.stamp ?? ''].join(',')}`;
-    return geometry.get(asset, scope.serverId, 45000, signal, async (abort, waited) => {
-      if (waited) assertCurrentOpenworldScope(scope, await readOpenworldScope(db, scope.serverId));
-      return withNative(scope, (native) => load(native, q), true, 8000, abort);
-    });
+    const cell = [q.face, i, j, n].join(',');
+    const historical = `${prefix}|${cell},${q.lod}`;
+    const asset = `${historical},${q.stamp ?? ''}`;
+    let baseline: number | undefined;
+    return geometry.get(
+      asset,
+      scope.serverId,
+      45000,
+      signal,
+      async (abort, waited, beginFreshRead) => {
+        if (waited)
+          assertCurrentOpenworldScope(scope, await readOpenworldScope(db, scope.serverId));
+        const saved = await history.restore(historical, async (since) => {
+          let proof: Promise<Delta>;
+          try {
+            proof = changesSince(scope, q.world, since);
+          } catch (error) {
+            // sharedReads rejects synchronously when every change-feed slot is in use.
+            // The already-admitted geometry request can still read its own native asset.
+            if (error instanceof DomainError && error.code === 'rate_limited') return false;
+            throw error;
+          }
+          try {
+            const delta = await proof;
+            return (
+              delta.stamp >= Math.max(q.stamp ?? 0, cursors.get(prefix) ?? 0) &&
+              !changedCells(delta, since)(cell)
+            );
+          } catch (error) {
+            if (!(error instanceof DomainError) || error.code !== 'integration_unavailable')
+              throw error;
+            // A missing cursor or unavailable change feed cannot certify old bytes.
+            return false;
+          }
+        });
+        if (saved) return saved;
+        beginFreshRead();
+        baseline = cursors.get(prefix);
+        return withNative(scope, (native) => load(native, q), true, 8000, abort);
+      },
+      (value) => {
+        if (!value) history.forget(historical);
+        else if (baseline !== undefined) void history.remember(historical, value, baseline);
+      },
+    );
   }
-  function invalidateGeometry(
-    scope: OpenworldScope,
-    world: string,
-    changes: Awaited<ReturnType<typeof readMapChanges>>,
-  ) {
-    const prefix = `${key(scope, world)}|`;
+  type Delta = Awaited<ReturnType<typeof readMapChanges>>;
+  const regions = new WeakMap<Delta, Set<string>>();
+  function changedCells(changes: Delta, since: number): (cell: string) => boolean {
+    if (
+      changes.reset ||
+      changes.stamp < since ||
+      changes.columns.length >= 4096 ||
+      (changes.stamp !== since && !changes.columns.length)
+    )
+      return () => true;
+    const prior = regions.get(changes);
+    if (prior) return (cell) => prior.has(cell);
     // Deltas can contain thousands of columns. Materialize their affected blocks
     // once instead of walking the entire delta list for each resident cache entry.
     const touched = new Set<string>();
-    if (!changes.reset && changes.columns.length < 4096) {
-      for (const [face, i, j] of changes.columns)
-        for (const n of [0, 1, 2, 4, 8, 16, 32]) {
-          const side = n || 1;
-          touched.add([face, i - (i % side), j - (j % side), n].join(','));
-        }
-    }
-    geometry.invalidate(
-      (k) =>
-        k.startsWith(prefix) &&
-        (changes.reset ||
-          changes.columns.length >= 4096 ||
-          touched.has(k.slice(prefix.length).split(',').slice(0, 4).join(','))),
-    );
+    for (const [face, i, j] of changes.columns)
+      for (const n of [0, 1, 2, 4, 8, 16, 32]) {
+        const side = n || 1;
+        touched.add([face, i - (i % side), j - (j % side), n].join(','));
+      }
+    regions.set(changes, touched);
+    return (cell) => touched.has(cell);
+  }
+  function changesSince(scope: OpenworldScope, world: string, since: number) {
+    const worldKey = key(scope, world);
+    return deltas.get(key(scope, world, since), 1000, async () => {
+      const result = await withNative(scope, (n) => readMapChanges(n, world, since));
+      observeCursor(worldKey, result.stamp);
+      if (result.reset || result.stamp !== since || result.columns.length) {
+        indexes.invalidate(worldKey);
+        const prefix = `${worldKey}|`;
+        const touched = changedCells(result, since);
+        const matches = (k: string) =>
+          k.startsWith(prefix) && touched(k.slice(prefix.length).split(',').slice(0, 4).join(','));
+        geometry.invalidate(matches);
+        history.invalidate(matches);
+      }
+      return result;
+    });
   }
   return {
     info(who: AuthContext, id: string) {
@@ -357,7 +437,10 @@ export function createOpenworldWorldMap(options: OpenworldNativeOptions) {
             withNative(scope, (n) => readMapIndex(n, q.world)),
           );
           const result = await pending;
-          if (indexes.current(k, pending)) return result;
+          if (indexes.current(k, pending)) {
+            observeCursor(k, result.stamp);
+            return result;
+          }
         }
         throw new DomainError('rate_limited');
       });
@@ -379,16 +462,7 @@ export function createOpenworldWorldMap(options: OpenworldNativeOptions) {
       });
     },
     changes(who: AuthContext, id: string, q: MapQuery & { since: number }) {
-      return worldRead(who, id, q, (scope) =>
-        deltas.get(key(scope, q.world, q.since), 1000, async () => {
-          const result = await withNative(scope, (n) => readMapChanges(n, q.world, q.since));
-          if (result.reset || result.stamp !== q.since || result.columns.length) {
-            indexes.invalidate(key(scope, q.world));
-            invalidateGeometry(scope, q.world, result);
-          }
-          return result;
-        }),
-      );
+      return worldRead(who, id, q, (scope) => changesSince(scope, q.world, q.since));
     },
     surface(
       who: AuthContext,

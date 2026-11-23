@@ -47,7 +47,8 @@ export class OpenworldTerrainCache {
     server: string,
     ttl: number,
     signal: AbortSignal,
-    read: (signal: AbortSignal, waited: boolean) => Promise<Asset>,
+    read: (signal: AbortSignal, waited: boolean, beginFreshRead: () => void) => Promise<Asset>,
+    onStored?: (value: Asset) => void,
   ): Promise<Asset> {
     if (signal.aborted) return Promise.reject(new DomainError('game_not_ready'));
     const ready = this.cache.get(key);
@@ -72,7 +73,12 @@ export class OpenworldTerrainCache {
       const promise = slot.promise
         .then(() => {
           controller.signal.throwIfAborted();
-          return read(controller.signal, waited);
+          return read(controller.signal, waited, () => {
+            // A warm lookup can itself observe an edit and invalidate this pending slot.
+            // A native read starting *after* that edit may publish; never replace a newer job.
+            if (!controller.signal.aborted && !this.pending.has(key) && !this.cache.has(key))
+              this.pending.set(key, job);
+          });
         })
         .then((value) => {
           if (controller.signal.aborted) throw new DomainError('conflict');
@@ -81,6 +87,7 @@ export class OpenworldTerrainCache {
             (value?.byteLength ?? 0) <= this.options.bytes
           ) {
             this.cache.set(key, { value, expires: this.now() + ttl });
+            onStored?.(value);
             this.size += value?.byteLength ?? 0;
             while (this.size > this.options.bytes || this.cache.size > this.options.entries) {
               const oldest = this.cache.keys().next().value;

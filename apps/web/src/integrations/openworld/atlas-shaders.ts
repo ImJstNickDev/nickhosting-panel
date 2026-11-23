@@ -3,13 +3,15 @@ uniform vec3 uOrigin;
 uniform mat3 uAxes;
 uniform vec4 uClip;
 uniform float uPerspective;
+uniform vec2 uDepthClip;
 vec4 project(vec3 world) {
   vec3 p=uAxes*(world+uOrigin);
   if(uPerspective>0.5){
     float depth=p.z+uClip.z;
-    float nearZ=max(0.025, min(1., uClip.z/1000.));
-    float farZ=uClip.w;
-    return vec4(p.xy*uClip.xy*uClip.z,((farZ+nearZ)*depth-2.*nearZ*farZ)/(farZ-nearZ),depth);
+    float nearZ=uDepthClip.x,farZ=uDepthClip.y;
+    // Exact endpoints avoid double-blending coplanar transparent faces on the split.
+    float clipZ=depth-2.*nearZ*((farZ-depth)/(farZ-nearZ));
+    return vec4(p.xy*uClip.xy*uClip.z,clipZ,depth);
   }
   return vec4(p.xy*uClip.xy,p.z/uClip.w,1.);
 }

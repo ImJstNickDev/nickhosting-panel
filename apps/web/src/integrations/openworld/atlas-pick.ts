@@ -142,13 +142,14 @@ export function pickAtlas(
   voxel: number,
   far: number,
   maskAt: (x: number, z: number) => number | null,
+  near = 0,
 ): AtlasPoint | null {
   const candidates: { e: Entry; clip: Range }[] = [];
   for (const e of entries) {
     const v = e.value,
       req = e.request;
     if (!v) continue;
-    const clip = { near: 0, far };
+    const clip = { near, far };
     if (v.kind === 'quads' && req.kind === 'mesh') {
       if (
         !slab(clip, ray.origin[0], ray.dir[0], req.i * 16, (req.i + 1) * 16) ||

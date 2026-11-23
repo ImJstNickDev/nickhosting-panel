@@ -162,8 +162,17 @@ the server gallery.
 flight share the viewport, selected point and terrain cache. Zoom or move toward a
 place to see the game's voxel mesh, including overhangs, water and material textures
 when provided by the running release. The more distant landscape uses the game's
-saved surface at progressively coarser resolutions. On a device without WebGL 2
-the interactive 2D overview remains available.
+saved surface at progressively coarser resolutions. In level flight, the renderer
+can show recorded terrain out to 8 km. A wider loading cone, a small area around
+the eye and a short lookahead during movement prepare upcoming turns. Returning
+to a resident region uses local geometry on the next draw. On a device without
+WebGL 2 the interactive 2D overview remains available.
+
+NickPanel can retain previously requested terrain for up to ten minutes in a
+bounded, process-local cache. An older tile is reused only after the game's
+change cursor confirms that its columns are still current. A reset or an
+unverifiable change history requires a fresh read. Terrain is sent to browsers
+on demand.
 
 In free flight, click the map to capture the mouse. Look around with the mouse
 and move with WASD. Hold Shift to fly faster or Space to rise. The map opens in

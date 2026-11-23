@@ -824,6 +824,96 @@ it('streams scoped native geometry, honours its stamp and invalidates only touch
   expect((await f.request(mesh(4, 3))).status).toBe(403);
 });
 
+it('revalidates minute-old terrain against the native world cursor, sharing proofs and reloading mutations', async () => {
+  const f = await fixture();
+  await f.grant(read);
+  await f.power('running');
+  const q = `?world=earth&processRef=${await f.ref()}`;
+  const tile = (ci: number, stamp: number) =>
+    f.request(`/terrain${q}&face=0&ci=${ci}&cj=0&n=1&lod=6&stamp=${stamp}`);
+  let latest = 30;
+  const baselines: string[] = [];
+  f.state.asset = (url) => {
+    if (url.pathname.endsWith('/map/changes')) {
+      baselines.push(String(url.searchParams.get('since')));
+      return Response.json({ stamp: latest, columns: f.state.changes, reset: f.state.reset });
+    }
+    if (url.pathname.endsWith('/map/surface')) {
+      const data = new Uint8Array(44),
+        view = new DataView(data.buffer);
+      view.setUint32(0, 0x4f574d53);
+      view.setUint16(4, 2, true);
+      view.setUint16(6, 6, true);
+      view.setInt32(12, Number(url.searchParams.get('ci')), true);
+      view.setUint16(20, 1, true);
+      view.setUint16(22, 1, true);
+      view.setUint32(32, 1, true);
+      data[36] = latest;
+      return new Response(data);
+    }
+  };
+  // Before this API has observed a real native cursor, a browser stamp cannot
+  // enable the longer retention, even if it happens to be correct.
+  expect((await tile(1, 30)).status).toBe(200);
+  f.state.clock += 60_000;
+  expect((await f.request(`/index${q}`)).status).toBe(200);
+  await Promise.all([tile(1, 30), tile(2, 30)]);
+  const surfaces = () => f.reads.filter((x) => x === 'map/surface').length;
+  expect(surfaces()).toBe(3);
+  expect(baselines).toEqual([]);
+  f.state.clock += 180_000;
+  latest = 42;
+  f.state.changes = [[0, 7, 0]];
+  for (const response of await Promise.all([tile(1, 42), tile(2, 42)])) {
+    expect(new Uint8Array(await response.arrayBuffer())[36]).toBe(30);
+  }
+  expect(baselines).toEqual(['30']);
+  expect(surfaces()).toBe(3);
+  f.state.clock += 60_000;
+  latest = 43;
+  f.state.changes = [[0, 1, 0]];
+  const [edited, untouched] = await Promise.all([tile(1, 43), tile(2, 43)]);
+  expect(new Uint8Array(await edited.arrayBuffer())[36]).toBe(43);
+  expect(new Uint8Array(await untouched.arrayBuffer())[36]).toBe(30);
+  expect((await tile(1, 43)).status).toBe(200);
+  expect(surfaces()).toBe(4);
+  f.state.clock += 60_000;
+  f.state.reset = true;
+  latest = 44;
+  expect(new Uint8Array(await (await tile(2, 44)).arrayBuffer())[36]).toBe(44);
+  expect((await tile(2, 44)).status).toBe(200);
+  expect(surfaces()).toBe(5);
+
+  // An index rewind is evidence of discontinuity even with no intervening changes poll.
+  f.state.clock += 2000;
+  latest = 30;
+  expect((await f.request(`/index${q}`)).status).toBe(200);
+  expect(new Uint8Array(await (await tile(2, 44)).arrayBuffer())[36]).toBe(30);
+  expect(surfaces()).toBe(6);
+
+  // A full optional validation lane must not consume the geometry caller's admission.
+  f.state.clock += 60_000;
+  latest = 45;
+  const held = Promise.withResolvers<void>();
+  let polls = 0;
+  f.state.onRead = async (path) => {
+    if (path !== 'map/changes') return;
+    polls++;
+    await held.promise;
+  };
+  const checking = Array.from({ length: 8 }, (_, i) => f.request(`/changes${q}&since=${60 + i}`));
+  try {
+    await vi.waitFor(() => expect(polls).toBe(8));
+    const fresh = await tile(2, 45);
+    expect(fresh.status).toBe(200);
+    expect(new Uint8Array(await fresh.arrayBuffer())[36]).toBe(45);
+    expect(surfaces()).toBe(7);
+  } finally {
+    held.resolve();
+    await Promise.all(checking);
+  }
+});
+
 it('shares native capacity across terrain and mesh routes, drops queued cancellations and checks a changed private binding before dispatch', async () => {
   const f = await fixture();
   await f.power('running');

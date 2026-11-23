@@ -1,7 +1,10 @@
 import { AtlasBackoff, AtlasTileRetries } from './atlas-backoff.js';
 import { clamp } from './atlas-camera.js';
+import { AtlasColumnIndex } from './atlas-column-index.js';
+import { flightDemand, flightIntersects } from './atlas-flight-plan.js';
 import { sampleRaster, type Terrain } from './atlas-geometry.js';
 import { usesVoxelSprite } from './atlas-materials.js';
+import { visitAtlasSurvey } from './atlas-survey-plan.js';
 import type {
   AtlasBounds,
   AtlasFrame,
@@ -21,6 +24,7 @@ export type Entry = {
   stale: boolean;
   serial: number;
 };
+type MeshBatch = { count: number; delivered: boolean };
 type Task = { key: string; request: AtlasRequest; priority: number };
 export const requestKey = (r: AtlasRequest) =>
   r.kind === 'surface'
@@ -31,6 +35,7 @@ export const requestKey = (r: AtlasRequest) =>
 // A cold native surface request may have to read every column in the block.
 const chunkCount = [2, 2, 4, 4, 8, 8, 8] as const;
 const cacheBudget = 96 * 1024 * 1024;
+const recentMeshMs = 15000;
 const contains = (b: AtlasBounds, i: number, j: number) =>
   i >= b.i0 && i <= b.i1 && j >= b.j0 && j <= b.j1;
 
@@ -38,27 +43,33 @@ export class AtlasStream {
   private readonly cache = new Map<string, Entry>();
   private readonly pending = new Map<
     string,
-    { abort: AbortController; request: AtlasRequest; batch?: boolean }
+    { abort: AbortController; request: AtlasRequest; batch?: MeshBatch; received?: boolean }
   >();
-  private batchActive = false;
+  private primaryBatch?: MeshBatch;
+  // A single small first delivery may finish while the camera prioritizes another patch.
+  private returningBatch?: MeshBatch;
+  private firstMeshGroup = true;
+  private get batchActive() {
+    return Boolean(this.primaryBatch);
+  }
   private readonly workers = new Map<
     number,
     { key: string; resolve: (value: Terrain) => void; reject: (error: unknown) => void }
   >();
-  private readonly evictedUntil = new Map<string, number>();
+  private readonly evictedPriority = new Map<string, number>();
   private readonly tileRetries: AtlasTileRetries;
   private readonly splitSurfaces = new Set<string>();
   private readonly smallestSurface: number[] = [...chunkCount];
   private readonly worker: Worker;
   private spriteIds = new Set<number>();
   private wanted = new Map<string, Task>();
-  private queue: Task[] = [];
+  private queue = new Set<Task>();
   // Coverage, scale and intersecting column boundaries govern the requested set.
   // Newly decoded columns usually change visibility alone.
   private previousPlan: { view: AtlasFrame; mode: AtlasMode } | null = null;
+  private presented: { view: AtlasFrame; mode: AtlasMode; generation: number } | null = null;
   private viewedGeneration = -1;
   private serial = 0;
-  private age = 0;
   private totalBytes = 0;
   private disposed = false;
   private paused = false;
@@ -69,6 +80,7 @@ export class AtlasStream {
   audited: AtlasBounds | null = null;
   private survey: AtlasBounds | null = null;
   private readonly seedFootprints = new Map<string, boolean>();
+  private columnIndex = new AtlasColumnIndex();
   private coverageSet = new Set<string>();
   seed = false;
   seedEdge: number;
@@ -134,6 +146,7 @@ export class AtlasStream {
     this.coverageReady = true;
     this.columns = columns;
     this.stride = Math.max(1, stride);
+    this.columnIndex = new AtlasColumnIndex(columns, this.stride);
     this.coverageSet = new Set(columns.map(([i, j]) => `${i},${j}`));
     this.generation++;
   }
@@ -151,6 +164,19 @@ export class AtlasStream {
   }
   indexed(i: number, j: number) {
     return this.stride === 1 && this.listed(i, j);
+  }
+  forEachColumn(bounds: AtlasBounds, visit: (i: number, j: number) => void) {
+    this.columnIndex.visit(bounds, ({ columns }) => {
+      for (const [i, j] of columns) {
+        if (
+          i <= bounds.i1 &&
+          j <= bounds.j1 &&
+          i + this.stride > bounds.i0 &&
+          j + this.stride > bounds.j0
+        )
+          visit(i, j);
+      }
+    });
   }
   private surfaceAt(i: number, j: number, lod: number) {
     // Wide surveys can use larger previews. Keep them available while zooming in.
@@ -171,6 +197,15 @@ export class AtlasStream {
       if (entry && this.wanted.has(entry.key)) stale ??= entry;
     }
     return stale;
+  }
+  private hasDrawnSurface(i: number, j: number) {
+    for (let lod = 6; lod >= 0; lod--) {
+      const e = this.surfaceAt(i, j, lod);
+      if (e?.request.kind !== 'surface' || e.value?.kind !== 'raster' || e.stale) continue;
+      const r = e.request;
+      if (e.value.present?.[(j - r.cj) * r.n + i - r.ci]) return true;
+    }
+    return false;
   }
   seedAllowed(i: number, j: number) {
     if (!this.seed || (this.audited && !contains(this.audited, i, j))) return false;
@@ -250,13 +285,17 @@ export class AtlasStream {
       const task = this.wanted.get(key);
       return !!task && affected(task.request);
     });
+    for (const key of this.evictedPriority.keys()) {
+      const task = this.wanted.get(key);
+      if (task && affected(task.request)) this.evictedPriority.delete(key);
+    }
     for (const entry of this.cache.values()) if (affected(entry.request)) entry.stale = true;
     for (const job of this.pending.values()) if (affected(job.request)) job.abort.abort();
     this.generation++;
   }
   retry() {
     this.previousPlan = null;
-    this.evictedUntil.clear();
+    this.evictedPriority.clear();
     this.tileRetries.reset();
     this.backoff.live.reset();
     this.backoff.seed.reset();
@@ -269,24 +308,17 @@ export class AtlasStream {
   }
   update(view: AtlasFrame, mode: AtlasMode) {
     const previous = this.previousPlan;
-    const viewChanged =
-      !previous ||
-      previous.mode !== mode ||
-      previous.view.span !== view.span ||
-      previous.view.width !== view.width ||
-      !sameBounds(previous.view.bounds, view.bounds) ||
-      !sameBounds(previous.view.detailBounds, view.detailBounds) ||
-      (mode === 'fly'
-        ? previous.view.x !== view.x || previous.view.z !== view.z
-        : Math.floor(previous.view.x / 16) !== Math.floor(view.x / 16) ||
-          Math.floor(previous.view.z / 16) !== Math.floor(view.z / 16));
+    const viewChanged = !previous || previous.mode !== mode || !sameDemandView(previous.view, view);
+    if (this.evictedPriority.size && this.totalBytes < cacheBudget * 0.75 && this.cache.size < 1200)
+      this.evictedPriority.clear();
     if (!viewChanged && this.viewedGeneration === this.generation) return;
     if (viewChanged) {
       this.plan(view, mode);
       this.previousPlan = { view, mode };
+      this.presented = null;
     }
     this.viewedGeneration = this.generation;
-    this.updateVisible(view, mode);
+    this.present(view, mode);
     this.pump();
   }
 
@@ -317,6 +349,17 @@ export class AtlasStream {
         priority,
       );
     };
+    const discover = (i: number, j: number, n: number, priority: number) => {
+      // Produce a close native presence map promptly before targeting individual mesh columns.
+      // A 32-column-wide native read can otherwise hold back all 1,024 underlying cells.
+      if (view.flight && n > 8 && flightDemand(view.flight, i, j, n)?.meshLod != null) {
+        for (let z = j; z < j + n; z += 8)
+          for (let x = i; x < i + n; x += 8) {
+            const demand = flightDemand(view.flight, x, z, 8);
+            if (demand) add({ kind: 'surface', ci: x, cj: z, n: 8, lod: 6 }, demand.priority + 1);
+          }
+      } else add({ kind: 'surface', ci: i, cj: j, n, lod: 6 }, priority);
+    };
     const mesh = (i: number, j: number, d: number) => {
       if (mode === 'plan') return false;
       // A merged quarter-metre voxel seen at less than one pixel needs coarser geometry.
@@ -328,6 +371,30 @@ export class AtlasStream {
     };
     const consider = (i: number, j: number, s: number) => {
       if (i > b.i1 || i + s <= b.i0 || j > b.j1 || j + s <= b.j0) return;
+      if (view.flight) {
+        const load = flightDemand(view.flight, i, j, s);
+        if (!load) return;
+        if (s === 1 && load.meshLod !== null) {
+          const r = { kind: 'mesh', i, j, lod: load.meshLod } as const;
+          const finer =
+            r.lod > 1 ? this.cache.get(requestKey({ ...r, lod: r.lod / 2 })) : undefined;
+          // An adjacent finer LOD already resident at a boundary needs no coarser download.
+          // Looking down from altitude, the closest columns can sit below the
+          // eye and outside the picture. Include the focal column in the first delivery.
+          const atFocus = view.flight.pitch > 0.15 && i === Math.floor(cx) && j === Math.floor(cz);
+          add(
+            finer?.value?.kind === 'quads' && !finer.stale ? finer.request : r,
+            atFocus ? -1 : load.priority,
+          );
+        }
+        if (s === 1 || s <= tileSize(load.surfaceLod))
+          terrain(i, j, load.surfaceLod, load.priority + 2);
+        if (s > 1) {
+          const n = Math.min(32, Math.max(8, s));
+          discover(Math.floor(i / n) * n, Math.floor(j / n) * n, n, load.priority + 1);
+        }
+        return;
+      }
       const d = dist(i, j);
       // Keep a preview visible until the finer terrain arrives.
       terrain(i, j, 6, d * 0.12);
@@ -349,56 +416,57 @@ export class AtlasStream {
         if (s <= n) terrain(i, j, lod, d + 2);
       }
     };
-    for (const [i, j] of this.columns) consider(i, j, this.stride);
-    if (this.survey) {
-      const si0 = Math.max(b.i0, this.survey.i0),
-        sj0 = Math.max(b.j0, this.survey.j0),
-        si1 = Math.min(b.i1, this.survey.i1),
-        sj1 = Math.min(b.j1, this.survey.j1);
-      if (si0 <= si1 && sj0 <= sj1) {
-        // Bounded, centre-out exploration if the native face exceeds its safe enumeration limit.
-        const baseI = clamp(
-            Math.floor(cx / previewSize),
-            Math.floor(si0 / previewSize),
-            Math.floor(si1 / previewSize),
-          ),
-          baseJ = clamp(
-            Math.floor(cz / previewSize),
-            Math.floor(sj0 / previewSize),
-            Math.floor(sj1 / previewSize),
-          );
-        let visited = 0;
-        const rMax = Math.max(
-          baseI - Math.floor(si0 / previewSize),
-          Math.floor(si1 / previewSize) - baseI,
-          baseJ - Math.floor(sj0 / previewSize),
-          Math.floor(sj1 / previewSize) - baseJ,
-        );
-        const minI = Math.floor(si0 / previewSize) - baseI,
-          maxI = Math.floor(si1 / previewSize) - baseI;
-        const minJ = Math.floor(sj0 / previewSize) - baseJ,
-          maxJ = Math.floor(sj1 / previewSize) - baseJ;
-        const visit = (di: number, dj: number) => {
-          const i = (baseI + di) * previewSize,
-            j = (baseJ + dj) * previewSize;
-          terrain(i, j, 6, dist(i + previewSize / 2, j + previewSize / 2) * 0.12);
-          visited++;
-        };
-        for (let r = 0; r <= rMax && visited < 192; r++) {
-          // Intersect the ring edges before scanning. A long one-column extent stays linear.
-          for (const j of r === 0 ? [0] : [-r, r]) {
-            if (j < minJ || j > maxJ) continue;
-            for (let i = Math.max(minI, -r); i <= Math.min(maxI, r) && visited < 192; i++)
-              visit(i, j);
-          }
-          for (const i of [-r, r]) {
-            if (i < minI || i > maxI) continue;
-            for (let j = Math.max(minJ, 1 - r); j <= Math.min(maxJ, r - 1) && visited < 192; j++)
-              visit(i, j);
-          }
+    const wideBuckets: { i: number; j: number; priority: number }[] = [];
+    this.columnIndex.visit(b, (block) => {
+      if (view.flight) {
+        const n = this.columnIndex.size;
+        const demand = flightDemand(view.flight, block.i, block.j, n);
+        if (!demand) return;
+        if (this.stride > 32) {
+          wideBuckets.push({ i: block.i, j: block.j, priority: demand.priority });
+          return;
+        }
+        if (this.stride === 1 && demand.meshLod === null && n <= tileSize(demand.surfaceLod)) {
+          // Wide native previews pay off for contiguous distant terrain. Disjoint
+          // settlements sharing the same skyline keep their small native footprint.
+          if (demand.surfaceLod === 6 && block.farSize > n) {
+            const w = block.farSize;
+            add(
+              {
+                kind: 'surface',
+                ci: Math.floor(block.i / w) * w,
+                cj: Math.floor(block.j / w) * w,
+                n: w,
+                lod: 6,
+              },
+              demand.priority + 2,
+            );
+          } else terrain(block.i, block.j, demand.surfaceLod, demand.priority + 2);
+          return;
         }
       }
+      for (const [i, j] of block.columns) consider(i, j, this.stride);
+    });
+    if (wideBuckets.length) {
+      // A sampled bucket may contain live columns in any of its quadrants.
+      // Visit its overlapping native tiles, closest occupied buckets first on planetary views.
+      const n = this.stride;
+      let budget = 2048;
+      for (const { i, j } of wideBuckets.sort((a, b) => a.priority - b.priority)) {
+        if (budget <= 0) break;
+        budget -= visitAtlasSurvey(
+          view,
+          { i0: i, j0: j, i1: i + n - 1, j1: j + n - 1 },
+          32,
+          (x, z, priority) => discover(x, z, 32, priority),
+          Math.min(192, budget),
+        );
+      }
     }
+    if (this.survey)
+      visitAtlasSurvey(view, this.survey, previewSize, (i, j, priority) => {
+        discover(i, j, previewSize, priority);
+      });
     // Measured availability supplies exact column locations after a coarse survey/bucket response.
     if (this.survey || this.stride > 1) {
       for (const entry of this.cache.values()) {
@@ -412,6 +480,11 @@ export class AtlasStream {
           !intersects(entry, b, view, this.seedEdge)
         )
           continue;
+        const f = view.flight;
+        if (f) {
+          const block = flightDemand(f, r.ci, r.cj, r.n);
+          if (!block || (block.meshLod === null && block.surfaceLod === 6)) continue;
+        }
         for (let k = 0; k < v.present.length; k++)
           if (v.present[k]) consider(r.ci + (k % r.n), r.cj + Math.floor(k / r.n), 1);
       }
@@ -436,10 +509,13 @@ export class AtlasStream {
             i <= clamp(Math.floor(((bounds.i1 + 1) * 16) / side), 0, max);
             i++
           ) {
+            const demand =
+              view.flight && flightDemand(view.flight, (i * side) / 16, (j * side) / 16, side / 16);
+            if (view.flight && !demand) continue;
             if (!this.needsSeed(bounds, i, j, side)) continue;
             add(
               { kind: 'seed', x: i, y: j, z },
-              dist(((i + 0.5) * side) / 16, ((j + 0.5) * side) / 16),
+              demand ? demand.priority + 3 : dist(((i + 0.5) * side) / 16, ((j + 0.5) * side) / 16),
             );
           }
         }
@@ -470,22 +546,67 @@ export class AtlasStream {
       for (const key of this.splitSurfaces)
         if (!visibleSplits.has(key)) this.splitSurfaces.delete(key);
     }
+    if (view.flight) prioritizeSkyline(view.flight, wanted);
     this.wanted = wanted;
     this.tileRetries.retain(wanted);
-    for (const key of this.evictedUntil.keys()) if (!wanted.has(key)) this.evictedUntil.delete(key);
-    this.queue = [...wanted.values()]
-      .filter((task) => {
-        const entry = this.cache.get(task.key);
-        return !entry || entry.stale;
-      })
-      .sort((a, b) => a.priority - b.priority);
-    for (const [key, job] of this.pending) if (!wanted.has(key)) job.abort.abort();
+    for (const [key, priority] of this.evictedPriority) {
+      const task = wanted.get(key);
+      // If a former skyline tile enters the foreground, it is immediately eligible again.
+      if (!task || task.priority + 1 < priority * 0.85) this.evictedPriority.delete(key);
+    }
+    this.queue = new Set(
+      [...wanted.values()]
+        .filter((task) => {
+          const entry = this.cache.get(task.key);
+          return !entry || entry.stale;
+        })
+        .sort((a, b) => a.priority - b.priority),
+    );
+    const keepBatches = new Set<MeshBatch>();
+    for (const [key, job] of this.pending) {
+      if (job.batch && wanted.has(key) && !job.abort.signal.aborted) keepBatches.add(job.batch);
+    }
+    const batch = this.primaryBatch;
+    if (batch && !keepBatches.has(batch) && mode === 'fly') {
+      // A small in-flight prefix can finish without occupying the new direction's foreground lane.
+      if (!this.returningBatch && (batch.count <= 3 || batch.delivered)) {
+        this.returningBatch = batch;
+        this.primaryBatch = undefined;
+      }
+    }
+    for (const [key, job] of this.pending) {
+      if (wanted.has(key) || job.received) continue;
+      if (
+        job.batch &&
+        (job.batch.delivered || keepBatches.has(job.batch) || job.batch === this.returningBatch)
+      )
+        continue;
+      job.abort.abort();
+    }
+    if (
+      mode === 'fly' &&
+      (!batch || !keepBatches.has(batch)) &&
+      !this.visible.some((e) => e.request.kind === 'mesh' && wanted.has(e.key))
+    )
+      this.firstMeshGroup = true;
   }
-  private updateVisible(view: AtlasFrame, mode: AtlasMode) {
+
+  /** Select already decoded geometry on movement even between network planning ticks. */
+  present(view: AtlasFrame, mode: AtlasMode) {
+    const last = this.presented;
+    if (
+      last &&
+      last.generation === this.generation &&
+      last.mode === mode &&
+      sameDemandView(last.view, view)
+    )
+      return;
+    this.presented = { view, mode, generation: this.generation };
     const b = view.bounds;
     const wanted = this.wanted;
-    const age = ++this.age;
+    const now = Date.now();
     const visible: Entry[] = [];
+    const meshes = new Map<string, { entry: Entry; cost: number }>();
     for (const e of this.cache.values()) {
       if (
         (e.stale && !wanted.has(e.key)) ||
@@ -493,15 +614,61 @@ export class AtlasStream {
         !intersects(e, b, view, this.seedEdge)
       )
         continue;
-      if (e.request.kind === 'mesh' && (mode === 'plan' || !wanted.has(e.key))) {
+      if (view.flight) {
+        const req = e.request;
+        const n =
+          req.kind === 'mesh'
+            ? 1
+            : req.kind === 'surface'
+              ? req.n
+              : this.seedEdge / 2 ** req.z / 16;
+        const i = req.kind === 'mesh' ? req.i : req.kind === 'surface' ? req.ci : req.x * n;
+        const j = req.kind === 'mesh' ? req.j : req.kind === 'surface' ? req.cj : req.y * n;
+        // The GPU clips the exact 3D box each frame. A one-degree guard covers the
+        // presentation threshold so a turn never reveals a tile before the next selection.
+        const pad =
+          0.15 +
+          0.02 *
+            Math.max(
+              Math.abs(i + n / 2 - view.flight.eyeX / 16),
+              Math.abs(j + n / 2 - view.flight.eyeZ / 16),
+            );
+        if (!flightIntersects(view.flight, i - pad, j - pad, n + 2 * pad, 'draw')) continue;
+        if (req.kind === 'mesh') {
+          if (
+            this.coverageReady &&
+            this.stride === 1 &&
+            !this.survey &&
+            (!this.audited || contains(this.audited, i, j)) &&
+            !this.listed(i, j)
+          )
+            continue;
+          const meshLod = flightDemand(view.flight, i, j)?.meshLod;
+          // Crossing from voxels to a distant surface mustn't open a hole while that
+          // surface is still travelling. Release the fallback when a live sample exists.
+          if (meshLod == null && this.hasDrawnSurface(i, j)) continue;
+          const desired = meshLod ?? 4;
+          const key = `${i},${j}`;
+          // Prefer the screen-space target. While it streams, preserve the closest
+          // resident LOD and break ties in favour of the finer one.
+          const cost =
+            Math.max(desired / req.lod, req.lod / desired) + (req.lod > desired ? 0.1 : 0);
+          if (cost < (meshes.get(key)?.cost ?? Infinity)) meshes.set(key, { entry: e, cost });
+          continue;
+        }
+      } else if (e.request.kind === 'mesh' && (mode === 'plan' || !wanted.has(e.key))) {
         // Keep a resident voxel LOD while a replacement is being streamed.
         const r = e.request;
         if (mode === 'plan' || ![1, 2, 4].some((l) => wanted.has(requestKey({ ...r, lod: l }))))
           continue;
       }
       if (e.request.kind === 'seed' && !this.seed) continue;
-      if (wanted.has(e.key)) e.age = age;
+      e.age = now;
       visible.push(e);
+    }
+    for (const { entry } of meshes.values()) {
+      entry.age = now;
+      visible.push(entry);
     }
     if (visible.length !== this.visible.length || visible.some((e, i) => e !== this.visible[i])) {
       this.visible = visible;
@@ -514,7 +681,7 @@ export class AtlasStream {
     )
       return false;
     const cached = this.cache.get(task.key);
-    return (!cached || cached.stale) && (this.evictedUntil.get(task.key) ?? 0) <= Date.now();
+    return (!cached || cached.stale) && !this.evictedPriority.has(task.key);
   }
   private pump() {
     if (this.disposed || this.paused) return;
@@ -523,7 +690,11 @@ export class AtlasStream {
     let wakeAt = Infinity;
     let liveBusy = pending.some((job) => job.request.kind !== 'seed');
     let seedBusy = pending.some((job) => job.request.kind === 'seed');
-    let slots = 6 - pending.filter((job) => !job.batch).length - Number(this.batchActive);
+    let slots =
+      6 -
+      pending.filter((job) => !job.batch).length -
+      Number(this.batchActive) -
+      Number(!!this.returningBatch);
     for (const task of this.queue) {
       if (slots <= 0) break;
       if ((task.request.kind === 'seed' && seedBusy) || !this.eligible(task)) continue;
@@ -555,7 +726,10 @@ export class AtlasStream {
     this.tileRetries.wakeAt(wakeAt);
   }
   private startBatch(lod: number, loader: NonNullable<AtlasOptions['loadMeshes']>) {
-    const batch = new AbortController();
+    const abortBatch = new AbortController();
+    const batch: MeshBatch = { count: 0, delivered: false };
+    const limit = this.previousPlan?.mode === 'fly' && this.firstMeshGroup ? 3 : 16;
+    this.firstMeshGroup = false;
     const requests: Extract<AtlasRequest, { kind: 'mesh' }>[] = [];
     const jobs: { task: Task; abort: AbortController }[] = [];
     for (const task of this.queue) {
@@ -568,20 +742,22 @@ export class AtlasStream {
       )
         continue;
       const abort = new AbortController();
-      this.pending.set(task.key, { abort, request: r, batch: true });
+      this.pending.set(task.key, { abort, request: r, batch });
       requests.push(r);
       jobs.push({ task, abort });
-      if (jobs.length === 16) break;
+      if (jobs.length === limit) break;
     }
     const cancel = () => {
-      if (jobs.every((job) => job.abort.signal.aborted)) batch.abort();
+      if (jobs.every((job) => job.abort.signal.aborted)) abortBatch.abort();
     };
     for (const { abort } of jobs) abort.signal.addEventListener('abort', cancel, { once: true });
-    this.batchActive = true;
+    batch.count = requests.length;
+    this.primaryBatch = batch;
     const response = Promise.resolve()
-      .then(() => loader(requests, batch.signal))
+      .then(() => loader(requests, abortBatch.signal))
       .then((results) => {
         if (results.length !== requests.length) throw new Error('Incomplete Openworld mesh batch');
+        batch.delivered = true;
         return results;
       });
     void Promise.all(
@@ -593,7 +769,8 @@ export class AtlasStream {
         ),
       ),
     ).finally(() => {
-      this.batchActive = false;
+      if (this.primaryBatch === batch) this.primaryBatch = undefined;
+      if (this.returningBatch === batch) this.returningBatch = undefined;
       for (const job of jobs) job.abort.signal.removeEventListener('abort', cancel);
       this.pump();
     });
@@ -602,6 +779,8 @@ export class AtlasStream {
     try {
       const bytes = await (batched ?? this.options.load(task.request, abort.signal));
       if (this.disposed || abort.signal.aborted) return;
+      const job = this.pending.get(task.key);
+      if (job) job.received = true;
       const spriteIds = this.spriteIds;
       const value = bytes
         ? await new Promise<Terrain>((resolve, reject) => {
@@ -645,24 +824,43 @@ export class AtlasStream {
         ...task,
         value,
         bytes: size,
-        age: this.age,
+        age: task.request.kind === 'mesh' && !this.wanted.has(task.key) ? Date.now() : 0,
         stale: false,
         serial: ++this.serial,
       });
       if (this.cache.size > 1800 || this.totalBytes > cacheBudget) {
-        const candidates = [...this.cache.values()].sort((a, b) => a.age - b.age);
-        for (const c of candidates) {
+        const now = Date.now();
+        const candidates = [...this.cache.values()]
+          .map((entry) => {
+            const priority = this.wanted.get(entry.key)?.priority ?? Infinity;
+            const near = priority < 12;
+            const visitedMesh = entry.value?.kind === 'quads' && entry.age >= now - recentMeshMs;
+            const rank = entry.stale
+              ? 0
+              : near && entry.value
+                ? 4
+                : visitedMesh
+                  ? 3
+                  : entry.age >= now - 2000
+                    ? 2
+                    : Number(priority < Infinity);
+            return { entry, rank, priority };
+          })
+          .sort((a, b) => a.rank - b.rank || a.entry.age - b.entry.age || b.priority - a.priority);
+        for (const { entry: c, priority } of candidates) {
           if (this.cache.size <= 1600 && this.totalBytes <= cacheBudget * 0.9) break;
           this.remove(c.key);
           this.previousPlan = null;
           // Defer eviction victims in a scene that exceeds memory capacity.
-          if (this.wanted.has(c.key)) this.evictedUntil.set(c.key, Date.now() + 30000);
+          if (Number.isFinite(priority)) this.evictedPriority.set(c.key, priority);
         }
       }
+      const queued = this.wanted.get(task.key);
+      if (queued) this.queue.delete(queued);
       this.generation++;
       this.changed();
     } catch (e) {
-      if (!this.disposed && !abort.signal.aborted) {
+      if (!this.disposed && !abort.signal.aborted && this.wanted.has(task.key)) {
         const status = typeof e === 'object' && e !== null && 'status' in e ? e.status : null;
         if (task.request.kind !== 'seed' && (status === 503 || status === 504)) {
           const r = task.request;
@@ -725,10 +923,55 @@ export class AtlasStream {
     this.worker.terminate();
     this.cache.clear();
     this.visible = [];
-    this.queue = [];
-    this.evictedUntil.clear();
+    this.queue.clear();
+    this.evictedPriority.clear();
     this.tileRetries.reset();
   }
+}
+/** Keep a few genuinely distant viewshed samples progressing alongside the nearest ground. */
+function prioritizeSkyline(f: NonNullable<AtlasFrame['flight']>, wanted: Map<string, Task>) {
+  const skyline = new Map<number, { task: Task; distance: number }>();
+  for (const task of wanted.values()) {
+    const r = task.request;
+    if (r.kind !== 'surface' || r.lod < 4) continue;
+    const dx = (r.ci + r.n / 2) * 16 - f.eyeX,
+      dz = (r.cj + r.n / 2) * 16 - f.eyeZ;
+    const forward = dx * f.sinYaw + dz * f.cosYaw;
+    if (forward < Math.max(512, f.meshReach)) continue;
+    const side = dx * f.cosYaw - dz * f.sinYaw;
+    const angle = Math.atan2(side, forward);
+    if (Math.abs(angle) > f.halfDraw) continue;
+    const sector = Math.min(7, Math.floor((angle / f.halfDraw + 1) * 4));
+    const key = sector + (forward > f.horizon * 0.5 ? 8 : 0);
+    const current = skyline.get(key);
+    if (!current || current.distance < forward) skyline.set(key, { task, distance: forward });
+  }
+  for (const { task, distance } of skyline.values())
+    task.priority = Math.min(task.priority, 8 + Math.min(4, (distance / f.horizon) * 4));
+}
+function sameDemandView(a: AtlasFrame, b: AtlasFrame) {
+  if (a.span !== b.span || a.width !== b.width || a.height !== b.height) return false;
+  if (a.flight && b.flight) {
+    // Spatial/angle padding covers these sub-pixel planner movements. Compare to the last
+    // processed frame, so a slow pan or turn eventually crosses the threshold.
+    return (
+      Math.abs(a.flight.eyeX - b.flight.eyeX) < 2 &&
+      Math.abs(a.flight.eyeZ - b.flight.eyeZ) < 2 &&
+      Math.abs(a.flight.eyeY - b.flight.eyeY) < 2 &&
+      Math.abs(a.flight.pitch - b.flight.pitch) < 0.015 &&
+      Math.abs(a.flight.altitude - b.flight.altitude) < 3 &&
+      Math.abs(a.flight.leadX - b.flight.leadX) < 8 &&
+      Math.abs(a.flight.leadZ - b.flight.leadZ) < 8 &&
+      a.flight.sinYaw * b.flight.sinYaw + a.flight.cosYaw * b.flight.cosYaw > 0.99988
+    );
+  }
+  return (
+    a.yaw === b.yaw &&
+    Math.floor(a.x / 16) === Math.floor(b.x / 16) &&
+    Math.floor(a.z / 16) === Math.floor(b.z / 16) &&
+    sameBounds(a.bounds, b.bounds) &&
+    sameBounds(a.detailBounds, b.detailBounds)
+  );
 }
 function sameBounds(a: AtlasBounds | undefined, b: AtlasBounds | undefined) {
   return (

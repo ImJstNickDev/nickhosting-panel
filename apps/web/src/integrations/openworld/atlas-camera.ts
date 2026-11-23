@@ -1,8 +1,14 @@
+import {
+  flightBounds,
+  flightHalfFov,
+  flightNearClip,
+  makeFlightView,
+} from './atlas-flight-plan.js';
 import type { AtlasFrame, AtlasMode, AtlasView } from './atlas-types.js';
 
 export type Vec3 = [number, number, number];
 export const clamp = (n: number, min: number, max: number) => Math.max(min, Math.min(max, n));
-const tanHalfFov = Math.tan((50 * Math.PI) / 360);
+const tanHalfFov = Math.tan(flightHalfFov);
 const isoPitch = Math.PI / 6;
 const isoYaw = (3 * Math.PI) / 4;
 const dot = (a: Vec3, b: Vec3) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
@@ -17,6 +23,11 @@ export class AtlasCamera {
   span = 128;
   yaw = isoYaw;
   pitch = isoPitch;
+  groundHeight: number | undefined;
+  seedTerrain = false;
+  private translatedAt = Number.NEGATIVE_INFINITY;
+  private leadX = 0;
+  private leadZ = 0;
 
   constructor(
     readonly edge: number,
@@ -25,6 +36,8 @@ export class AtlasCamera {
     this.setView(start);
   }
   setView(view: AtlasView) {
+    this.translatedAt = Number.NEGATIVE_INFINITY;
+    this.groundHeight = undefined;
     this.x = clamp(view.x, 0, this.edge);
     this.z = clamp(view.z, 0, this.edge);
     this.span = clamp(view.span, 4, Math.max(128, this.edge * 2));
@@ -46,10 +59,14 @@ export class AtlasCamera {
   get distance() {
     return (this.span * this.height) / (this.width * 2 * tanHalfFov);
   }
+  get near() {
+    return flightNearClip(this.distance);
+  }
   get far() {
     return Math.max(4096, this.span * 6, Math.abs(this.y) + 20000);
   }
   setMode(mode: AtlasMode) {
+    this.translatedAt = Number.NEGATIVE_INFINITY;
     this.mode = mode;
     if (mode === 'fly') this.pitch = isoPitch;
   }
@@ -80,9 +97,21 @@ export class AtlasCamera {
     const distance = this.distance;
     const bounded = (delta: number, eye: number, min: number, max: number) =>
       clamp(delta, Math.min(0, min - eye), Math.max(0, max - eye));
-    this.x += bounded(dx, this.x - distance * direction[0], 0, this.edge);
+    const stepX = bounded(dx, this.x - distance * direction[0], 0, this.edge);
+    const stepZ = bounded(dz, this.z - distance * direction[2], 0, this.edge);
+    const now = performance.now();
+    const elapsed = now - this.translatedAt;
+    // Extrapolate a short segment of actual motion (including strafing).
+    // A discrete navigation jump has no velocity, and a stopped eye has no lead.
+    const extrapolate = elapsed <= 120 ? Math.min(300 / Math.max(4, elapsed), 36) : 0;
+    const magnitude = Math.hypot(stepX, stepZ) * extrapolate;
+    const scale = extrapolate * Math.min(1, 80 / Math.max(1, magnitude));
+    this.leadX = stepX * scale;
+    this.leadZ = stepZ * scale;
+    this.translatedAt = now;
+    this.x += stepX;
     this.y += bounded(up, this.y - distance * direction[1], -10000, 50000);
-    this.z += bounded(dz, this.z - distance * direction[2], 0, this.edge);
+    this.z += stepZ;
   }
   project(x: number, z: number, y: number) {
     const b = this.basis,
@@ -95,7 +124,12 @@ export class AtlasCamera {
     return {
       x: px,
       y: py,
-      visible: w > 0 && px >= 0 && py >= 0 && px <= this.width && py <= this.height,
+      visible:
+        (this.mode !== 'fly' || (depth >= this.near && depth <= this.far)) &&
+        px >= 0 &&
+        py >= 0 &&
+        px <= this.width &&
+        py <= this.height,
     };
   }
   ray(px: number, py: number) {
@@ -121,17 +155,30 @@ export class AtlasCamera {
     const { origin, dir } = this.ray(px, py);
     if (Math.abs(dir[1]) < 0.0001) return null;
     const travel = (height - origin[1]) / dir[1];
-    if (travel < 0 || (this.mode === 'fly' && travel > this.far)) return null;
+    if (travel < 0 || (this.mode === 'fly' && (travel < this.near || travel > this.far)))
+      return null;
     return { x: origin[0] + dir[0] * travel, z: origin[2] + dir[2] * travel };
   }
   getFrame(): AtlasFrame {
+    if (this.mode === 'fly') {
+      const moving = performance.now() - this.translatedAt <= 180;
+      const flight = makeFlightView(this, moving ? this.leadX : 0, moving ? this.leadZ : 0);
+      return {
+        x: this.x,
+        z: this.z,
+        span: this.span,
+        width: this.width,
+        height: this.height,
+        yaw: this.yaw,
+        flight,
+        bounds: flightBounds(flight, this.edge, false),
+        detailBounds: flightBounds(flight, this.edge, true),
+      };
+    }
     const mpp = this.span / this.width;
     const halfX = this.span / 2,
       halfZ = (this.height * mpp) / 2;
-    const radius =
-      this.mode === 'plan'
-        ? 0
-        : Math.max(48, Math.hypot(halfX, halfZ) * (this.mode === 'fly' ? 2.5 : 2));
+    const radius = this.mode === 'plan' ? 0 : Math.max(48, Math.hypot(halfX, halfZ) * 2);
     const max = Math.ceil(this.edge / 16) - 1;
     const col = (v: number) => clamp(Math.floor(v / 16), 0, max);
     const detailBounds = {
@@ -141,22 +188,6 @@ export class AtlasCamera {
       j1: col(this.z + (radius || halfZ)),
     };
     const bounds = { ...detailBounds };
-    if (this.mode === 'fly') {
-      // Include terrain out to the horizon independently of near-field voxel density.
-      // Upper frustum corners intersection with a plane below the focus also covers valleys.
-      for (const px of [0, this.width]) {
-        const { origin, dir } = this.ray(px, 0);
-        const horizon = Math.min(this.far, Math.max(2048, this.span * 6));
-        const reach =
-          dir[1] < -0.015 ? clamp((origin[1] - this.y + 128) / -dir[1], 0, horizon) : horizon;
-        const i = col(origin[0] + dir[0] * reach),
-          j = col(origin[2] + dir[2] * reach);
-        bounds.i0 = Math.min(bounds.i0, i);
-        bounds.i1 = Math.max(bounds.i1, i);
-        bounds.j0 = Math.min(bounds.j0, j);
-        bounds.j1 = Math.max(bounds.j1, j);
-      }
-    }
     return {
       x: this.x,
       z: this.z,

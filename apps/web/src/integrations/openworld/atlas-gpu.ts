@@ -1,6 +1,13 @@
 import { AtlasBackoff } from './atlas-backoff.js';
 import type { AtlasCamera } from './atlas-camera.js';
+import {
+  flightBoxVisible,
+  flightDepthBands,
+  flightDepthSplit,
+  flightFarNearClip,
+} from './atlas-flight-plan.js';
 import { type QuadBatch, type Raster, regionColumns } from './atlas-geometry.js';
+import { changedMaskArea } from './atlas-mask.js';
 import { materialAppearance } from './atlas-materials.js';
 import { pickAtlas } from './atlas-pick.js';
 import {
@@ -12,7 +19,7 @@ import {
   terrainVertex,
 } from './atlas-shaders.js';
 import type { AtlasStream, Entry } from './atlas-stream.js';
-import type { AtlasMaterial, AtlasOptions, AtlasSeedStyle } from './atlas-types.js';
+import type { AtlasFrame, AtlasMaterial, AtlasOptions, AtlasSeedStyle } from './atlas-types.js';
 
 type GL = WebGL2RenderingContext;
 type Uniforms = Record<string, WebGLUniformLocation | null>;
@@ -103,6 +110,7 @@ function grid(gl: GL, side: number) {
 }
 type ImageTile = { tex: WebGLTexture; id: number; used: number; bytes: number };
 type VoxelGroup = {
+  layout: number;
   serials: number[];
   vbo: WebGLBuffer | null;
   vao: WebGLVertexArrayObject | null;
@@ -110,7 +118,17 @@ type VoxelGroup = {
   bytes: number;
   used: number;
 };
-type Region = { x: number; z: number; opaque: VoxelGroup; blend: VoxelGroup };
+type Region = {
+  key: string;
+  depthBands: number;
+  x: number;
+  z: number;
+  minY: number;
+  maxY: number;
+  entries: Entry[];
+  opaque: boolean;
+  blend: boolean;
+};
 const rgb = (hex: string) =>
   /^#[a-f\d]{6}$/i.test(hex) ? Number.parseInt(hex.slice(1), 16) : 0x7d827e;
 const gpuLimit = 96 * 1024 * 1024;
@@ -145,11 +163,18 @@ export class AtlasGpu {
   private maskStride = 1;
   private maskBytes = new Uint8Array(0);
   private maskWidth = 0;
+  private maskScratch = new Uint8Array(0);
   private visible: Entry[] | null = null;
   private rastersInView: Entry[] = [];
+  private readonly nearRasters: Entry[] = [];
+  private readonly farRasters: Entry[] = [];
+  private depthBand = 0;
   private meshesInView: Entry[] = [];
   private exposedRasters: Entry[] = [];
   private regions: Region[] = [];
+  private activeRegions: Region[] = [];
+  private layout = 0;
+  private budgetDirty = false;
   private idsInView = new Set<number>();
   private uploadWords = new Uint16Array(0);
   private drawn: Entry[] = [];
@@ -367,8 +392,18 @@ export class AtlasGpu {
     );
     g.uniform1f(u.uPerspective ?? null, cam.mode === 'fly' ? 1 : 0);
   }
+  private setDepthBand(u: Uniforms, cam: AtlasCamera, band: 0 | 1 | 2) {
+    if (band) {
+      const near = band === 1 ? cam.near : flightFarNearClip;
+      this.gl.uniform2f(u.uDepthClip ?? null, near, band === 1 ? flightDepthSplit : cam.far);
+    }
+    if (this.depthBand === band) return;
+    this.gl.depthRange(band === 2 ? 0.875 : 0, band === 1 ? 0.875 : 1);
+    this.depthBand = band;
+  }
   private coverage(cam: AtlasCamera, stream: AtlasStream) {
     const gl = this.gl;
+    if (cam.mode !== 'plan') return;
     if (this.knownColumns !== stream.columns) {
       const xy = new Float32Array(stream.columns.length * 2);
       stream.columns.forEach(([i, j], k) => {
@@ -380,7 +415,7 @@ export class AtlasGpu {
       this.coverSize = stream.columns.length;
       this.knownColumns = stream.columns;
     }
-    if (cam.mode !== 'plan' || !this.coverSize) return;
+    if (!this.coverSize) return;
     this.view(this.cover, cam);
     gl.bindVertexArray(this.coverVao);
     gl.uniform1f(this.cover.u.uStride ?? null, stream.stride);
@@ -388,23 +423,44 @@ export class AtlasGpu {
     gl.disable(gl.DEPTH_TEST);
     gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, this.coverSize);
   }
-  private uploadMask(cam: AtlasCamera, stream: AtlasStream, rasters: Entry[], meshes: Entry[]) {
-    const b = cam.getFrame().bounds;
+  private uploadMask(
+    frame: AtlasFrame,
+    plan: boolean,
+    stream: AtlasStream,
+    rasters: Entry[],
+    meshes: Entry[],
+  ) {
+    const b = frame.bounds;
+    // A wide flight cone still needs one rank per native column at the eye.
+    // The bound also leaves room for the aligned origin on WebGL2's minimum texture size.
+    const maxSide = frame.flight ? 2016 : 480;
     const stride =
-      2 ** Math.max(0, Math.ceil(Math.log2(Math.max(b.i1 - b.i0 + 1, b.j1 - b.j0 + 1) / 480)));
+      2 ** Math.max(0, Math.ceil(Math.log2(Math.max(b.i1 - b.i0 + 1, b.j1 - b.j0 + 1) / maxSide)));
     const xi = Math.floor(b.i0 / (16 * stride)) * 16 * stride,
       zj = Math.floor(b.j0 / (16 * stride)) * 16 * stride;
     const width = Math.ceil((b.i1 + 1 - xi) / (16 * stride)) * 16,
       height = Math.ceil((b.j1 + 1 - zj) / (16 * stride)) * 16;
-    const signature = [xi, zj, width, height, stride, stream.generation, cam.mode === 'plan'].join(
-      '/',
-    );
+    // prepare() already invalidates visible live ranks. Arrivals behind the camera
+    // can only affect this mask independently when procedural coverage is enabled.
+    const signature = [
+      xi,
+      zj,
+      width,
+      height,
+      stride,
+      stream.seed ? stream.generation : 0,
+      plan,
+    ].join('/');
     if (this.maskSignature === signature) return false;
     this.maskSignature = signature;
     this.maskX = xi * 16;
     this.maskZ = zj * 16;
     this.maskStride = stride;
-    const bytes = new Uint8Array(width * height);
+    const bytes =
+      this.maskScratch.length === width * height
+        ? this.maskScratch
+        : new Uint8Array(width * height);
+    if (bytes === this.maskScratch) bytes.fill(0);
     const mark = (i: number, j: number, bit: number, replace = false) => {
       const x = Math.floor((i - xi) / stride),
         y = Math.floor((j - zj) / stride);
@@ -427,22 +483,23 @@ export class AtlasGpu {
         }
       }
       // Populate coarse coverage efficiently, only within this mask.
-      for (const [i, j] of stream.columns) {
-        const s = stream.stride;
-        if (i + s <= xi || j + s <= zj || i >= xi + width * stride || j >= zj + height * stride)
-          continue;
-        for (
-          let y = Math.max(zj, Math.floor(j / stride) * stride);
-          y < Math.min(j + s, zj + height * stride);
-          y += stride
-        )
+      stream.forEachColumn(
+        { i0: xi, j0: zj, i1: xi + width * stride - 1, j1: zj + height * stride - 1 },
+        (i, j) => {
+          const s = stream.stride;
           for (
-            let x = Math.max(xi, Math.floor(i / stride) * stride);
-            x < Math.min(i + s, xi + width * stride);
-            x += stride
+            let y = Math.max(zj, Math.floor(j / stride) * stride);
+            y < Math.min(j + s, zj + height * stride);
+            y += stride
           )
-            mark(x, y, 16);
-      }
+            for (
+              let x = Math.max(xi, Math.floor(i / stride) * stride);
+              x < Math.min(i + s, xi + width * stride);
+              x += stride
+            )
+              mark(x, y, 16);
+        },
+      );
       const survey = stream.surveyBounds;
       if (survey) {
         const x0 = Math.max(0, Math.floor((survey.i0 - xi) / stride)),
@@ -498,24 +555,31 @@ export class AtlasGpu {
         )
           mark(e.request.i, e.request.j, 15);
     const sameSize = this.maskWidth === width && this.maskBytes.length === bytes.length;
+    this.maskScratch = this.maskBytes;
     this.maskBytes = bytes;
     this.maskWidth = width;
     const gl = this.gl;
     gl.activeTexture(gl.TEXTURE3);
     gl.bindTexture(gl.TEXTURE_2D, this.mask);
-    if (sameSize)
-      gl.texSubImage2D(
-        gl.TEXTURE_2D,
-        0,
-        0,
-        0,
-        width,
-        height,
-        gl.RED_INTEGER,
-        gl.UNSIGNED_BYTE,
-        bytes,
-      );
-    else
+    if (sameSize) {
+      const dirty = changedMaskArea(this.maskScratch, bytes, width);
+      if (dirty) {
+        gl.pixelStorei(gl.UNPACK_ROW_LENGTH, width);
+        gl.texSubImage2D(
+          gl.TEXTURE_2D,
+          0,
+          dirty.x,
+          dirty.y,
+          dirty.width,
+          dirty.height,
+          gl.RED_INTEGER,
+          gl.UNSIGNED_BYTE,
+          bytes,
+          dirty.y * width + dirty.x,
+        );
+        gl.pixelStorei(gl.UNPACK_ROW_LENGTH, 0);
+      }
+    } else
       gl.texImage2D(
         gl.TEXTURE_2D,
         0,
@@ -562,6 +626,7 @@ export class AtlasGpu {
       );
       gpu = { id: entry.serial, used: this.frame, tex, bytes: r.pixels.byteLength };
       this.rasters.set(entry.key, gpu);
+      this.budgetDirty = true;
     }
     gpu.used = this.frame;
     gl.bindTexture(gl.TEXTURE_2D, gpu.tex);
@@ -587,18 +652,23 @@ export class AtlasGpu {
   }
   private group(key: string, entries: Entry[], pass: 'opaque' | 'blend') {
     let group = this.groups.get(key);
+    if (group?.layout === this.layout) return group;
     let prefix = 0;
     let reusableBytes = 0;
     while (group && prefix < entries.length && entries[prefix]?.serial === group.serials[prefix]) {
       reusableBytes += ((entries[prefix] as Entry).value as QuadBatch)[pass].byteLength;
       prefix++;
     }
-    if (group && prefix === entries.length && prefix === group.serials.length) return group;
+    if (group && prefix === entries.length && prefix === group.serials.length) {
+      group.layout = this.layout;
+      return group;
+    }
     const gl = this.gl;
     if (!group) {
       group = {
         vao: gl.createVertexArray(),
         vbo: gl.createBuffer(),
+        layout: this.layout,
         serials: [],
         count: 0,
         bytes: 0,
@@ -616,10 +686,12 @@ export class AtlasGpu {
         gl.vertexAttribDivisor(index, 1);
       }
       this.groups.set(key, group);
+      this.budgetDirty = true;
     }
     const size = entries.reduce((sum, e) => sum + (e.value as QuadBatch)[pass].byteLength, 0);
     gl.bindBuffer(gl.ARRAY_BUFFER, group.vbo);
     if (size > group.bytes) {
+      this.budgetDirty = true;
       group.bytes = Math.max(size, Math.ceil((group.bytes * 1.5) / 16) * 16);
       gl.bufferData(gl.ARRAY_BUFFER, group.bytes, gl.DYNAMIC_DRAW);
       prefix = 0;
@@ -638,6 +710,7 @@ export class AtlasGpu {
       }
       gl.bufferSubData(gl.ARRAY_BUFFER, reusableBytes, this.uploadWords, 0, words);
     }
+    group.layout = this.layout;
     group.count = size / 16;
     group.serials = entries.map((e) => e.serial);
     group.used = this.frame;
@@ -645,12 +718,18 @@ export class AtlasGpu {
   }
   private prepare(visible: Entry[]) {
     this.visible = visible;
+    this.layout++;
+    this.budgetDirty = true;
     this.maskSignature = '';
     const bestMeshes = new Map<string, Entry>();
     const rasters: Entry[] = [];
     for (const e of visible) {
       const r = e.request;
-      if (r.kind === 'mesh') {
+      if (
+        r.kind === 'mesh' &&
+        e.value?.kind === 'quads' &&
+        (e.value.opaque.length || e.value.blend.length)
+      ) {
         const key = `${r.i},${r.j}`;
         const previous = bestMeshes.get(key);
         if (!previous || (previous.request.kind === 'mesh' && r.lod < previous.request.lod))
@@ -663,7 +742,6 @@ export class AtlasGpu {
       return Number(y.seed) - Number(x.seed) || y.mpp - x.mpp;
     });
     this.meshesInView = [];
-    this.idsInView = new Set();
     const groups = new Map<string, Entry[]>();
     for (const e of bestMeshes.values()) {
       const v = e.value;
@@ -673,21 +751,65 @@ export class AtlasGpu {
       const list = groups.get(key);
       if (list) list.push(e);
       else groups.set(key, [e]);
-      for (const id of v.materials) this.idsInView.add(id);
     }
     this.regions = [];
     for (const [key, list] of groups) {
       const v = list[0]?.value;
-      if (v?.kind === 'quads')
-        this.regions.push({
-          x: v.regionX * 16,
-          z: v.regionZ * 16,
-          opaque: this.group(`${key}/opaque`, list, 'opaque'),
-          blend: this.group(`${key}/blend`, list, 'blend'),
-        });
+      if (v?.kind !== 'quads') continue;
+      let minY = Infinity,
+        maxY = -Infinity,
+        opaque = false,
+        blend = false;
+      for (const e of list) {
+        const tile = e.value as QuadBatch;
+        minY = Math.min(minY, tile.minY);
+        maxY = Math.max(maxY, tile.maxY);
+        opaque ||= tile.opaque.length > 0;
+        blend ||= tile.blend.length > 0;
+      }
+      this.regions.push({
+        key,
+        depthBands: 1,
+        x: v.regionX * 16,
+        z: v.regionZ * 16,
+        minY,
+        maxY,
+        entries: list,
+        opaque,
+        blend,
+      });
     }
   }
-  draw(cam: AtlasCamera, stream: AtlasStream) {
+  private updateActiveRegions(flight: AtlasFrame['flight']) {
+    // Regions outside the actual frustum may already be decoded for an upcoming turn.
+    // Keep their GPU buffers warm but upload and submit only when they can contribute pixels.
+    const span = regionColumns * 64 * this.voxelSize;
+    const active = flight
+      ? this.regions.filter((r) => {
+          const x0 = r.x - 1,
+            z0 = r.z - 1,
+            x1 = r.x + span + 1,
+            z1 = r.z + span + 1;
+          const y0 = r.minY * this.voxelSize - 1,
+            y1 = r.maxY * this.voxelSize + 1;
+          if (!flightBoxVisible(flight, x0, z0, x1, z1, y0, y1)) return false;
+          r.depthBands = flightDepthBands(flight, x0, z0, x1, z1, y0, y1);
+          return true;
+        })
+      : this.regions;
+    if (
+      this.activeRegions.length === active.length &&
+      this.activeRegions.every((r, i) => r === active[i])
+    )
+      return;
+    this.activeRegions = active;
+    this.idsInView.clear();
+    for (const region of active)
+      for (const entry of region.entries)
+        for (const id of (entry.value as QuadBatch).materials) this.idsInView.add(id);
+    this.budgetDirty = true;
+  }
+  draw(cam: AtlasCamera, stream: AtlasStream, frame = cam.getFrame()) {
     const gl = this.gl;
     ++this.frame;
     gl.viewport(0, 0, gl.drawingBufferWidth, gl.drawingBufferHeight);
@@ -700,7 +822,8 @@ export class AtlasGpu {
     gl.disable(gl.CULL_FACE);
     this.coverage(cam, stream);
     if (this.visible !== stream.visible) this.prepare(stream.visible);
-    if (this.uploadMask(cam, stream, this.rastersInView, this.meshesInView)) {
+    this.updateActiveRegions(frame.flight);
+    if (this.uploadMask(frame, plan, stream, this.rastersInView, this.meshesInView)) {
       this.exposedRasters = this.rastersInView.filter((e) => this.exposed(e, e.value as Raster));
       this.drawn = [...this.meshesInView, ...this.exposedRasters];
     }
@@ -720,8 +843,32 @@ export class AtlasGpu {
     gl.uniform1i(u.uBiomes ?? null, 2);
     gl.uniform1i(u.uMask ?? null, 3);
     gl.uniform1f(u.uMaskMetres ?? null, 16 * this.maskStride);
-    for (const e of this.exposedRasters) this.raster(e, e.value as Raster, cam);
-    if (this.regions.length) {
+    this.nearRasters.length = 0;
+    this.farRasters.length = 0;
+    for (const e of this.exposedRasters) {
+      if (!frame.flight) {
+        this.raster(e, e.value as Raster, cam);
+        continue;
+      }
+      const r = e.value as Raster,
+        side = r.mpp * r.side,
+        scale = r.seed ? 0.1 : this.voxelSize;
+      const x1 = r.x + side,
+        z1 = r.z + side,
+        y0 = r.minHeight * scale,
+        y1 = r.maxHeight * scale;
+      if (!flightBoxVisible(frame.flight, r.x, r.z, x1, z1, y0, y1)) continue;
+      const bands = flightDepthBands(frame.flight, r.x, r.z, x1, z1, y0, y1);
+      if (bands & 1) this.nearRasters.push(e);
+      if (bands & 2) this.farRasters.push(e);
+    }
+    for (const band of [1, 2] as const) {
+      const tiles = band === 1 ? this.nearRasters : this.farRasters;
+      if (!tiles.length) continue;
+      this.setDepthBand(u, cam, band);
+      for (const e of tiles) this.raster(e, e.value as Raster, cam);
+    }
+    if (this.activeRegions.length) {
       this.images(this.idsInView);
       this.view(this.quads, cam);
       gl.activeTexture(gl.TEXTURE4);
@@ -738,28 +885,48 @@ export class AtlasGpu {
           gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
           gl.depthMask(false);
         }
+        const depth = (r: Region) => {
+          const f = frame.flight;
+          const x = r.x + regionColumns * 32 * this.voxelSize;
+          const z = r.z + regionColumns * 32 * this.voxelSize;
+          if (!f) return (x - cam.x) ** 2 + (z - cam.z) ** 2;
+          const y = ((r.minY + r.maxY) * this.voxelSize) / 2;
+          return (x - f.eyeX) * f.forwardX + (y - f.eyeY) * f.forwardY + (z - f.eyeZ) * f.forwardZ;
+        };
         const sorted =
           pass === 'opaque'
-            ? this.regions
-            : [...this.regions].sort((a, b) => {
-                const distance = (r: Region) =>
-                  (r.x + regionColumns * 8 - cam.x) ** 2 + (r.z + regionColumns * 8 - cam.z) ** 2;
-                return distance(b) - distance(a);
-              });
+            ? this.activeRegions
+            : this.activeRegions.filter((r) => r.blend).sort((a, b) => depth(b) - depth(a));
         gl.uniform2f(u.uVoxel ?? null, this.voxelSize, pass === 'blend' ? 1 : 0);
-        for (const region of sorted) {
-          const group = region[pass];
-          group.used = this.frame;
-          if (!group.count) continue;
-          gl.uniform3f(u.uOrigin ?? null, region.x - cam.x, -cam.y, region.z - cam.z);
-          gl.bindVertexArray(group.vao);
-          gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, group.count);
+        // All opaque surfaces populate depth before any translucent draw.
+        // Blend the far slice first, then the near slice, each back to front.
+        const bands = !frame.flight
+          ? ([0] as const)
+          : pass === 'blend'
+            ? ([2, 1] as const)
+            : ([1, 2] as const);
+        for (const band of bands) {
+          let configured = false;
+          for (const region of sorted) {
+            if (!region[pass] || (band && !(region.depthBands & band))) continue;
+            const group = this.group(`${region.key}/${pass}`, region.entries, pass);
+            group.used = this.frame;
+            if (!group.count) continue;
+            if (!configured) {
+              this.setDepthBand(u, cam, band);
+              configured = true;
+            }
+            gl.uniform3f(u.uOrigin ?? null, region.x - cam.x, -cam.y, region.z - cam.z);
+            gl.bindVertexArray(group.vao);
+            gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, group.count);
+          }
         }
       }
     }
     gl.depthMask(true);
     gl.disable(gl.BLEND);
     gl.bindVertexArray(null);
+    this.setDepthBand(u, cam, 0);
     this.trim();
   }
   pick(cam: AtlasCamera, px: number, py: number) {
@@ -774,9 +941,12 @@ export class AtlasGpu {
         if (i < 0 || j < 0 || i >= this.maskWidth) return null;
         return this.maskBytes[j * this.maskWidth + i] ?? null;
       },
+      cam.mode === 'fly' ? cam.near : 0,
     );
   }
   private trim() {
+    if (!this.budgetDirty) return;
+    this.budgetDirty = false;
     let bytes = 0;
     for (const r of this.rasters.values()) bytes += r.bytes;
     for (const g of this.groups.values()) bytes += g.bytes;
