@@ -7,6 +7,7 @@ import {
 } from '@nickhosting/core';
 import type { Database, gameCatalog } from '@nickhosting/database';
 import {
+  type ConnectionMode,
   type GameBackupHooks,
   type GameManifest,
   type GatewayMessageDefinition,
@@ -44,6 +45,11 @@ export interface TrustedGameModule {
   id: string;
   manifest: GameManifest;
   provisionAsResourceOwner: boolean;
+  /** Adapt the registered address and service discovery declaration to the installed release. */
+  resolveConnectionMode?(
+    mode: ConnectionMode,
+    installedVersion: string | null | undefined,
+  ): ConnectionMode;
   validateEggMapping?(
     input: {
       startup: string;

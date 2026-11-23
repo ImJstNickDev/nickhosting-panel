@@ -1,6 +1,7 @@
 import type { ConnectionMode } from '@nickhosting/game-sdk';
 import { z } from 'zod';
 import { canonicalAllocationAddress } from './allocation-pool.js';
+import { trustedGameModules } from './game-modules.js';
 
 const connectionSchema = z.object({
   hostname: z.string().min(1).max(253),
@@ -16,11 +17,31 @@ const connectionSchema = z.object({
 });
 type ConfirmedConnection = z.infer<typeof connectionSchema>;
 
+export function effectiveConnectionMode(
+  mode: ConnectionMode,
+  gameId: string,
+  installedVersion: string | null | undefined,
+): ConnectionMode {
+  return trustedGameModules.get(gameId)?.resolveConnectionMode?.(mode, installedVersion) ?? mode;
+}
+
 export function confirmedDnsConnection(assignment: { state: string; plan: unknown } | undefined) {
-  const intent = assignment?.plan as { connection?: unknown; confirmedConnection?: unknown } | null;
+  const intent = assignment?.plan as {
+    connection?: unknown;
+    confirmedConnection?: unknown;
+    reconcileSrv?: boolean;
+  } | null;
   const result = connectionSchema.safeParse(
     assignment?.state === 'active' ? intent?.connection : intent?.confirmedConnection,
   );
+  if (!result.success) return;
+  if (intent?.reconcileSrv) {
+    // A previous delete may have reached DNS before the provider acknowledgement.
+    return {
+      ...result.data,
+      records: result.data.records.filter((record) => record.type !== 'SRV'),
+    };
+  }
   return result.data;
 }
 

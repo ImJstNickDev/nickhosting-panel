@@ -59,10 +59,13 @@ script and pinned checksums. The game and wizard remain usable without the graph
 
 ## Dashboard and gameplay
 
-Openworld uses one custom DNS name per server. Once NickPanel has confirmed the
-`_openworld._udp` SRV record for the public game endpoint, **Address** copies the name
-on its own. Openworld a1.2.10 and newer look it up for both joins and server list pings.
-For older clients, use the hostname with the UDP port shown in **Network → Ports**.
+Openworld uses one custom DNS name per server. The integration enables
+`_openworld._udp` service discovery for installed server releases starting at
+**a1.2.10**. Once NickPanel confirms the public game endpoint's SRV record, **Address**
+shows and copies the hostname. Older or unrecognized releases use **hostname:UDP port**.
+When the installed version changes, the DNS worker checks existing personal names,
+creates or removes the managed SRV as needed, and preserves the address record used
+by the dashboard. An older client can always use the explicit port in **Network → Ports**.
 Entering an explicit port bypasses SRV discovery. Split DNS installations should also
 publish the service record in the internal view used by LAN clients.
 [Openworld network documentation](https://www.play-openworld.com/doc/network/)

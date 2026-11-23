@@ -14,6 +14,7 @@ import {
 } from '../../../games/openworld/src/dashboard-launch.js';
 import { openworldManifest } from '../../../games/openworld/src/manifest.js';
 import {
+  openworldConnectionMode,
   openworldSupportsGateway,
   openworldSupportsRuntime,
   openworldVersionDelivery,
@@ -149,6 +150,7 @@ const configurationSchema = z.strictObject({ version: z.string().min(1).max(128)
 export const openworldModule: TrustedGameModule = {
   id,
   manifest: openworldManifest,
+  resolveConnectionMode: openworldConnectionMode,
   provisionAsResourceOwner: true,
   validateEggMapping({ startup, portRoles, environment }, egg) {
     const game = portRoles.find((row) => row.role === 'game');

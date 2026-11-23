@@ -69,6 +69,7 @@ export interface Database
     sync_order: string;
     synced_at: Date;
   };
+  game_connection_versions: { server_id: string; game_id: string; version: string };
   openworld_server_profiles: {
     dashboard_credential_prepared: Generated<boolean>;
     server_id: string;

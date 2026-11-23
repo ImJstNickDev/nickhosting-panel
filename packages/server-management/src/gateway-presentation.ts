@@ -5,6 +5,7 @@ import type { DB } from './admission.js';
 import {
   canUseConfirmedEndpoint,
   confirmedDnsConnection,
+  effectiveConnectionMode,
   playerAddress,
 } from './connection-address.js';
 
@@ -22,7 +23,14 @@ export async function getGatewayPresentationVariables(
       .innerJoin('managed_servers as server', 'server.id', 'dns.server_id')
       .innerJoin('runtime_egg_mappings as mapping', 'mapping.id', 'server.mapping_id')
       .innerJoin('game_integrations as game', 'game.id', 'mapping.game_id')
+      .leftJoin('game_connection_versions as profile', (join) =>
+        join
+          .onRef('profile.server_id', '=', 'dns.server_id')
+          .onRef('profile.game_id', '=', 'game.id'),
+      )
       .select([
+        'game.id as gameId',
+        'profile.version as installedVersion',
         'dns.id',
         'dns.server_id',
         'dns.state',
@@ -83,8 +91,12 @@ export async function getGatewayPresentationVariables(
         candidates.find((candidate) => candidate.state === 'active') ??
         candidates[0];
       const confirmed = confirmedDnsConnection(assignment);
-      const mode = connectionModeSchema.safeParse(assignment?.mode).data ?? null;
-      const srv = mode?.mode === 'custom-subdomain' ? mode.srv : undefined;
+      const declared = connectionModeSchema.safeParse(assignment?.mode).data;
+      const mode =
+        declared && assignment
+          ? effectiveConnectionMode(declared, assignment.gameId, assignment.installedVersion)
+          : null;
+      const srv = declared?.mode === 'custom-subdomain' ? declared.srv : undefined;
       const route = routesByServer
         .get(server.id)
         ?.find(

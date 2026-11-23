@@ -1552,12 +1552,17 @@ describe('M5 platform browser queries and metadata', () => {
     result = await getPlatformConnections(f.db, f.context, id);
     expect(result.ports.every((p) => p.hostname === null && p.displayAddress === null)).toBe(true);
   });
-  it('presents a confirmed Openworld UDP service without a port and keeps the port during upgrade', async () => {
+  it('presents an Openworld UDP service according to the installed release and confirmed DNS', async () => {
     const id = await f.server();
     await f.db
-      .updateTable('game_integrations')
-      .set({ manifest: openworldManifest })
-      .where('id', '=', f.gameId)
+      .insertInto('game_integrations')
+      .values({ id: 'openworld', version: openworldManifest.version, manifest: openworldManifest })
+      .onConflict((c) => c.column('id').doNothing())
+      .execute();
+    await f.db
+      .updateTable('runtime_egg_mappings')
+      .set({ game_id: 'openworld', runtime_id: 'dedicated' })
+      .where('id', '=', f.mappingId)
       .execute();
     const allocation = await f.db
       .selectFrom('server_allocations')
@@ -1600,11 +1605,19 @@ describe('M5 platform browser queries and metadata', () => {
         id: assignment,
         server_id: id,
         hostname: desired.hostname,
-        state: 'pending',
-        plan: JSON.stringify({ connection: desired, confirmedConnection: previous }),
+        state: 'active',
+        plan: JSON.stringify({
+          action: 'apply',
+          connection: desired,
+          confirmedConnection: desired,
+        }),
         ownership_token: randomUUID(),
         ledger: '[]',
       })
+      .execute();
+    await f.db
+      .insertInto('dns_hostname_reservations')
+      .values({ hostname: desired.hostname, owner_id: assignment })
       .execute();
     async function assertDisplay(address: string) {
       const network = await getPlatformConnections(f.db, f.context, id);
@@ -1621,6 +1634,50 @@ describe('M5 platform browser queries and metadata', () => {
         ).get(id)?.address,
       ).toBe(address);
     }
+    // A previously confirmed SRV must not hide the port on an unversioned or older install.
+    await assertDisplay(explicit);
+    await f.db
+      .insertInto('openworld_server_profiles')
+      .values({ server_id: id, version: 'a1.2.9', sha256: 'a'.repeat(64), size: 1 })
+      .execute();
+    const legacy = await getPlatformConnections(f.db, f.context, id);
+    expect(legacy.srv).toBeNull();
+    expect(legacy.primaryTransport).toBe('udp');
+    await assertDisplay(explicit);
+    await f.db
+      .updateTable('openworld_server_profiles')
+      .set({ version: 'a1.2.10' })
+      .where('server_id', '=', id)
+      .execute();
+    expect((await getPlatformConnections(f.db, f.context, id)).srv?.proto).toBe('udp');
+    // After a downgrade's DNS delete loses its acknowledgement, a quick upgrade still
+    // sees both historic SRV copies. The profile trigger requires fresh confirmation.
+    const flagged = await f.db
+      .selectFrom('dns_assignments')
+      .select('plan')
+      .where('id', '=', assignment)
+      .executeTakeFirstOrThrow();
+    expect(flagged.plan).toMatchObject({
+      reconcileSrv: true,
+      connection: desired,
+      confirmedConnection: desired,
+    });
+    for (const state of ['active', 'pending', 'uncertain'] as const) {
+      await f.db
+        .updateTable('dns_assignments')
+        .set({ state })
+        .where('id', '=', assignment)
+        .execute();
+      await assertDisplay(explicit);
+    }
+    await f.db
+      .updateTable('dns_assignments')
+      .set({
+        state: 'pending',
+        plan: JSON.stringify({ connection: desired, confirmedConnection: previous }),
+      })
+      .where('id', '=', assignment)
+      .execute();
     await assertDisplay(explicit);
     for (const wrong of [
       { ...srv, name: '_minecraft._tcp.world.example.test' },
@@ -1700,6 +1757,14 @@ describe('M5 platform browser queries and metadata', () => {
     expect(direct.ports.find((p) => p.primary && p.transport === 'tcp')?.displayAddress).toBe(
       explicit,
     );
+    await f.db
+      .updateTable('openworld_server_profiles')
+      .set({ version: 'a1.2.9' })
+      .where('server_id', '=', id)
+      .execute();
+    const downgraded = await getPlatformConnections(f.db, f.context, id);
+    expect(downgraded.srv).toBeNull();
+    expect(downgraded.ports.find((p) => p.transport === 'udp')?.displayAddress).toBe(explicit);
   });
   it('uses frozen direct endpoints without claiming reachability or falling back to private addresses', async () => {
     const id = await f.server();

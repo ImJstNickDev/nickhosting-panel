@@ -12,11 +12,9 @@ export type ConnectionOptions = {
 export type ConnectionChoice = { domainId?: string; subdomain?: string; reservationId?: string };
 
 export function primaryPlayerAddress(connection?: Connections) {
+  const transport = connection?.primaryTransport ?? connection?.srv?.proto;
   const endpoints = connection?.ports.filter(
-    (port) =>
-      port.primary &&
-      port.displayAddress &&
-      (!connection.srv || port.transport === connection.srv.proto),
+    (port) => port.primary && port.displayAddress && (!transport || port.transport === transport),
   );
   return (endpoints?.find((port) => port.status === 'configured') ?? endpoints?.[0])
     ?.displayAddress;

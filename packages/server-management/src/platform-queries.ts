@@ -16,6 +16,7 @@ import { hostPolicyOverrides, resolveHostOverride } from './configuration.js';
 import {
   canUseConfirmedEndpoint,
   confirmedDnsConnection,
+  effectiveConnectionMode,
   playerAddress,
 } from './connection-address.js';
 import { trustedGameModules } from './game-modules.js';
@@ -1441,7 +1442,10 @@ export async function getPlatformConnections(
     db
       .selectFrom('runtime_egg_mappings as m')
       .innerJoin('game_integrations as g', 'g.id', 'm.game_id')
-      .select('g.manifest')
+      .leftJoin('game_connection_versions as profile', (join) =>
+        join.on('profile.server_id', '=', serverId).onRef('profile.game_id', '=', 'm.game_id'),
+      )
+      .select(['g.id', 'g.manifest', 'profile.version as installedVersion'])
       .where('m.id', '=', server.mapping_id)
       .executeTakeFirstOrThrow(),
     db
@@ -1476,8 +1480,11 @@ export async function getPlatformConnections(
       .where('server_id', '=', serverId)
       .executeTakeFirst(),
   ]);
-  const manifest = gameManifestSchema.safeParse(mapping.manifest),
-    connection = manifest.success ? manifest.data.connection : null;
+  const manifest = gameManifestSchema.safeParse(mapping.manifest);
+  const declared = manifest.data?.connection;
+  const connection = declared
+    ? effectiveConnectionMode(declared, mapping.id, mapping.installedVersion)
+    : null;
   const assignment =
     assignments.find((a) => a.id === preference?.assignment_id) ??
     assignments.find((a) => a.state === 'active') ??
@@ -1485,9 +1492,8 @@ export async function getPlatformConnections(
   const confirmed = confirmedDnsConnection(assignment);
   const dnsAddress = connection?.mode === 'custom-subdomain' || connection?.mode === 'shared-host';
   const primaryAllocation = allocations.find((allocation) => allocation.is_primary);
-  const primaryTransport =
-    (connection?.mode === 'custom-subdomain' ? connection.srv?.proto : undefined) ??
-    primaryAllocation?.protocols[0];
+  const serviceTransport = declared?.mode === 'custom-subdomain' ? declared.srv?.proto : undefined;
+  const primaryTransport = serviceTransport ?? primaryAllocation?.protocols[0];
   const direct = primaryAllocation?.direct_endpoint;
   const primaryPublicHost =
     server.connection_mode === 'direct'
@@ -1514,6 +1520,7 @@ export async function getPlatformConnections(
   return {
     mode: connection?.mode ?? null,
     connectionMode: server.connection_mode,
+    primaryTransport: serviceTransport,
     addressState: assignment?.state ?? (preference?.enabled ? 'pending' : 'unconfigured'),
     primaryDnsAssignmentId: assignment?.id ?? null,
     reachability: server.connection_mode === 'direct' ? ('unverified' as const) : null,
