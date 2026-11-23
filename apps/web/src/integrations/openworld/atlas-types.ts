@@ -1,3 +1,4 @@
+import type { OpenworldMapDebugTerrain } from '../../../../../games/openworld/src/map-debug.js';
 import type { AtlasTerrainStatus } from './atlas-backoff.js';
 import type { AtlasFlightView } from './atlas-flight-plan.js';
 
@@ -11,6 +12,7 @@ export type AtlasFrame = AtlasView & {
   width: number;
   height: number;
   bounds: AtlasBounds;
+  coverageBounds?: AtlasBounds;
   detailBounds?: AtlasBounds;
   flight?: AtlasFlightView;
   yaw: number;
@@ -47,7 +49,7 @@ export type AtlasOptions = {
     signal: AbortSignal,
   ) => Promise<(ArrayBuffer | null)[]>;
   loadTexture?: (id: number, signal: AbortSignal) => Promise<Blob | null>;
-  onFrame?: () => void;
+  onFrame?: (yaw: number) => void;
   onNavigate?: () => void;
   onFlightLockChange?: (state: AtlasFlightLock) => void;
   onFlightKeyboardLockChange?: (active: boolean) => void;
@@ -61,6 +63,7 @@ export type AtlasSeedStyle = 'surface' | 'biomes';
 export interface AtlasController {
   setView(view: AtlasView): void;
   getView(): AtlasFrame;
+  getDebugTerrain(): OpenworldMapDebugTerrain;
   setMode(mode: AtlasMode): void;
   setFlightInspection(enabled: boolean): void;
   requestFlightLock(gesture?: AtlasPointerPosition): void;

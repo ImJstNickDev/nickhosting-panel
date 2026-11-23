@@ -64,6 +64,7 @@ export async function api<T = unknown>(
     signal?: AbortSignal;
     headers?: Record<string, string>;
     onDebugTiming?: (timing: ApiDebugTiming) => void;
+    keepalive?: boolean;
   } = {},
 ): Promise<T> {
   const started = options.onDebugTiming ? performance.now() : 0;
@@ -71,6 +72,7 @@ export async function api<T = unknown>(
     method: options.method ?? (options.body === undefined ? 'GET' : 'POST'),
     credentials: 'same-origin',
     signal: options.signal,
+    keepalive: options.keepalive,
     headers: {
       'Accept-Language': locale,
       ...(options.body === undefined ? {} : { 'Content-Type': 'application/json' }),

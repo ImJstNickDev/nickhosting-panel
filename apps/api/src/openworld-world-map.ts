@@ -11,6 +11,7 @@ import {
 import { resolveOpenworldDashboardTarget } from '../../../packages/server-management/src/openworld-dashboard.js';
 import { createOpenworldWorldMap } from '../../../packages/server-management/src/openworld-world-map.js';
 import type { Variables } from './app.js';
+import { registerOpenworldMapDebug } from './openworld-map-debug.js';
 import type { ServerRouteOptions } from './servers.js';
 
 const integer = (max: number) =>
@@ -143,7 +144,7 @@ function parse<T>(schema: z.ZodType<T>, value: unknown) {
 export function registerOpenworldWorldMapRoutes(
   app: Hono<{ Variables: Variables }>,
   options: Pick<ServerRouteOptions, 'db' | 'principal'> &
-    Partial<Pick<ServerRouteOptions, 'management'>>,
+    Partial<Pick<ServerRouteOptions, 'management' | 'logger'>>,
   service = createOpenworldWorldMap({
     db: options.db,
     target: async (id) => {
@@ -159,7 +160,7 @@ export function registerOpenworldWorldMapRoutes(
   const retryUntil = new WeakMap<PterodactylError, number>();
   routes.onError((error, c) => {
     if (error instanceof DomainError && error.code === 'rate_limited') {
-      c.header('Retry-After', '1');
+      if (!c.res.headers.has('Retry-After')) c.header('Retry-After', '1');
       throw error;
     }
     if (!(error instanceof PterodactylError) || error.reason !== 'rate_limited') throw error;
@@ -173,6 +174,7 @@ export function registerOpenworldWorldMapRoutes(
     c.header('cache-control', 'private, no-store');
     await next();
   });
+  registerOpenworldMapDebug(routes, options);
   routes.get('/factories', async (c) => {
     c.header('cache-control', 'private, no-store');
     return c.json(await service.factories(await options.principal(c), c.req.param('id')));

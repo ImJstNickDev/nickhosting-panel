@@ -135,6 +135,40 @@ function intersectRaster(
   return Infinity;
 }
 
+export type AtlasSeamPage = { originX: number; originZ: number; data: Float32Array };
+
+// These vertical strips join two sampled heights. They occlude the ray, but do
+// not provide a verified elevation at which to place a game checkpoint.
+function seamOccludes(
+  pages: readonly AtlasSeamPage[],
+  ray: Ray,
+  voxel: number,
+  near: number,
+  hit: number,
+) {
+  for (const { data, originX, originZ } of pages) {
+    const x = ray.origin[0] - originX,
+      z = ray.origin[2] - originZ;
+    for (let p = 0; p < data.length; p += 10) {
+      const x0 = data[p] ?? 0,
+        z0 = data[p + 1] ?? 0;
+      const dx = data[p + 2] ?? 0,
+        dz = data[p + 3] ?? 0;
+      const normal = dx === 0 ? ray.dir[0] : ray.dir[2];
+      if (Math.abs(normal) < eps) continue;
+      const t = (dx === 0 ? x0 - x : z0 - z) / normal;
+      if (t < near || t >= hit - eps) continue;
+      const u = dx === 0 ? (z + t * ray.dir[2] - z0) / dz : (x + t * ray.dir[0] - x0) / dx;
+      if (u < 0 || u > 1) continue;
+      const a = (1 - u) * (data[p + 4] ?? 0) + u * (data[p + 6] ?? 0);
+      const b = (1 - u) * (data[p + 5] ?? 0) + u * (data[p + 7] ?? 0);
+      const y = (ray.origin[1] + t * ray.dir[1]) / voxel;
+      if (y >= Math.min(a, b) && y <= Math.max(a, b)) return true;
+    }
+  }
+  return false;
+}
+
 /** Click-only ray cast through drawn native geometry. The visibility mask matches the terrain shader. */
 export function pickAtlas(
   entries: readonly Entry[],
@@ -143,6 +177,7 @@ export function pickAtlas(
   far: number,
   maskAt: (x: number, z: number) => number | null,
   near = 0,
+  seamPages: readonly AtlasSeamPage[] = [],
 ): AtlasPoint | null {
   const candidates: { e: Entry; clip: Range }[] = [];
   for (const e of entries) {
@@ -198,5 +233,5 @@ export function pickAtlas(
       biome: v.kind === 'raster' ? sampleRaster(v, x, z, voxel)?.biome : undefined,
     };
   }
-  return result;
+  return result && seamOccludes(seamPages, ray, voxel, near, nearest) ? null : result;
 }

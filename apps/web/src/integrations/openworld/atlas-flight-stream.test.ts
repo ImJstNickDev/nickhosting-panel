@@ -24,7 +24,9 @@ type Surface = Extract<AtlasRequest, { kind: 'surface' }>;
 function replay(
   surface?: (r: Surface) => Promise<ArrayBuffer | null>,
   occupied: (i: number, j: number) => boolean = () => true,
+  meshByteLength = 16,
 ) {
+  const opaque = new Uint16Array(meshByteLength / 2);
   vi.stubGlobal(
     'Worker',
     class {
@@ -54,6 +56,7 @@ function replay(
                       maxHeight: 65,
                       seed: false,
                       present,
+                      presentColumns: present?.reduce((a, b) => a + b, 0),
                       pixels: new Uint16Array(request.n * request.n * 4),
                     }
                   : {
@@ -63,7 +66,7 @@ function replay(
                       maxY: 65,
                       regionX: 0,
                       regionZ: 0,
-                      opaque: new Uint16Array(8),
+                      opaque,
                       blend: new Uint16Array(0),
                     },
             },
@@ -193,7 +196,8 @@ it('puts detailed ground first and coalesces a distant dense ridge, leaving an i
   expect(
     surfaces.some((r) => r.kind === 'surface' && r.ci === 104 && r.cj === 456 && r.n === 8),
   ).toBe(true);
-  expect(surfaces.some((r) => r.kind === 'surface' && r.cj <= 2)).toBe(false);
+  // Spare native capacity prepares the rear only after the foreground ridge.
+  expect(surfaces.findIndex((r) => r.kind === 'surface' && r.cj <= 2)).toBeGreaterThan(wide);
   batches[0]?.finish();
   await settle();
   expect(batches[1]?.requests).toHaveLength(16);
@@ -273,4 +277,285 @@ it('delivers the column under the crosshair in the first mesh group when looking
   s.update(camera.getFrame(), 'fly');
   await settle();
   expect(batches[0]?.requests[0]).toMatchObject({ i: 100, j: 100 });
+});
+
+it('prepares the entire populated transition band at rest and presents it immediately on a reversal', async () => {
+  const columns = Array.from({ length: 64 }, (_, k) => {
+    const angle = ((k % 16) * 2 * Math.PI) / 16,
+      radius = 25 + Math.floor(k / 16) * 16;
+    return [
+      Math.round(200 + Math.sin(angle) * radius),
+      Math.round(200 + Math.cos(angle) * radius),
+    ] as const;
+  });
+  const { s, surfaces } = replay(async () => new ArrayBuffer(32));
+  const north = camera(200, 200);
+  s.setCoverage(columns, 1);
+  s.update(north, 'fly');
+  await settle();
+  const stats = s.getDebugTerrain();
+  expect(stats.middleWanted).toBeGreaterThan(28);
+  expect(stats.middleReady).toBe(stats.middleWanted);
+  expect(stats.behindReady).toBe(stats.behindWanted);
+  expect(stats.behindWanted).toBeGreaterThan(12);
+  expect(stats.middlePresentColumns).toBeGreaterThan(0);
+  const readCount = surfaces.length;
+  for (const yaw of [Math.PI, Math.PI / 2, -Math.PI / 2]) {
+    const frame = camera(200, 200, yaw);
+    s.present(frame, 'fly');
+    for (const radius of [25, 41, 57, 73]) {
+      const i = Math.round(200 + Math.sin(yaw) * radius),
+        j = Math.round(200 + Math.cos(yaw) * radius);
+      expect(
+        s.visible.some(
+          ({ request: r, value }) =>
+            r.kind === 'surface' &&
+            value?.kind === 'raster' &&
+            r.ci <= i &&
+            r.ci + r.n > i &&
+            r.cj <= j &&
+            r.cj + r.n > j,
+        ),
+      ).toBe(true);
+    }
+  }
+  expect(surfaces).toHaveLength(readCount);
+});
+
+it('covers middle terrain behind a stationary eye inside a wide native index bucket without inventing mesh columns', async () => {
+  const i = 381,
+    j = 324;
+  const { s, surfaces, batches } = replay(
+    async () => new ArrayBuffer(32),
+    (x, z) => x === i && z === j,
+  );
+  s.setCoverage([[256, 256]], 256);
+  const north = camera(384, 384);
+  s.update(north, 'fly');
+  await settle();
+  s.update(north, 'fly');
+  await settle();
+  expect(surfaces.length).toBeLessThan(180);
+  expect(
+    surfaces.some(
+      (r) => r.kind === 'surface' && r.ci <= i && r.ci + r.n > i && r.cj <= j && r.cj + r.n > j,
+    ),
+  ).toBe(true);
+  expect(batches).toHaveLength(0);
+  expect(s.getDebugTerrain().behindPresentColumns).toBe(1);
+  s.present(camera(384, 384, Math.PI), 'fly');
+  expect(
+    s.visible.some(
+      ({ request: r, value: v }) =>
+        r.kind === 'surface' &&
+        v?.kind === 'raster' &&
+        i >= r.ci &&
+        j >= r.cj &&
+        i < r.ci + r.n &&
+        j < r.cj + r.n &&
+        v.present?.[(j - r.cj) * r.n + i - r.ci],
+    ),
+  ).toBe(true);
+});
+
+it.each([
+  [0.25, 1],
+  [1, 2],
+])(
+  'prepares real 3D mesh columns behind the 2D surface at %s metres per pixel',
+  async (mpp, expected) => {
+    const { s, batches } = replay(
+      async () => new ArrayBuffer(32),
+      (x, z) => x === 180 && z === 180,
+    );
+    const cam = new AtlasCamera(edge, { x: 180 * 16, z: 180 * 16, span: 800 * mpp });
+    cam.width = 800;
+    cam.height = 480;
+    const plan = cam.getFrame();
+    // A sample authorizes a presence query only. The native response determines which voxel is real.
+    s.setCoverage([[180, 180]], 4);
+    for (let n = 0; n < 4; n++) {
+      s.update(plan, 'plan');
+      await settle();
+    }
+    expect(batches.flatMap((b) => b.requests)).toEqual([
+      { kind: 'mesh', i: 180, j: 180, lod: expected },
+    ]);
+    batches[0]?.finish();
+    await settle();
+    s.present(plan, 'plan');
+    expect(s.visible.some((e) => e.request.kind === 'mesh')).toBe(false);
+    cam.setMode('iso');
+    s.update(cam.getFrame(), 'iso');
+    await settle();
+    expect(s.visible.some((e) => e.request.kind === 'mesh' && e.request.lod === expected)).toBe(
+      true,
+    );
+    expect(batches).toHaveLength(1);
+  },
+);
+
+it('gives new foreground work a lane while the previous speculative batch is in flight', async () => {
+  const { s, batches } = replay(async () => new ArrayBuffer(32));
+  const north = camera(200, 200),
+    east = camera(400, 200);
+  s.setCoverage([...cells(199, 190, 3), ...cells(399, 200, 3)], 1);
+  s.update(north, 'fly');
+  await settle();
+  const warm = batches[0];
+  expect(warm?.requests.length).toBeLessThanOrEqual(2);
+  if (!warm) throw Error('expected rear preparation');
+  s.update(east, 'fly');
+  await settle();
+  expect(batches[1]?.requests).toHaveLength(3);
+  expect(batches[1]?.requests.every((r) => r.i >= 399)).toBe(true);
+  expect(warm.signal.aborted).toBe(false);
+  warm.finish();
+  batches[1]?.finish();
+  await settle();
+});
+
+it('extends idle preparation to indexed terrain five kilometres behind, with locality for unindexed survey space', async () => {
+  const north = camera(600, 600),
+    south = camera(600, 600, Math.PI);
+  const { s, surfaces } = replay(
+    async () => new ArrayBuffer(32),
+    (i, j) => i === 600 && j === 280,
+  );
+  s.setCoverage([[600, 280]], 1);
+  s.setSurvey({ i0: 0, i1: 1600, j0: 0, j1: 1600 });
+  s.update(north, 'fly');
+  await settle();
+  const farRear = surfaces.filter((r) => r.kind === 'surface' && r.cj < 400);
+  expect(farRear).toEqual([{ kind: 'surface', ci: 600, cj: 280, n: 8, lod: 6 }]);
+  s.present(south, 'fly');
+  expect(
+    s.visible.some(
+      (e) => e.key === requestKey(farRear[0] as Surface) && e.value?.kind === 'raster',
+    ),
+  ).toBe(true);
+});
+
+it('keeps preparing after a full flight cache, protecting the new visible ground and suppressing churn at rest', async () => {
+  const { s, batches } = replay(
+    async () => new ArrayBuffer(32),
+    () => true,
+    4 * 1024 * 1024,
+  );
+  const old = camera(200, 200),
+    latest = camera(1450, 1450);
+  const oldArea = Array.from(
+    { length: 26 },
+    (_, k) => [198 + (k % 5), 201 + Math.floor(k / 5)] as const,
+  );
+  const rear = [
+      [1449, 1442],
+      [1450, 1442],
+    ] as const,
+    front = [1450, 1452] as const;
+  s.setCoverage([...oldArea, ...rear, front], 1);
+  s.update(old, 'fly');
+  for (let n = 0; n < 4; n++) {
+    await settle();
+    batches.at(-1)?.finish();
+    await settle();
+    s.update(old, 'fly');
+  }
+  expect(s.getDebugTerrain().residentBytes).toBeGreaterThan(96 * 1024 * 1024 * 0.85);
+  s.update(latest, 'fly');
+  for (let n = 0; n < 5; n++) {
+    await settle();
+    batches.at(-1)?.finish();
+    await settle();
+    s.update(latest, 'fly');
+  }
+  expect(
+    s.visible.some(
+      (e) => e.request.kind === 'mesh' && e.request.i === front[0] && e.request.j === front[1],
+    ),
+  ).toBe(true);
+  const reads = batches.length;
+  s.present(camera(1450, 1450, Math.PI), 'fly');
+  for (const [i, j] of rear) {
+    expect(
+      s.visible.some((e) => e.request.kind === 'mesh' && e.request.i === i && e.request.j === j),
+    ).toBe(true);
+    expect(
+      batches.flatMap((batch) => batch.requests).filter((r) => r.i === i && r.j === j),
+    ).toHaveLength(1);
+  }
+  s.update(latest, 'fly');
+  await settle();
+  expect(batches).toHaveLength(reads);
+  expect(s.getDebugTerrain().residentBytes).toBeLessThanOrEqual(96 * 1024 * 1024);
+});
+
+it('retries a failed speculative tile while stationary and keeps its backoff out of the foreground lane', async () => {
+  vi.useFakeTimers();
+  try {
+    const rear = [200, 150] as const;
+    let attempts = 0;
+    const { s, surfaces } = replay(async (r) => {
+      if (r.cj <= rear[1] && r.cj + r.n > rear[1] && ++attempts < 3) throw { status: 503 };
+      return new ArrayBuffer(32);
+    });
+    s.setCoverage([rear], 1);
+    const north = camera(200, 200);
+    s.update(north, 'fly');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(attempts).toBe(1);
+    s.setCoverage([rear, [200, 205]], 1);
+    s.update(north, 'fly');
+    await vi.advanceTimersByTimeAsync(4999);
+    expect(surfaces.some((r) => r.kind === 'surface' && r.cj <= 205 && r.cj + r.n > 205)).toBe(
+      true,
+    );
+    expect(attempts).toBe(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(attempts).toBe(2);
+    await vi.advanceTimersByTimeAsync(14999);
+    expect(attempts).toBe(2);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(attempts).toBe(3);
+    s.present(camera(200, 200, Math.PI), 'fly');
+    expect(
+      s.visible.some(
+        (e) =>
+          e.request.kind === 'surface' &&
+          e.request.cj <= 150 &&
+          e.request.cj + e.request.n > 150 &&
+          e.value?.kind === 'raster',
+      ),
+    ).toBe(true);
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+it('bounds a dense 2D inspection to the nearest 192 unique mesh columns, with at most two per speculative batch', async () => {
+  const { s, batches } = replay(async () => new ArrayBuffer(32));
+  const cam = new AtlasCamera(edge, { x: 200.5 * 16, z: 200.5 * 16, span: 448 });
+  cam.width = 896;
+  cam.height = 896;
+  const plan = cam.getFrame();
+  s.setCoverage(
+    Array.from({ length: 28 * 28 }, (_, k) => [187 + (k % 28), 187 + Math.floor(k / 28)] as const),
+    1,
+  );
+  s.update(plan, 'plan');
+  await settle();
+  s.update(plan, 'plan');
+  await settle();
+  let done = 0;
+  while (done < batches.length && done <= 192) {
+    batches[done++]?.finish();
+    await settle();
+  }
+  const requests = batches.flatMap((b) => b.requests);
+  expect(new Set(requests.map(requestKey)).size).toBe(192);
+  expect(requests).toHaveLength(192);
+  expect(batches.every((b) => b.requests.length <= 2)).toBe(true);
+  expect(requests.some((r) => r.i === 200 && r.j === 200)).toBe(true);
+  expect(Math.max(...requests.map((r) => Math.hypot(r.i - 200, r.j - 200)))).toBeLessThan(8);
+  expect(s.getDebugTerrain().residentMeshes).toBe(192);
 });

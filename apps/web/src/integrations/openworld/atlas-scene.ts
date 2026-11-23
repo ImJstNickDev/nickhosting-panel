@@ -149,7 +149,7 @@ export class AtlasScene implements AtlasController {
     // A turn or a return flight can draw resident detail before the next network plan.
     this.stream.present(frame, this.camera.mode);
     this.gpu.draw(this.camera, this.stream, frame);
-    this.options.onFrame?.();
+    this.options.onFrame?.(frame.yaw);
     if (this.planDirty || this.activeKeys) this.redraw();
   };
   private resize = () => {
@@ -183,6 +183,12 @@ export class AtlasScene implements AtlasController {
   }
   getView() {
     return this.camera.getFrame();
+  }
+  getDebugTerrain() {
+    return {
+      ...this.stream.getDebugTerrain(),
+      ...this.gpu.getDebugDraws(this.camera.mode === 'fly'),
+    };
   }
   setMode(mode: AtlasMode) {
     if (this.camera.mode === mode) return;

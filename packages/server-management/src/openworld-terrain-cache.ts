@@ -86,14 +86,16 @@ export class OpenworldTerrainCache {
             this.pending.get(key)?.controller === controller &&
             (value?.byteLength ?? 0) <= this.options.bytes
           ) {
-            this.cache.set(key, { value, expires: this.now() + ttl });
-            onStored?.(value);
+            const retained =
+              value && value.byteLength !== value.buffer.byteLength ? new Uint8Array(value) : value;
+            this.cache.set(key, { value: retained, expires: this.now() + ttl });
             this.size += value?.byteLength ?? 0;
             while (this.size > this.options.bytes || this.cache.size > this.options.entries) {
               const oldest = this.cache.keys().next().value;
               if (oldest === undefined) break;
               this.remove(oldest);
             }
+            onStored?.(retained);
           }
           return value;
         })

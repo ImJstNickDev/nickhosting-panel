@@ -89,6 +89,34 @@ void main() {
   outColor=vec4(color,1.);
 }
 `;
+export const seamVertex =
+  precision +
+  camera +
+  `
+layout(location=0) in vec4 aLine;
+layout(location=1) in vec4 aHeights;
+layout(location=2) in vec2 aMaterial;
+uniform sampler2D uPalette;
+uniform float uVoxelSize;
+flat out vec3 color;
+void main(){
+  int k=gl_VertexID;
+  vec2 xz=aLine.xy+float(k>>1)*aLine.zw;
+  gl_Position=project(vec3(xz.x,aHeights[k]*uVoxelSize,xz.y));
+  int id=int(aMaterial.x);
+  vec4 m=texelFetch(uPalette,ivec2(id&255,id>>8),0);
+  int kind=int(round(m.a*255.));
+  bool water=kind==2 || (aMaterial.y>0. && kind!=3);
+  color=.92*(water?mix(vec3(.29,.65,.69),vec3(.075,.28,.43),1.-exp(-aMaterial.y*uVoxelSize*.18)):(m.a>0.?m.rgb:vec3(.46,.49,.46)));
+}
+`;
+export const seamFragment =
+  precision +
+  `
+flat in vec3 color;
+out vec4 outColor;
+void main(){outColor=vec4(color,1.);}
+`;
 export const quadVertex =
   precision +
   camera +

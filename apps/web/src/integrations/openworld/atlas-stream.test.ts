@@ -89,6 +89,26 @@ describe('Openworld atlas coordinates and geometry', () => {
       () => 15,
     );
     expect(pillar).toMatchObject({ x: 156, y: 27, z: 199, source: 'live' });
+    // A stitched boundary at x=148 sits between the camera and the real pillar.
+    const seam = {
+      originX: 144,
+      originZ: 192,
+      data: new Float32Array([4, 0, 0, 16, 80, 128, 80, 128, 0, 0]),
+    };
+    const rayToPillar = { origin: [145, 27, 199], dir: [1, 0, 0] } as const;
+    const pickPillar = (near: number, originX = 144) =>
+      pickAtlas(
+        [deck],
+        { origin: [...rayToPillar.origin], dir: [...rayToPillar.dir] },
+        0.25,
+        80,
+        () => 15,
+        near,
+        [{ ...seam, originX }],
+      );
+    expect(pickPillar(0)).toBeNull();
+    expect(pickPillar(4)).toEqual(pillar);
+    expect(pickPillar(0, 160)).toEqual(pillar);
     expect(
       pickAtlas([deck], { origin: [151, 27, 199], dir: [0, -1, 0] }, 0.25, 80, () => 15),
     ).toBeNull();

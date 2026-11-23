@@ -1,7 +1,15 @@
 import { type RefObject, useEffect, useState } from 'react';
 
 /** Count draws from the active renderer without requesting a frame for the meter itself. */
-export function MapFps({ frames }: { frames: RefObject<number | null> }) {
+export function MapFps({
+  frames,
+  detail,
+  trace,
+}: {
+  frames: RefObject<number | null>;
+  detail?: string;
+  trace?: string;
+}) {
   const [fps, setFps] = useState<number | null>(null);
   useEffect(() => {
     let since = performance.now();
@@ -25,5 +33,16 @@ export function MapFps({ frames }: { frames: RefObject<number | null> }) {
       frames.current = null;
     };
   }, [frames]);
-  return <span className="ow-atlas-fps">{fps ?? '—'} FPS</span>;
+  return (
+    <span className="ow-atlas-fps">
+      {fps ?? '—'} FPS{detail && ' · '}
+      {detail}
+      {trace && (
+        <>
+          {' '}
+          · <code className="ow-map-trace">{trace}</code>
+        </>
+      )}
+    </span>
+  );
 }

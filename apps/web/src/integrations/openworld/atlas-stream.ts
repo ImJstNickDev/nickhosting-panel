@@ -1,10 +1,12 @@
+import type { OpenworldMapDebugTerrain } from '../../../../../games/openworld/src/map-debug.js';
 import { AtlasBackoff, AtlasTileRetries } from './atlas-backoff.js';
 import { clamp } from './atlas-camera.js';
 import { AtlasColumnIndex } from './atlas-column-index.js';
-import { flightDemand, flightIntersects } from './atlas-flight-plan.js';
+import { flightCoverageBounds, flightDemand, flightIntersects } from './atlas-flight-plan.js';
 import { sampleRaster, type Terrain } from './atlas-geometry.js';
 import { usesVoxelSprite } from './atlas-materials.js';
 import { visitAtlasSurvey } from './atlas-survey-plan.js';
+import { backgroundPriority, prepareFlightCoverage } from './atlas-turn-plan.js';
 import type {
   AtlasBounds,
   AtlasFrame,
@@ -36,6 +38,7 @@ export const requestKey = (r: AtlasRequest) =>
 const chunkCount = [2, 2, 4, 4, 8, 8, 8] as const;
 const cacheBudget = 96 * 1024 * 1024;
 const recentMeshMs = 15000;
+const warmMeshLimit = 192;
 const contains = (b: AtlasBounds, i: number, j: number) =>
   i >= b.i0 && i <= b.i1 && j >= b.j0 && j <= b.j1;
 
@@ -46,6 +49,8 @@ export class AtlasStream {
     { abort: AbortController; request: AtlasRequest; batch?: MeshBatch; received?: boolean }
   >();
   private primaryBatch?: MeshBatch;
+  private readonly failedPreparation = new Map<string, { attempts: number; retryAt: number }>();
+  private prepareAfter = 0;
   // A single small first delivery may finish while the camera prioritizes another patch.
   private returningBatch?: MeshBatch;
   private firstMeshGroup = true;
@@ -281,6 +286,10 @@ export class AtlasStream {
         for (let i = r.ci; i < r.ci + r.n; i++) if (keys.has(`${i},${j}`)) return true;
       return false;
     };
+    for (const key of this.failedPreparation.keys()) {
+      const task = this.wanted.get(key);
+      if (task && affected(task.request)) this.failedPreparation.delete(key);
+    }
     this.tileRetries.invalidate((key) => {
       const task = this.wanted.get(key);
       return !!task && affected(task.request);
@@ -296,6 +305,8 @@ export class AtlasStream {
   retry() {
     this.previousPlan = null;
     this.evictedPriority.clear();
+    this.failedPreparation.clear();
+    this.prepareAfter = 0;
     this.tileRetries.reset();
     this.backoff.live.reset();
     this.backoff.seed.reset();
@@ -328,6 +339,9 @@ export class AtlasStream {
       cz = view.z / 16,
       mpp = view.span / view.width;
     const wanted = new Map<string, Task>();
+    const f = view.flight;
+    const turnBounds = f && flightCoverageBounds(f, this.options.edge, undefined, f.turnCoverage);
+    const planBounds = f ? flightCoverageBounds(f, this.options.edge, b) : b;
     const add = (request: AtlasRequest, priority: number) => {
       const key = requestKey(request),
         existing = wanted.get(key);
@@ -360,13 +374,36 @@ export class AtlasStream {
           }
       } else add({ kind: 'surface', ci: i, cj: j, n, lod: 6 }, priority);
     };
+    const warmMeshes = new Map<string, { i: number; j: number; lod: number; distance: number }>();
+    let lastWarmDistance = Infinity;
+    const rememberMesh = (i: number, j: number, lod: number, distance: number) => {
+      if (distance >= lastWarmDistance) return;
+      warmMeshes.set(`${i},${j}`, { i, j, lod, distance });
+      if (warmMeshes.size >= warmMeshLimit * 2) {
+        const sorted = [...warmMeshes.entries()].sort((a, b) => a[1].distance - b[1].distance);
+        for (const [key] of sorted.slice(warmMeshLimit)) warmMeshes.delete(key);
+        lastWarmDistance = sorted[warmMeshLimit - 1]?.[1].distance ?? Infinity;
+      }
+    };
+    const prepareRearMesh = (i: number, j: number) => {
+      if (!f) return;
+      const dx = (i + 0.5) * 16 - f.eyeX,
+        dz = (j + 0.5) * 16 - f.eyeZ;
+      const distance = Math.hypot(dx, dz);
+      if (distance > f.turnMesh * 2 || flightDemand(f, i, j)?.meshLod != null) return;
+      const pixel = Math.hypot(distance, f.altitude) / f.focalPixels;
+      if (pixel <= 0.85) rememberMesh(i, j, pixel < 0.35 ? 1 : 2, distance);
+    };
     const mesh = (i: number, j: number, d: number) => {
       if (mode === 'plan') return false;
       // A merged quarter-metre voxel seen at less than one pixel needs coarser geometry.
       const pixel = mode === 'iso' ? mpp : Math.max(mpp * 0.2, mpp * (0.3 + (d * 16) / view.span));
       if (pixel > 1.7) return false;
       const stride = pixel < 0.35 ? 1 : pixel < 0.85 ? 2 : 4;
-      add({ kind: 'mesh', i, j, lod: stride }, d + 1);
+      const target = { kind: 'mesh', i, j, lod: stride } as const;
+      const finer =
+        stride > 1 ? this.cache.get(requestKey({ ...target, lod: stride / 2 })) : undefined;
+      add(finer?.value?.kind === 'quads' && !finer.stale ? finer.request : target, d + 1);
       return true;
     };
     const consider = (i: number, j: number, s: number) => {
@@ -467,6 +504,17 @@ export class AtlasStream {
       visitAtlasSurvey(view, this.survey, previewSize, (i, j, priority) => {
         discover(i, j, previewSize, priority);
       });
+    if (f && turnBounds)
+      prepareFlightCoverage(
+        f,
+        this.columnIndex,
+        this.stride,
+        this.survey,
+        turnBounds,
+        planBounds,
+        add,
+        prepareRearMesh,
+      );
     // Measured availability supplies exact column locations after a coarse survey/bucket response.
     if (this.survey || this.stride > 1) {
       for (const entry of this.cache.values()) {
@@ -477,17 +525,63 @@ export class AtlasStream {
           r.lod !== 6 ||
           v?.kind !== 'raster' ||
           !v.present ||
-          !intersects(entry, b, view, this.seedEdge)
+          !intersects(entry, planBounds, view, this.seedEdge)
         )
           continue;
         const f = view.flight;
         if (f) {
           const block = flightDemand(f, r.ci, r.cj, r.n);
-          if (!block || (block.meshLod === null && block.surfaceLod === 6)) continue;
+          const withinRearMesh =
+            Math.abs((r.ci + r.n / 2) * 16 - f.eyeX) <= f.turnMesh * 2 + r.n * 8 &&
+            Math.abs((r.cj + r.n / 2) * 16 - f.eyeZ) <= f.turnMesh * 2 + r.n * 8;
+          if ((!block || (block.meshLod === null && block.surfaceLod === 6)) && !withinRearMesh)
+            continue;
         }
         for (let k = 0; k < v.present.length; k++)
-          if (v.present[k]) consider(r.ci + (k % r.n), r.cj + Math.floor(k / r.n), 1);
+          if (v.present[k]) {
+            const i = r.ci + (k % r.n),
+              j = r.cj + Math.floor(k / r.n);
+            consider(i, j, 1);
+            if (f) prepareRearMesh(i, j);
+          }
       }
+    }
+    if (mode === 'plan' && lod <= 3) {
+      // Prepare only columns actually delivered at the inspected resolution. This also works
+      // without an exact index and never guesses voxel content from a sampled bucket.
+      for (const e of this.cache.values()) {
+        const r = e.request,
+          v = e.value;
+        if (
+          r.kind !== 'surface' ||
+          r.lod !== lod ||
+          e.stale ||
+          !wanted.has(e.key) ||
+          v?.kind !== 'raster' ||
+          !v.present
+        )
+          continue;
+        for (let k = 0; k < v.present.length; k++) {
+          const i = r.ci + (k % r.n),
+            j = r.cj + Math.floor(k / r.n);
+          if (
+            v.present[k] &&
+            contains(b, i, j) &&
+            (!this.coverageReady || this.stride > 1 || !!this.survey || this.indexed(i, j))
+          )
+            rememberMesh(i, j, lod <= 1 ? 1 : 2, dist(i + 0.5, j + 0.5) * 16);
+        }
+      }
+    }
+    for (const { i, j, lod: target, distance } of [...warmMeshes.values()]
+      .sort((a, b) => a.distance - b.distance)
+      .slice(0, warmMeshLimit)) {
+      const r = { kind: 'mesh', i, j, lod: target } as const;
+      const finer = target > 1 ? this.cache.get(requestKey({ ...r, lod: 1 })) : undefined;
+      add(
+        finer?.value?.kind === 'quads' && !finer.stale ? finer.request : r,
+        backgroundPriority + distance / 16,
+      );
     }
     if (this.seed && (this.coverageReady || this.survey)) {
       const near = view.detailBounds ?? b;
@@ -538,7 +632,13 @@ export class AtlasStream {
         const n = r.n / 2;
         for (const ci of [r.ci, r.ci + n]) {
           for (const cj of [r.cj, r.cj + n]) {
-            if (ci > b.i1 || cj > b.j1 || ci + n <= b.i0 || cj + n <= b.j0) continue;
+            if (
+              ci > planBounds.i1 ||
+              cj > planBounds.j1 ||
+              ci + n <= planBounds.i0 ||
+              cj + n <= planBounds.j0
+            )
+              continue;
             add({ ...r, n, ci, cj }, task.priority + 0.001 * dist(ci + n / 2, cj + n / 2));
           }
         }
@@ -549,10 +649,14 @@ export class AtlasStream {
     if (view.flight) prioritizeSkyline(view.flight, wanted);
     this.wanted = wanted;
     this.tileRetries.retain(wanted);
+    for (const key of this.failedPreparation.keys())
+      if ((wanted.get(key)?.priority ?? 0) < backgroundPriority) this.failedPreparation.delete(key);
     for (const [key, priority] of this.evictedPriority) {
       const task = wanted.get(key);
       // If a former skyline tile enters the foreground, it is immediately eligible again.
-      if (!task || task.priority + 1 < priority * 0.85) this.evictedPriority.delete(key);
+      const offset = priority >= backgroundPriority ? backgroundPriority : 0;
+      if (!task || task.priority - offset + 1 < (priority - offset) * 0.85)
+        this.evictedPriority.delete(key);
     }
     this.queue = new Set(
       [...wanted.values()]
@@ -563,19 +667,39 @@ export class AtlasStream {
         .sort((a, b) => a.priority - b.priority),
     );
     const keepBatches = new Set<MeshBatch>();
+    const foregroundBatches = new Set<MeshBatch>();
     for (const [key, job] of this.pending) {
-      if (job.batch && wanted.has(key) && !job.abort.signal.aborted) keepBatches.add(job.batch);
+      if (!job.batch || job.abort.signal.aborted) continue;
+      const task = wanted.get(key);
+      if (task) {
+        keepBatches.add(job.batch);
+        if (task.priority < backgroundPriority) foregroundBatches.add(job.batch);
+      }
     }
     const batch = this.primaryBatch;
-    if (batch && !keepBatches.has(batch) && mode === 'fly') {
+    if (batch && !foregroundBatches.has(batch) && mode === 'fly') {
       // A small in-flight prefix can finish without occupying the new direction's foreground lane.
       if (!this.returningBatch && (batch.count <= 3 || batch.delivered)) {
         this.returningBatch = batch;
         this.primaryBatch = undefined;
       }
     }
+    let retainedSurface = false;
     for (const [key, job] of this.pending) {
-      if (wanted.has(key) || job.received) continue;
+      if (wanted.has(key) || job.received || job.abort.signal.aborted) continue;
+      const r = job.request;
+      if (
+        !retainedSurface &&
+        turnBounds &&
+        r.kind === 'surface' &&
+        r.ci <= turnBounds.i1 &&
+        r.ci + r.n > turnBounds.i0 &&
+        r.cj <= turnBounds.j1 &&
+        r.cj + r.n > turnBounds.j0
+      ) {
+        retainedSurface = true;
+        continue;
+      }
       if (
         job.batch &&
         (job.batch.delivered || keepBatches.has(job.batch) || job.batch === this.returningBatch)
@@ -585,7 +709,7 @@ export class AtlasStream {
     }
     if (
       mode === 'fly' &&
-      (!batch || !keepBatches.has(batch)) &&
+      (!batch || !foregroundBatches.has(batch)) &&
       !this.visible.some((e) => e.request.kind === 'mesh' && wanted.has(e.key))
     )
       this.firstMeshGroup = true;
@@ -674,9 +798,77 @@ export class AtlasStream {
       this.visible = visible;
     }
   }
+  residentTerrain() {
+    return this.cache.values();
+  }
+  getDebugTerrain(): Omit<OpenworldMapDebugTerrain, 'visibleMeshes' | 'visibleSurfaces'> {
+    const f = this.presented?.view.flight;
+    const counts = {
+      queued: 0,
+      pending: this.pending.size,
+      residentBytes: this.totalBytes,
+      residentMeshes: 0,
+      residentSurfaces: 0,
+      middleWanted: 0,
+      middleReady: 0,
+      middlePresentColumns: 0,
+      behindWanted: 0,
+      behindReady: 0,
+      behindPresentColumns: 0,
+    };
+    for (const task of this.queue)
+      if (
+        !this.pending.has(task.key) &&
+        !this.evictedPriority.has(task.key) &&
+        this.failedPreparation.get(task.key)?.retryAt !== Infinity
+      )
+        counts.queued++;
+    for (const e of this.cache.values()) {
+      if (e.value?.kind === 'quads') counts.residentMeshes++;
+      if (e.value?.kind === 'raster' && e.request.kind === 'surface') counts.residentSurfaces++;
+    }
+    if (f) {
+      const readyParents = { middle: new Set<string>(), behind: new Set<string>() };
+      // A surveyed parent and its smaller discovery squares can overlap. Count each
+      // footprint once per sector, using the largest fresh native response available.
+      const previews = [...this.wanted.values()]
+        .flatMap((task) =>
+          task.request.kind === 'surface' && task.request.lod === 6
+            ? [{ r: task.request, key: task.key }]
+            : [],
+        )
+        .sort((a, b) => b.r.n - a.r.n);
+      for (const { r, key } of previews) {
+        const dx = (r.ci + r.n / 2) * 16 - f.eyeX,
+          dz = (r.cj + r.n / 2) * 16 - f.eyeZ;
+        const d = Math.hypot(dx, dz);
+        if (d > Math.max(f.turnCoverage, f.horizon) + r.n * 8 * Math.SQRT2) continue;
+        const entry = this.cache.get(key);
+        const record = (sector: 'middle' | 'behind') => {
+          counts[`${sector}Wanted`]++;
+          if (!entry || entry.stale) return;
+          counts[`${sector}Ready`]++;
+          for (let n = r.n * 2; n <= 32; n *= 2)
+            if (
+              readyParents[sector].has(
+                requestKey({ ...r, n, ci: Math.floor(r.ci / n) * n, cj: Math.floor(r.cj / n) * n }),
+              )
+            )
+              return;
+          readyParents[sector].add(key);
+          if (entry.value?.kind === 'raster')
+            counts[`${sector}PresentColumns`] += entry.value.presentColumns ?? 0;
+        };
+        if (d >= f.meshReach * 0.6 && d <= f.turnCoverage + r.n * 8 * Math.SQRT2) record('middle');
+        if (dx * f.sinYaw + dz * f.cosYaw < 0) record('behind');
+      }
+    }
+    return counts;
+  }
   private eligible(task: Task) {
     if (
       this.pending.has(task.key) ||
+      (this.failedPreparation.get(task.key)?.retryAt ?? 0) > Date.now() ||
       this.backoff[task.request.kind === 'seed' ? 'seed' : 'live'].blocked
     )
       return false;
@@ -690,6 +882,9 @@ export class AtlasStream {
     let wakeAt = Infinity;
     let liveBusy = pending.some((job) => job.request.kind !== 'seed');
     let seedBusy = pending.some((job) => job.request.kind === 'seed');
+    let warming = [...this.pending.keys()].some(
+      (key) => (this.wanted.get(key)?.priority ?? 0) >= backgroundPriority,
+    );
     let slots =
       6 -
       pending.filter((job) => !job.batch).length -
@@ -697,6 +892,18 @@ export class AtlasStream {
       Number(!!this.returningBatch);
     for (const task of this.queue) {
       if (slots <= 0) break;
+      const background = task.priority >= backgroundPriority;
+      // One small speculative operation leaves the other lanes available immediately on a turn.
+      if (background && (warming || this.tileRetries.probing)) break;
+      if (background && this.prepareAfter > now) {
+        wakeAt = Math.min(wakeAt, this.prepareAfter);
+        break;
+      }
+      const retryAt = this.failedPreparation.get(task.key)?.retryAt;
+      if (retryAt !== undefined && retryAt > now) {
+        wakeAt = Math.min(wakeAt, retryAt);
+        continue;
+      }
       if ((task.request.kind === 'seed' && seedBusy) || !this.eligible(task)) continue;
       if (task.request.kind !== 'seed') {
         if (this.tileRetries.probing && liveBusy) continue;
@@ -713,22 +920,31 @@ export class AtlasStream {
         !this.tileRetries.has(task.key)
       ) {
         if (this.batchActive) continue;
-        this.startBatch(task.request.lod, this.options.loadMeshes);
+        this.startBatch(task.request.lod, this.options.loadMeshes, background);
       } else {
         const abort = new AbortController();
         this.pending.set(task.key, { abort, request: task.request });
         if (task.request.kind === 'seed') seedBusy = true;
         void this.load(task, abort);
       }
+      if (background) warming = true;
       if (task.request.kind !== 'seed') liveBusy = true;
       slots--;
     }
     this.tileRetries.wakeAt(wakeAt);
   }
-  private startBatch(lod: number, loader: NonNullable<AtlasOptions['loadMeshes']>) {
+  private startBatch(
+    lod: number,
+    loader: NonNullable<AtlasOptions['loadMeshes']>,
+    background: boolean,
+  ) {
     const abortBatch = new AbortController();
     const batch: MeshBatch = { count: 0, delivered: false };
-    const limit = this.previousPlan?.mode === 'fly' && this.firstMeshGroup ? 3 : 16;
+    const limit = background
+      ? 2
+      : this.previousPlan?.mode === 'fly' && this.firstMeshGroup
+        ? 3
+        : 16;
     this.firstMeshGroup = false;
     const requests: Extract<AtlasRequest, { kind: 'mesh' }>[] = [];
     const jobs: { task: Task; abort: AbortController }[] = [];
@@ -737,6 +953,7 @@ export class AtlasStream {
       if (
         r.kind !== 'mesh' ||
         r.lod !== lod ||
+        task.priority >= backgroundPriority !== background ||
         this.tileRetries.has(task.key) ||
         !this.eligible(task)
       )
@@ -806,6 +1023,7 @@ export class AtlasStream {
       )
         return;
       this.remove(task.key);
+      this.failedPreparation.delete(task.key);
       if (task.request.kind !== 'seed') this.tileRetries.succeed(task.key);
       const size =
         value?.kind === 'raster'
@@ -813,12 +1031,28 @@ export class AtlasStream {
           : value?.kind === 'quads'
             ? value.opaque.byteLength + value.blend.byteLength
             : 0;
+      const planned = this.previousPlan,
+        r = task.request;
       if (
-        (this.stride > 1 || this.survey) &&
-        task.request.kind === 'surface' &&
-        task.request.lod === 6
-      )
-        this.previousPlan = null;
+        planned &&
+        r.kind === 'surface' &&
+        value?.kind === 'raster' &&
+        (value.presentColumns ?? value.present?.some(Boolean)) &&
+        this.wanted.has(task.key)
+      ) {
+        if (r.lod === 6 && (this.stride > 1 || this.survey)) {
+          const flight = planned.view.flight;
+          const demand = flight && flightDemand(flight, r.ci, r.cj, r.n);
+          const local =
+            flight &&
+            Math.hypot((r.ci + r.n / 2) * 16 - flight.eyeX, (r.cj + r.n / 2) * 16 - flight.eyeZ) <=
+              flight.turnMesh * 2 + r.n * 8 * Math.SQRT2;
+          // A distant all-around preview is already at its final resolution. Replanning
+          // the whole footprint on each such arrival needlessly stalls a stationary camera.
+          if (!flight || local || (demand && demand.surfaceLod < 6) || demand?.meshLod != null)
+            this.previousPlan = null;
+        } else if (planned.mode === 'plan' && r.lod <= 3) this.previousPlan = null;
+      }
       this.totalBytes += size;
       this.cache.set(task.key, {
         ...task,
@@ -830,23 +1064,44 @@ export class AtlasStream {
       });
       if (this.cache.size > 1800 || this.totalBytes > cacheBudget) {
         const now = Date.now();
+        const visible = new Set(this.visible);
+        // Reserve up to one sixth of RAM for current turn/switch preparation. Otherwise a
+        // full cache of recently flown, now-distant voxels can evict every new rear column
+        // as it arrives. Foreground still wins when its visible set needs the whole budget.
+        let prepared = 0;
+        let room = cacheBudget / 6;
         const candidates = [...this.cache.values()]
-          .map((entry) => {
-            const priority = this.wanted.get(entry.key)?.priority ?? Infinity;
-            const near = priority < 12;
-            const visitedMesh = entry.value?.kind === 'quads' && entry.age >= now - recentMeshMs;
-            const rank = entry.stale
-              ? 0
-              : near && entry.value
-                ? 4
-                : visitedMesh
-                  ? 3
-                  : entry.age >= now - 2000
-                    ? 2
-                    : Number(priority < Infinity);
-            return { entry, rank, priority };
-          })
-          .sort((a, b) => a.rank - b.rank || a.entry.age - b.entry.age || b.priority - a.priority);
+          .map((entry) => ({
+            entry,
+            priority: this.wanted.get(entry.key)?.priority ?? Infinity,
+            rank: 0,
+          }))
+          .sort((a, b) => a.priority - b.priority);
+        for (const candidate of candidates) {
+          const { entry, priority } = candidate;
+          if (entry.stale) continue;
+          const active = Number.isFinite(priority);
+          const warm = active && priority >= backgroundPriority;
+          const drawable =
+            entry.value?.kind === 'raster'
+              ? entry.value.presentColumns !== 0
+              : entry.value?.kind === 'quads' &&
+                (entry.value.opaque.length > 0 || entry.value.blend.length > 0);
+          if (drawable && (visible.has(entry) || (active && !warm && priority < 12))) {
+            // A still-drawn fallback may have a different key from the finer replacement.
+            candidate.rank = 6;
+          } else if (warm && drawable && entry.bytes <= room && prepared < 1024) {
+            candidate.rank = 5;
+            room -= entry.bytes;
+            prepared++;
+          } else if (drawable && entry.value?.kind === 'quads' && entry.age >= now - recentMeshMs)
+            candidate.rank = 4;
+          else if ((drawable && entry.age >= now - 2000) || (active && !warm)) candidate.rank = 3;
+          else candidate.rank = warm ? 2 : 1;
+        }
+        candidates.sort(
+          (a, b) => a.rank - b.rank || a.entry.age - b.entry.age || b.priority - a.priority,
+        );
         for (const { entry: c, priority } of candidates) {
           if (this.cache.size <= 1600 && this.totalBytes <= cacheBudget * 0.9) break;
           this.remove(c.key);
@@ -862,7 +1117,20 @@ export class AtlasStream {
     } catch (e) {
       if (!this.disposed && !abort.signal.aborted && this.wanted.has(task.key)) {
         const status = typeof e === 'object' && e !== null && 'status' in e ? e.status : null;
-        if (task.request.kind !== 'seed' && (status === 503 || status === 504)) {
+        if (
+          (this.wanted.get(task.key)?.priority ?? 0) >= backgroundPriority &&
+          (status === 503 || status === 504)
+        ) {
+          // A speculative miss must not throttle the newly visible ground on the next turn.
+          const now = Date.now();
+          const attempts = (this.failedPreparation.get(task.key)?.attempts ?? 0) + 1;
+          const delay = [5000, 15000][attempts - 1];
+          this.failedPreparation.set(task.key, {
+            attempts,
+            retryAt: delay === undefined ? Infinity : now + delay,
+          });
+          this.prepareAfter = now + 5000;
+        } else if (task.request.kind !== 'seed' && (status === 503 || status === 504)) {
           const r = task.request;
           const previouslyFailed = this.tileRetries.has(task.key);
           this.tileRetries.fail(task.key);
@@ -925,6 +1193,8 @@ export class AtlasStream {
     this.visible = [];
     this.queue.clear();
     this.evictedPriority.clear();
+    this.failedPreparation.clear();
+    this.prepareAfter = 0;
     this.tileRetries.reset();
   }
 }

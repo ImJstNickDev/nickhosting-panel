@@ -151,6 +151,11 @@
   font-variant-numeric: tabular-nums;
   pointer-events: none;
 }
+.ow-map-trace {
+  pointer-events: auto;
+  user-select: all;
+  cursor: text;
+}
 .ow-map-context-menu {
   position: absolute;
   z-index: 5;

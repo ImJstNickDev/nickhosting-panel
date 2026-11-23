@@ -1,5 +1,6 @@
 import {
   flightBounds,
+  flightCoverageBounds,
   flightHalfFov,
   flightNearClip,
   makeFlightView,
@@ -163,6 +164,7 @@ export class AtlasCamera {
     if (this.mode === 'fly') {
       const moving = performance.now() - this.translatedAt <= 180;
       const flight = makeFlightView(this, moving ? this.leadX : 0, moving ? this.leadZ : 0);
+      const bounds = flightBounds(flight, this.edge, false);
       return {
         x: this.x,
         z: this.z,
@@ -171,7 +173,8 @@ export class AtlasCamera {
         height: this.height,
         yaw: this.yaw,
         flight,
-        bounds: flightBounds(flight, this.edge, false),
+        bounds,
+        coverageBounds: flightCoverageBounds(flight, this.edge, bounds),
         detailBounds: flightBounds(flight, this.edge, true),
       };
     }

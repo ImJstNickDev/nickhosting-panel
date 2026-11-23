@@ -5,6 +5,17 @@ const options = { bytes: 4, entries: 2, active: 3, perServer: 2 };
 const live = () => new AbortController().signal;
 const data = new Uint8Array([1, 2]);
 
+it('retains only the charged payload bytes when a reader returns a view on a larger slab', async () => {
+  const cache = new OpenworldTerrainCache(options, Date.now);
+  const slab = new Uint8Array(8192).fill(9);
+  const read = vi.fn(async () => slab.subarray(64, 66));
+  await cache.get('mesh', 's', 1000, live(), read);
+  const hit = await cache.get('mesh', 's', 1000, live(), read);
+  expect(hit).toEqual(Uint8Array.of(9, 9));
+  expect(hit?.buffer.byteLength).toBe(2);
+  expect(read).toHaveBeenCalledOnce();
+});
+
 it('retains a shared geometry read until its last viewer leaves, even if an earlier viewer closes', async () => {
   const cache = new OpenworldTerrainCache(options, Date.now),
     done = Promise.withResolvers<Uint8Array<ArrayBuffer>>();

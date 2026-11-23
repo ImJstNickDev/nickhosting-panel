@@ -2010,6 +2010,7 @@ async function mapRoutes(
       }
       return route.fulfill({ json: { columns: Array.from(unique.values()) } });
     }
+    if (path === '/debug-telemetry') return route.fulfill({ status: 204 });
     if (path === '/palette')
       return route.fulfill({
         json: { materials: materialPalette, voxelSize: 0.25, faceEdgeMeters: faceEdge },
@@ -2588,6 +2589,12 @@ it('shows the map FPS counter only in debug and measures movement and idle frame
   const page = await browser.newPage({ viewport: { width: 1024, height: 768 } });
   try {
     await mapRoutes(page, { bridge: true, radius: 3 });
+    const reports: { traceId: string; face: number; samples: { terrain: { queued: number } }[] }[] =
+      [];
+    page.on('request', (request) => {
+      if (new URL(request.url()).pathname.endsWith('/map/debug-telemetry'))
+        reports.push(request.postDataJSON());
+    });
     await page.goto(
       `${url}telemetry-fixture?section=map&cartographer#world=earth&face=0&x=235&z=244`,
     );
@@ -2599,10 +2606,19 @@ it('shows the map FPS counter only in debug and measures movement and idle frame
     await check(debug).toHaveCount(0);
     await canvas.click({ button: 'right', position: { x: 100, y: 70 } });
     await check(debug).toHaveAttribute('aria-checked', 'false');
+    expect(reports).toHaveLength(0);
     await debug.click();
+    await check.poll(() => reports.length).toBeGreaterThan(0);
+    expect(reports[0]).toMatchObject({
+      face: 0,
+      samples: [{ terrain: { queued: expect.any(Number) } }],
+    });
     await check(debug).toHaveCount(0);
     await check(counter).toBeVisible();
-    await check(counter).toHaveText(/\b0\b/);
+    const firstTrace = reports[0]?.traceId.slice(0, 8);
+    if (!firstTrace) throw new Error('Missing map debug session');
+    await check(counter.locator('.ow-map-trace')).toHaveText(firstTrace);
+    await check(counter).toHaveText(/^0 FPS/);
 
     await page.getByRole('button', { name: 'Full screen', exact: true }).click();
     await check
@@ -2611,16 +2627,17 @@ it('shows the map FPS counter only in debug and measures movement and idle frame
     await canvas.focus();
     await page.keyboard.down('ArrowRight');
     try {
-      await check(counter).toHaveText(/\b[1-9]\d*\b/);
+      await check(counter).toHaveText(/^[1-9]\d* FPS/);
     } finally {
       await page.keyboard.up('ArrowRight');
     }
-    await check(counter).toHaveText(/\b0\b/);
+    await check(counter).toHaveText(/^0 FPS/);
     await page.getByRole('button', { name: 'Exit full screen', exact: true }).click();
     await canvas.press('Shift+F10');
     await check(debug).toHaveAttribute('aria-checked', 'true');
     await debug.press('Enter');
     await check(counter).toHaveCount(0);
+    const countAfterDebug = reports.length;
     await page.getByRole('button', { name: 'Isometric', exact: true }).click();
     await canvas.scrollIntoViewIfNeeded();
     const pin = page
@@ -2637,6 +2654,7 @@ it('shows the map FPS counter only in debug and measures movement and idle frame
     await page.mouse.up({ button: 'right' });
     await check.poll(async () => Math.abs((await position()) - before)).toBeGreaterThan(1);
     await check(debug).toHaveCount(0);
+    expect(reports).toHaveLength(countAfterDebug);
   } finally {
     await page.close();
   }
@@ -2655,7 +2673,13 @@ it('keeps the same bridge across the three projections', async () => {
     const reads = (kind: string) => paths.filter((p) => p.pathname.endsWith(`/${kind}`));
     await check(pinned).toBeVisible();
     await check.poll(() => reads('terrain').length).toBeGreaterThan(0);
-    expect([...reads('mesh'), ...reads('meshes')]).toHaveLength(0);
+    await check.poll(() => reads('meshes').length).toBeGreaterThan(0);
+    for (const batch of reads('meshes')) {
+      expect(['1', '2']).toContain(batch.searchParams.get('lod'));
+      expect(batch.searchParams.get('cells')?.split(';').length).toBeLessThanOrEqual(2);
+    }
+    // The 2D raster has prepared geometry but has not drawn any voxel textures.
+    expect(textures.size).toBe(0);
     await page.getByRole('button', { name: 'Isometric', exact: true }).click();
     await check.poll(() => reads('meshes').length).toBeGreaterThan(0);
     await check.poll(() => textures.size, { timeout: 60_000 }).toBeGreaterThanOrEqual(7);

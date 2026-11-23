@@ -125,9 +125,13 @@ export function createOpenworldWorldMap(options: OpenworldNativeOptions) {
   const key = (scope: OpenworldScope, ...args: (string | number | undefined)[]) =>
     JSON.stringify([scope.liveKey, ...args]);
   const catalogs = sharedReads<MapCatalog>(24, now, 1500);
+  // These partitions cap all retained live terrain payloads in this API process,
+  // even when both tiers retain separate representations of the same column.
+  const geometryBytes = 500 * 1024 * 1024;
+  const hotBytes = 64 * 1024 * 1024;
   const geometry = new OpenworldTerrainCache(
     {
-      bytes: 64 * 1024 * 1024,
+      bytes: hotBytes,
       entries: 2048,
       active: 48,
       perServer: 16,
@@ -137,7 +141,7 @@ export function createOpenworldWorldMap(options: OpenworldNativeOptions) {
     now,
   );
   const history = new OpenworldTerrainHistory(
-    { bytes: 48 * 1024 * 1024, entries: 4096, ttl: 600_000 },
+    { bytes: geometryBytes - hotBytes, entries: 32768, ttl: 600_000 },
     now,
   );
   // Only a cursor reported by the native process *before* reading an asset can
@@ -302,20 +306,20 @@ export function createOpenworldWorldMap(options: OpenworldNativeOptions) {
           } catch (error) {
             // sharedReads rejects synchronously when every change-feed slot is in use.
             // The already-admitted geometry request can still read its own native asset.
-            if (error instanceof DomainError && error.code === 'rate_limited') return false;
+            if (error instanceof DomainError && error.code === 'rate_limited') return;
             throw error;
           }
           try {
             const delta = await proof;
-            return (
+            if (
               delta.stamp >= Math.max(q.stamp ?? 0, cursors.get(prefix) ?? 0) &&
               !changedCells(delta, since)(cell)
-            );
+            )
+              return delta.stamp;
           } catch (error) {
             if (!(error instanceof DomainError) || error.code !== 'integration_unavailable')
               throw error;
             // A missing cursor or unavailable change feed cannot certify old bytes.
-            return false;
           }
         });
         if (saved) return saved;

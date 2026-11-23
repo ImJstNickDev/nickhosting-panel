@@ -20,6 +20,11 @@ const messages: Record<string, [string, string]> = {
   'map.atlas.cluster': ['{count} markers', '{count} indicatori'],
   'map.atlas.camera': ['Map view', 'Vista della mappa'],
   'map.atlas.nerdStats': ['Stats for nerds', 'Statistiche per nerd'],
+  'map.atlas.recording': ['Recording terrain diagnostics', 'Registrazione diagnostica terreno'],
+  'map.atlas.recordFailed': [
+    'Terrain diagnostics upload unavailable',
+    'Invio diagnostica terreno non disponibile',
+  ],
   'map.atlas.plan': ['2D', '2D'],
   'map.atlas.iso': ['Isometric', 'Isometrica'],
   'map.atlas.fly': ['Free flight', 'Volo libero'],

@@ -163,16 +163,23 @@ flight share the viewport, selected point and terrain cache. Zoom or move toward
 place to see the game's voxel mesh, including overhangs, water and material textures
 when provided by the running release. The more distant landscape uses the game's
 saved surface at progressively coarser resolutions. In level flight, the renderer
-can show recorded terrain out to 8 km. A wider loading cone, a small area around
-the eye and a short lookahead during movement prepare upcoming turns. Returning
-to a resident region uses local geometry on the next draw. On a device without
-WebGL 2 the interactive 2D overview remains available.
+can show recorded terrain out to 8 km. Visible terrain loads first. While the camera
+is stationary, a spare request prepares an intermediate surface in every direction
+and then the indexed terrain out to the horizon. Areas with only broad survey
+bounds are probed locally. A medium or detailed 2D view also prepares voxel
+meshes for the nearest confirmed columns. Switching to
+3D or turning the camera can use resident geometry on the next draw. The 3D views
+join the edges of adjacent recorded surfaces at different heights. Unexplored
+gaps remain open. On a device without WebGL 2 the interactive 2D overview remains
+available.
 
-NickPanel can retain previously requested terrain for up to ten minutes in a
-bounded, process-local cache. An older tile is reused only after the game's
-change cursor confirms that its columns are still current. A reset or an
-unverifiable change history requires a fresh read. Terrain is sent to browsers
-on demand.
+Each API process can retain up to 500 MiB of native terrain payloads across all
+viewers and servers. Recent reads have 64 MiB and the history has 436 MiB. The
+history retains a mesh column and LOD, or a native surface tile spanning multiple
+columns, for ten minutes after its last native read or verified reuse. Each entry
+expires independently and can be evicted sooner under memory pressure. Reuse
+requires a native change cursor covering the entry's entire footprint. An edit
+invalidates overlapping assets. A reset or unverifiable history requires fresh data.
 
 In free flight, click the map to capture the mouse. Look around with the mouse
 and move with WASD. Hold Shift to fly faster or Space to rise. The map opens in
@@ -183,6 +190,11 @@ select a point with the cursor, or the on-screen flight controls on a touchscree
 Right-click the terrain and choose **Stats for nerds** to toggle the map's FPS
 counter. With the map focused, Shift+F10 opens the same menu. The counter
 reports frames drawn in the last sample and reaches zero when the map is idle.
+With WebGL 2, enabling these stats also sends short diagnostic batches to the
+NickPanel API. Operators can find a session in the API logs by its trace ID and
+the event `openworld.map.renderer`. Samples include the camera column and
+orientation, distance-band coverage, render submissions, queue size, and terrain
+HTTP outcomes. Closing the stats ends collection.
 
 Layers include checkpoints, live players, creatures by species and active factory
 columns with their respective permissions. With both map and Seed Inspector access,

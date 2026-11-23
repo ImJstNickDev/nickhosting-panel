@@ -10,11 +10,14 @@ import { type QuadBatch, type Raster, regionColumns } from './atlas-geometry.js'
 import { changedMaskArea } from './atlas-mask.js';
 import { materialAppearance } from './atlas-materials.js';
 import { pickAtlas } from './atlas-pick.js';
+import { AtlasSeamCache, type SeamPage } from './atlas-seams.js';
 import {
   coverageFragment,
   coverageVertex,
   quadFragment,
   quadVertex,
+  seamFragment,
+  seamVertex,
   terrainFragment,
   terrainVertex,
 } from './atlas-shaders.js';
@@ -136,6 +139,24 @@ export class AtlasGpu {
   private readonly terrain;
   private readonly quads;
   private readonly cover;
+  private readonly seams;
+  private readonly seamCache: AtlasSeamCache;
+  private seamPages: SeamPage[] = [];
+  private readonly seamBuffers = new Map<
+    string,
+    {
+      vao: WebGLVertexArrayObject | null;
+      buffer: WebGLBuffer | null;
+      pages: SeamPage[];
+      floats: number;
+      capacity: number;
+    }
+  >();
+  private workingSeams = false;
+  private planSeams = false;
+  private residentGeneration = -1;
+  private seamLayout = -1;
+
   private readonly mask;
   private readonly palette;
   private readonly biomes;
@@ -188,6 +209,8 @@ export class AtlasGpu {
     private readonly changed: () => void,
   ) {
     this.imageBackoff = new AtlasBackoff(changed, (e) => options.onError?.(e));
+    this.seams = pipeline(gl, seamVertex, seamFragment);
+    this.seamCache = new AtlasSeamCache();
     this.terrain = pipeline(gl, terrainVertex, terrainFragment);
     this.quads = pipeline(gl, quadVertex, quadFragment);
     this.cover = pipeline(gl, coverageVertex, coverageFragment);
@@ -650,6 +673,107 @@ export class AtlasGpu {
     gl.bindVertexArray(geometry.vao);
     gl.drawElements(gl.TRIANGLES, geometry.count, gl.UNSIGNED_SHORT, 0);
   }
+  private updateSeams(cam: AtlasCamera, stream: AtlasStream) {
+    const plan = cam.mode === 'plan';
+    if (this.seamLayout !== this.layout || plan !== this.planSeams) {
+      this.seamCache.setVisible(plan ? [] : [...this.rastersInView, ...this.meshesInView]);
+      this.seamLayout = this.layout;
+      this.planSeams = plan;
+      this.workingSeams = true;
+    }
+    if (this.residentGeneration !== stream.generation) {
+      this.seamCache.setResident(stream.residentTerrain());
+      this.residentGeneration = stream.generation;
+      this.workingSeams = true;
+    }
+    if (!this.workingSeams) return;
+    this.workingSeams = this.seamCache.advance(2);
+    if (this.workingSeams) this.changed();
+    const pages = plan ? [] : this.seamCache.visiblePages();
+    if (pages.length === this.seamPages.length && pages.every((p, i) => p === this.seamPages[i]))
+      return;
+    this.seamPages = pages;
+    const regions = new Map<string, SeamPage[]>();
+    for (const page of pages) {
+      const key = `${page.originX},${page.originZ}`;
+      const region = regions.get(key);
+      if (region) region.push(page);
+      else regions.set(key, [page]);
+    }
+    const gl = this.gl;
+    for (const [key, group] of this.seamBuffers)
+      if (!regions.has(key)) {
+        gl.deleteBuffer(group.buffer);
+        gl.deleteVertexArray(group.vao);
+        this.seamBuffers.delete(key);
+      }
+    for (const [key, pages] of regions) {
+      let group = this.seamBuffers.get(key);
+      if (!group) {
+        group = {
+          vao: gl.createVertexArray(),
+          buffer: gl.createBuffer(),
+          pages: [],
+          floats: 0,
+          capacity: 0,
+        };
+        gl.bindVertexArray(group.vao);
+        gl.bindBuffer(gl.ARRAY_BUFFER, group.buffer);
+        for (const [index, size, offset] of [
+          [0, 4, 0],
+          [1, 4, 16],
+          [2, 2, 32],
+        ] as const) {
+          gl.enableVertexAttribArray(index);
+          gl.vertexAttribPointer(index, size, gl.FLOAT, false, 40, offset);
+          gl.vertexAttribDivisor(index, 1);
+        }
+        this.seamBuffers.set(key, group);
+      }
+      if (pages.length === group.pages.length && pages.every((p, i) => p === group.pages[i]))
+        continue;
+      gl.bindBuffer(gl.ARRAY_BUFFER, group.buffer);
+      const floats = pages.reduce((n, p) => n + p.data.length, 0);
+      let prefix = 0;
+      let offset = 0;
+      if (floats > group.capacity || 2 * floats < group.capacity) {
+        group.capacity = floats + Math.min(65536, Math.ceil(floats / 4));
+        gl.bufferData(gl.ARRAY_BUFFER, 4 * group.capacity, gl.DYNAMIC_DRAW);
+      } else {
+        while (prefix < pages.length && pages[prefix] === group.pages[prefix]) {
+          offset += (pages[prefix] as SeamPage).data.byteLength;
+          prefix++;
+        }
+      }
+      for (let i = prefix; i < pages.length; i++) {
+        const page = pages[i] as SeamPage;
+        gl.bufferSubData(gl.ARRAY_BUFFER, offset, page.data);
+        offset += page.data.byteLength;
+      }
+      group.floats = floats;
+      group.pages = pages;
+    }
+  }
+  private drawSeams(cam: AtlasCamera) {
+    if (!this.seamBuffers.size) return;
+    const gl = this.gl;
+    this.view(this.seams, cam);
+    const u = this.seams.u;
+    gl.uniform1i(u.uPalette ?? null, 1);
+    gl.uniform1f(u.uVoxelSize ?? null, this.voxelSize);
+    for (const group of this.seamBuffers.values()) {
+      const origin = group.pages[0];
+      if (!origin) continue;
+      gl.bindVertexArray(group.vao);
+      gl.uniform3f(u.uOrigin ?? null, origin.originX - cam.x, -cam.y, origin.originZ - cam.z);
+      if (cam.mode === 'fly')
+        for (const band of [1, 2] as const) {
+          this.setDepthBand(u, cam, band);
+          gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, group.floats / 10);
+        }
+      else gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, group.floats / 10);
+    }
+  }
   private group(key: string, entries: Entry[], pass: 'opaque' | 'blend') {
     let group = this.groups.get(key);
     if (group?.layout === this.layout) return group;
@@ -868,6 +992,8 @@ export class AtlasGpu {
       this.setDepthBand(u, cam, band);
       for (const e of tiles) this.raster(e, e.value as Raster, cam);
     }
+    this.updateSeams(cam, stream);
+    if (!plan) this.drawSeams(cam);
     if (this.activeRegions.length) {
       this.images(this.idsInView);
       this.view(this.quads, cam);
@@ -929,6 +1055,18 @@ export class AtlasGpu {
     this.setDepthBand(u, cam, 0);
     this.trim();
   }
+  getDebugDraws(perspective: boolean) {
+    // A raster crossing the depth split is submitted twice but covers one tile.
+    const surfaces = perspective
+      ? new Set([...this.nearRasters, ...this.farRasters])
+      : this.exposedRasters;
+    let visibleSurfaces = 0;
+    for (const entry of surfaces) if (entry.request.kind === 'surface') visibleSurfaces++;
+    return {
+      visibleSurfaces,
+      visibleMeshes: this.activeRegions.reduce((total, region) => total + region.entries.length, 0),
+    };
+  }
   pick(cam: AtlasCamera, px: number, py: number) {
     return pickAtlas(
       this.drawn,
@@ -942,6 +1080,7 @@ export class AtlasGpu {
         return this.maskBytes[j * this.maskWidth + i] ?? null;
       },
       cam.mode === 'fly' ? cam.near : 0,
+      this.seamPages,
     );
   }
   private trim() {
@@ -988,7 +1127,12 @@ export class AtlasGpu {
     }
     for (const t of [this.mask, this.palette, this.textureIndex, this.textures, this.biomes])
       gl.deleteTexture(t);
-    for (const p of [this.terrain, this.quads, this.cover]) gl.deleteProgram(p.program);
+    for (const p of [this.terrain, this.quads, this.cover, this.seams]) gl.deleteProgram(p.program);
+    for (const group of this.seamBuffers.values()) {
+      gl.deleteBuffer(group.buffer);
+      gl.deleteVertexArray(group.vao);
+    }
+    this.seamCache.destroy();
     gl.deleteVertexArray(this.coverVao);
     gl.deleteTexture(this.imageTile);
     gl.deleteFramebuffer(this.imageFramebuffer);

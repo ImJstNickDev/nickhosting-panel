@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { DomainError } from '@nickhosting/core';
+import { createLogger, DomainError, type LogRecord } from '@nickhosting/core';
 import { createTestDatabase } from '@nickhosting/database/testing';
 import { PterodactylError } from '@nickhosting/pterodactyl-adapter';
 import { Hono } from 'hono';
@@ -162,7 +162,8 @@ async function fixture() {
         throw Error('Unexpected native resource');
     }
   };
-  const router = () => {
+  const records: LogRecord[] = [];
+  const router = (level: 'info' | 'error' = 'info') => {
     const app = new Hono<{ Variables: Variables }>();
     app.onError((e, c) =>
       c.json(
@@ -174,6 +175,7 @@ async function fixture() {
       app,
       {
         db,
+        logger: createLogger((record) => records.push(record), { level }),
         principal: async (c) =>
           c.req.header('X-Reader') === 'owner' ? owner.context : sub.context,
       },
@@ -216,6 +218,7 @@ async function fixture() {
     reads,
     creatureLimits,
     writes,
+    records,
     state,
     target,
     request,
@@ -914,6 +917,54 @@ it('revalidates minute-old terrain against the native world cursor, sharing proo
   }
 });
 
+it('expires idle terrain separately, renews visited LODs, and refetches only blocks containing an edited column', async () => {
+  const f = await fixture();
+  await f.grant(read);
+  await f.power('running');
+  const q = `?world=earth&processRef=${await f.ref()}`;
+  const nativeTiles: string[] = [];
+  let latest = 30;
+  f.state.asset = (url) => {
+    if (url.pathname.endsWith('/map/changes'))
+      return Response.json({
+        stamp: latest,
+        reset: false,
+        columns: latest === 30 ? [] : [[0, 1, 1]],
+      });
+    if (!url.pathname.endsWith('/map/surface')) return;
+    const ci = Number(url.searchParams.get('ci'));
+    const lod = Number(url.searchParams.get('lod'));
+    nativeTiles.push(`${ci}/${lod}`);
+    // Four empty column records still form a valid, independently cached OWMS asset.
+    const data = new Uint8Array(48);
+    const view = new DataView(data.buffer);
+    view.setUint32(0, 0x4f574d53);
+    view.setUint16(4, 2, true);
+    view.setUint16(6, lod, true);
+    view.setInt32(12, ci, true);
+    view.setUint16(20, 2, true);
+    view.setUint16(22, 64 >> lod, true);
+    return new Response(data);
+  };
+  const tile = async (ci: number, lod = 6) =>
+    expect((await f.request(`/terrain${q}&face=0&ci=${ci}&cj=0&n=2&lod=${lod}`)).status).toBe(200);
+  expect((await f.request(`/index${q}`)).status).toBe(200);
+  await Promise.all([tile(0), tile(0, 5), tile(2)]);
+  f.state.clock += 180_000;
+  await tile(4);
+  f.state.clock += 360_000;
+  await Promise.all([tile(0), tile(0, 5)]);
+  expect(nativeTiles.toSorted()).toEqual(['0/5', '0/6', '2/6', '4/6']);
+  f.state.clock += 61_000;
+  await Promise.all([tile(0), tile(2), tile(2), tile(4)]);
+  expect(nativeTiles.slice(4)).toEqual(['2/6']);
+  f.state.clock += 2000;
+  latest = 31;
+  expect((await f.request(`/changes${q}&since=30`)).status).toBe(200);
+  await Promise.all([tile(0), tile(0, 5), tile(2), tile(4)]);
+  expect(nativeTiles.slice(5).toSorted()).toEqual(['0/5', '0/6']);
+});
+
 it('shares native capacity across terrain and mesh routes, drops queued cancellations and checks a changed private binding before dispatch', async () => {
   const f = await fixture();
   await f.power('running');
@@ -1170,4 +1221,75 @@ it('shares cached mesh reads between bounded NHMB frames and single columns, pre
   done.resolve();
   expect((await batch).status).toBe(403);
   expect((await f.request(group('5,2;4,3;2,1'))).status).toBe(403);
+});
+
+it('records bounded map diagnostics only for the current authorized instance, without native reads', async () => {
+  const f = await fixture();
+  await f.power('running');
+  const processRef = await f.ref();
+  f.reads.length = 0;
+  const outcomes = { ok: 0, empty: 1, aborted: 3, conflict: 2, failed: 0 };
+  const terrain = {
+    queued: 8,
+    pending: 2,
+    residentBytes: 1600,
+    residentMeshes: 7,
+    residentSurfaces: 4,
+    visibleMeshes: 2,
+    visibleSurfaces: 1,
+    middleWanted: 6,
+    middleReady: 5,
+    middlePresentColumns: 17,
+    behindWanted: 3,
+    behindReady: 1,
+    behindPresentColumns: 5,
+  };
+  const sample = {
+    mode: 'fly',
+    columnX: 4,
+    columnZ: 5,
+    spanMeters: 10,
+    eyeHeightMeters: 270,
+    pitchDegrees: -5,
+    yawDegrees: 125,
+    turnDegrees: 220,
+    draws: 12,
+    ms: 500,
+    terrain,
+    terrainRequests: outcomes,
+    meshRequests: outcomes,
+  };
+  const body = {
+    traceId: randomUUID(),
+    batch: 0,
+    processRef,
+    world: 'earth',
+    face: 3,
+    samples: [sample],
+  };
+  const send = (input: unknown = body) => f.request('/debug-telemetry', input);
+  expect((await send()).status).toBe(403);
+  await f.grant(read);
+  expect((await send({ ...body, processRef: '0'.repeat(64) })).status).toBe(409);
+  expect((await send({ ...body, samples: Array(9).fill(sample) })).status).toBe(400);
+  expect((await send({ ...body, samples: [{ ...sample, player: 'injected' }] })).status).toBe(400);
+  expect(await (await f.router('error')('/debug-telemetry', body)).json()).toEqual({
+    recorded: false,
+  });
+  expect(f.records).toHaveLength(0);
+  expect((await send()).status).toBe(204);
+  expect(f.records).toHaveLength(1);
+  expect(f.records[0]).toMatchObject({
+    level: 'info',
+    event: 'openworld.map.renderer',
+    data: { serverId: f.id, traceId: body.traceId, batch: 0, face: 3, samples: [sample] },
+  });
+  expect(JSON.stringify(f.records)).not.toContain(processRef);
+  expect(JSON.stringify(f.records)).not.toContain('"earth"');
+  for (let i = 0; i < 20; i++) await send();
+  const limited = await send();
+  expect(limited.status).toBe(429);
+  expect(Number(limited.headers.get('Retry-After'))).toBeGreaterThan(1);
+  expect(f.records.length).toBeLessThanOrEqual(20);
+  expect(f.reads).toHaveLength(0);
 });

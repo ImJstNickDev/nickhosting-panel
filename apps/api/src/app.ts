@@ -728,7 +728,12 @@ export function createApp(options: Options) {
   registerOpenworldScreenshotRoutes(app, { db, principal, management: options.management });
   registerOpenworldInspectorRoutes(app, { db, principal, management: options.management });
   registerOpenworldRulesRoutes(app, { db, principal, management: options.management });
-  registerOpenworldWorldMapRoutes(app, { db, principal, management: options.management });
+  registerOpenworldWorldMapRoutes(app, {
+    db,
+    principal,
+    management: options.management,
+    logger: options.logger,
+  });
   registerOpenworldRoutes(app, { db, env, codec: options.codec, principal });
   registerSatisfactoryRoutes(app, { db, principal });
   registerSatisfactoryOverviewRoutes(app, { db, codec: options.codec, principal });

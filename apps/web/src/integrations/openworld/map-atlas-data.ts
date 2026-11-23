@@ -1,8 +1,9 @@
 import { useQuery } from '@tanstack/react-query';
 import { useEffect, useMemo, useRef, useState } from 'react';
 
-import { apiError, safeApiPath } from '../../api/client.js';
+import { ApiError, apiError, safeApiPath } from '../../api/client.js';
 import type { AtlasBounds, AtlasController, AtlasMaterial, AtlasRequest } from './atlas-types.js';
+import type { MapDebugRecorder } from './map-debug-recorder.js';
 import type { FeatureKind } from './map-feature-layer.js';
 import { type Footprint, footprintWindow, type MapFace } from './map-framing.js';
 import { mapBase, mapData, mapParams, mapScope, scopeLost } from './map-query.js';
@@ -17,6 +18,41 @@ export type SeedLegend = {
 };
 type Delta = { stamp: number; reset: boolean; columns: [number, number, number][] };
 
+async function atlasBytes(
+  path: string,
+  signal: AbortSignal,
+  kind: AtlasRequest['kind'],
+  debug?: Pick<MapDebugRecorder, 'request'> | null,
+  splittable = false,
+) {
+  let status = 0;
+  try {
+    const response = await fetch(safeApiPath(path), {
+      signal,
+      credentials: 'same-origin',
+      redirect: 'error',
+    });
+    status = response.status;
+    if (status === 413 && splittable) {
+      await response.body?.cancel();
+      throw apiError({}, status);
+    }
+    if (!response.ok)
+      throw apiError(
+        await response.json().catch(() => ({})),
+        status,
+        response.headers.get('Retry-After'),
+      );
+    const bytes = status === 204 ? null : await response.arrayBuffer();
+    if (kind !== 'seed') debug?.request(kind, bytes === null ? 'empty' : 'ok');
+    return bytes;
+  } catch (error) {
+    if (kind !== 'seed')
+      debug?.request(kind, status === 409 ? 'conflict' : signal.aborted ? 'aborted' : 'failed');
+    throw error;
+  }
+}
+
 export async function readAtlasResource(
   serverId: string,
   world: string,
@@ -25,6 +61,7 @@ export async function readAtlasResource(
   stamp: number,
   request: AtlasRequest,
   signal: AbortSignal,
+  debug?: Pick<MapDebugRecorder, 'request'> | null,
 ) {
   const { kind, ...params } = request;
   const route = kind === 'surface' ? 'terrain' : kind === 'seed' ? 'seed-tile' : 'mesh';
@@ -35,14 +72,7 @@ export async function readAtlasResource(
     ...params,
     ...(kind === 'seed' ? {} : { stamp }),
   });
-  const res = await fetch(safeApiPath(`${mapBase(serverId)}/${route}?${query}`), {
-    signal,
-    credentials: 'same-origin',
-    redirect: 'error',
-  });
-  if (!res.ok)
-    throw apiError(await res.json().catch(() => ({})), res.status, res.headers.get('Retry-After'));
-  return res.status === 204 ? null : res.arrayBuffer();
+  return atlasBytes(`${mapBase(serverId)}/${route}?${query}`, signal, kind, debug);
 }
 
 export function useAtlasCoverage(
@@ -160,6 +190,7 @@ export async function readAtlasMeshes(
   stamp: number,
   requests: readonly MeshRequest[],
   signal: AbortSignal,
+  debug?: Pick<MapDebugRecorder, 'request'> | null,
 ): Promise<(ArrayBuffer | null)[]> {
   const first = requests[0];
   if (!first) return [];
@@ -172,15 +203,19 @@ export async function readAtlasMeshes(
     lod: first.lod,
     cells: requests.map((r) => `${r.i},${r.j}`).join(';'),
   });
-  const response = await fetch(safeApiPath(`${mapBase(serverId)}/meshes?${params}`), {
-    credentials: 'same-origin',
-    signal,
-    redirect: 'error',
-  });
-  if (response.status === 413 && requests.length > 1) {
-    // Only unusually dense geometry crosses the response byte limit. Keep the
-    // two retries serial so a single viewport cannot multiply upstream concurrency.
-    await response.body?.cancel();
+  try {
+    const bytes = await atlasBytes(
+      `${mapBase(serverId)}/meshes?${params}`,
+      signal,
+      'mesh',
+      debug,
+      requests.length > 1,
+    );
+    if (!bytes) throw apiError({ error: { code: 'integration_unavailable' } }, 502);
+    return decodeAtlasMeshes(bytes, requests);
+  } catch (error) {
+    if (!(error instanceof ApiError) || error.status !== 413 || requests.length <= 1) throw error;
+    // Split unusually dense geometry serially to preserve the upstream concurrency limit.
     const half = Math.ceil(requests.length / 2);
     const left = await readAtlasMeshes(
       serverId,
@@ -190,18 +225,21 @@ export async function readAtlasMeshes(
       stamp,
       requests.slice(0, half),
       signal,
+      debug,
     );
     return left.concat(
-      await readAtlasMeshes(serverId, world, processRef, face, stamp, requests.slice(half), signal),
+      await readAtlasMeshes(
+        serverId,
+        world,
+        processRef,
+        face,
+        stamp,
+        requests.slice(half),
+        signal,
+        debug,
+      ),
     );
   }
-  if (!response.ok)
-    throw apiError(
-      await response.json().catch(() => ({})),
-      response.status,
-      response.headers.get('Retry-After'),
-    );
-  return decodeAtlasMeshes(await response.arrayBuffer(), requests);
 }
 
 export function decodeAtlasMeshes(bytes: ArrayBuffer, requests: readonly MeshRequest[]) {

@@ -13,6 +13,8 @@ export type Raster = {
   /** 16-bit RGBA: native altitude, material, water depth, presence | native light (or seed biome). */
   pixels: Uint16Array;
   present?: Uint8Array;
+  /** Number of columns with a nonzero native revision in this surface response. */
+  presentColumns?: number;
 };
 export type QuadBatch = {
   kind: 'quads';
@@ -61,6 +63,7 @@ function surface(
   const columnSamples = s * s;
   const length = columnSamples * (version === 2 ? 6 : 5);
   let pos = 32;
+  let presentColumns = 0;
   let minHeight = 65535;
   let maxHeight = 0;
   for (let cz = 0; cz < n; cz++) {
@@ -70,6 +73,7 @@ function surface(
       pos += 4;
       if (!revision) continue;
       present[cz * n + cx] = 1;
+      presentColumns++;
       if (pos + length > bytes.byteLength) fail();
       for (let rz = 0; rz < s; rz++) {
         let out = 4 * ((cz * s + rz) * side + cx * s);
@@ -97,6 +101,7 @@ function surface(
     mpp: 16 / s,
     pixels,
     present,
+    presentColumns,
     // At a hole the surface shader can interpolate toward a missing neighbour at zero.
     minHeight: present.includes(0) ? 0 : minHeight,
     maxHeight,

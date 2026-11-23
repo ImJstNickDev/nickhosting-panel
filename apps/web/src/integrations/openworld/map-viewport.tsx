@@ -31,8 +31,9 @@ import {
   useAtlasCoverage,
 } from './map-atlas-data.js';
 import { CheckpointGlyph } from './map-checkpoints.js';
+import type { MapDebugRecorder } from './map-debug-recorder.js';
+import { MapDebugStats } from './map-debug-stats.js';
 import { type FeatureKind, useFeatureLayer } from './map-feature-layer.js';
-import { MapFps } from './map-fps.js';
 import { fit, populatedExtent } from './map-framing.js';
 import { type AtlasMarker, MapMarkerLayer } from './map-marker-layer.js';
 import type { MapViewportProps } from './map-plan-fallback.js';
@@ -160,6 +161,9 @@ function AtlasViewport(props: ViewProps & { unavailable: () => void }) {
   const t = useT();
   const canvas = useRef<HTMLCanvasElement>(null);
   const debugFrames = useRef<number | null>(null);
+  const recorder = useRef<MapDebugRecorder | null>(null);
+  const debugMode = useRef(mode);
+  debugMode.current = mode;
   const overlay = useRef<HTMLDivElement>(null);
   const plot = useRef<HTMLDivElement>(null);
   const scene = useRef<AtlasController | null>(null);
@@ -200,7 +204,7 @@ function AtlasViewport(props: ViewProps & { unavailable: () => void }) {
     processRef,
     props.stamp,
     extent,
-    frame?.bounds,
+    frame?.coverageBounds ?? frame?.bounds,
     scene,
     props.onRefreshIndex,
   );
@@ -300,6 +304,7 @@ function AtlasViewport(props: ViewProps & { unavailable: () => void }) {
             current.current.coverage.stamp.current,
             request,
             signal,
+            recorder.current,
           ),
         loadMeshes: (requests, signal) =>
           readAtlasMeshes(
@@ -310,6 +315,7 @@ function AtlasViewport(props: ViewProps & { unavailable: () => void }) {
             current.current.coverage.stamp.current,
             requests,
             signal,
+            recorder.current,
           ),
         loadTexture: async (id, signal) => {
           const response = await fetch(
@@ -327,8 +333,9 @@ function AtlasViewport(props: ViewProps & { unavailable: () => void }) {
         onCamera: (view) => {
           if (active) setFrame(view);
         },
-        onFrame: () => {
+        onFrame: (yaw) => {
           if (debugFrames.current !== null) debugFrames.current++;
+          recorder.current?.draw(yaw);
           projectPins();
         },
         onFlightKeyboardLockChange: (captured) => {
@@ -733,7 +740,18 @@ function AtlasViewport(props: ViewProps & { unavailable: () => void }) {
             {scale >= 1000 ? `${scale / 1000} km` : `${scale} m`}
           </div>
         )}
-        {props.debug && <MapFps frames={debugFrames} />}
+        {props.debug && (
+          <MapDebugStats
+            frames={debugFrames}
+            recorder={recorder}
+            scene={scene}
+            mode={debugMode}
+            serverId={server.serverId}
+            face={face}
+            world={world}
+            processRef={processRef}
+          />
+        )}
         <MapStatsMenu canvas={canvas} enabled={props.debug} onToggle={props.onToggleDebug} />
         {locked && <span className="ow-atlas-reticle" aria-hidden="true" />}
         {mode !== 'plan' && !locked && (

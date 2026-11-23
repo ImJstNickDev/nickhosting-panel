@@ -83,6 +83,8 @@ export function makeFlightView(camera: AtlasCamera, leadX: number, leadZ: number
     leadZ,
     horizon,
     meshReach,
+    // Keep the transition from voxels to the distant skyline ready in every direction.
+    turnCoverage: Math.min(2304, Math.max(1536, meshReach * 3)),
     turnMesh,
     turnSurface,
     altitude: groundHeight === undefined ? 0 : Math.max(0, eyeY - groundHeight),
@@ -188,6 +190,29 @@ export function flightBounds(f: AtlasFlightView, edge: number, near: boolean): A
     j0: col(f.eyeZ + z0 + Math.min(0, f.leadZ)),
     j1: col(f.eyeZ + z1 + Math.max(0, f.leadZ)),
   };
+}
+
+/** Native coverage may extend behind the drawable frustum. Keep that query footprint stable on turns. */
+export function flightCoverageBounds(
+  f: AtlasFlightView,
+  edge: number,
+  visible?: AtlasBounds,
+  radius = Math.max(f.turnCoverage, f.horizon),
+): AtlasBounds {
+  const col = (m: number) =>
+    Math.max(0, Math.min(Math.ceil(edge / columnMetres) - 1, Math.floor(m / columnMetres)));
+  const i0 = col(f.eyeX - radius),
+    i1 = col(f.eyeX + radius);
+  const j0 = col(f.eyeZ - radius),
+    j1 = col(f.eyeZ + radius);
+  return visible
+    ? {
+        i0: Math.min(i0, visible.i0),
+        i1: Math.max(i1, visible.i1),
+        j0: Math.min(j0, visible.j0),
+        j1: Math.max(j1, visible.j1),
+      }
+    : { i0, i1, j0, j1 };
 }
 
 // Radius is the box half-diagonal, so a parent can never exclude an intersecting child.
