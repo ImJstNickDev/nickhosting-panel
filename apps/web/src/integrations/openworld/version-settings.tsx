@@ -127,8 +127,11 @@ function UpdateDialog({
           <Switch
             label={t(updateKey('delay'))}
             checked={delay && !empty}
-            disabled={empty || frozen}
-            onChange={setDelay}
+            disabled={frozen}
+            onChange={(enabled) => {
+              setDelay(enabled);
+              if (enabled) setEmpty(false);
+            }}
           />
           {mode === 'timed' && (
             <Input

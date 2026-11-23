@@ -175,12 +175,15 @@ it.each(['timed', 'when-empty', 'immediate'] as const)(
     await check(delay).toBeChecked();
     await check(dialog.getByRole('checkbox')).not.toBeChecked();
     if (mode === 'when-empty') {
+      await timer.fill('47');
       await empty.click();
-      await check(delay).toBeDisabled();
+      await check(delay).toBeEnabled();
       await check(delay).not.toBeChecked();
       await check(timer).toHaveCount(0);
-      await empty.click();
+      await delay.click();
+      await check(empty).not.toBeChecked();
       await check(delay).toBeChecked();
+      await check(timer).toHaveValue('47');
       await empty.click();
     } else if (mode === 'immediate') {
       await timer.fill('45');
