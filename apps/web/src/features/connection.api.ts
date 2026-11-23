@@ -1,3 +1,5 @@
+import type { Connections } from './service-contracts.js';
+
 export type ConnectionOptions = {
   mode: string;
   customizable: boolean;
@@ -8,6 +10,17 @@ export type ConnectionOptions = {
   configured: boolean;
 };
 export type ConnectionChoice = { domainId?: string; subdomain?: string; reservationId?: string };
+
+export function primaryPlayerAddress(connection?: Connections) {
+  const endpoints = connection?.ports.filter(
+    (port) =>
+      port.primary &&
+      port.displayAddress &&
+      (!connection.srv || port.transport === connection.srv.proto),
+  );
+  return (endpoints?.find((port) => port.status === 'configured') ?? endpoints?.[0])
+    ?.displayAddress;
+}
 
 /** Prefer stored domain identity; overlapping DNS suffixes must not alter the editable label. */
 export function assignmentConnectionChoice(

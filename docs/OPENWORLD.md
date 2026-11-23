@@ -19,8 +19,8 @@ The mapping has two allocations:
 
 The allocator must be able to reserve **different port numbers** for the two roles.
 The node needs a private backend pool even when gameplay uses direct delivery. Direct mode
-also needs an explicitly configured advertised endpoint. Openworld uses an address and
-port. No SRV or hostname-based multiplexing is declared.
+also needs an explicitly configured advertised endpoint. Each instance has a distinct public
+UDP endpoint. DNS service discovery points the client to that endpoint.
 
 The version step lists releases from the synchronized Linux x64 catalog. The selected
 node determines which releases the user can install. A Gateway-only node can install
@@ -59,8 +59,15 @@ script and pinned checksums. The game and wizard remain usable without the graph
 
 ## Dashboard and gameplay
 
-Openworld uses one custom DNS name per server. Players enter the name and the assigned UDP
-port. Browsers use the same hostname over HTTPS. The advertised IP must deliver the game
+Openworld uses one custom DNS name per server. Once NickPanel has confirmed the
+`_openworld._udp` SRV record for the public game endpoint, **Address** copies the name
+on its own. Openworld a1.2.10 and newer look it up for both joins and server list pings.
+For older clients, use the hostname with the UDP port shown in **Network → Ports**.
+Entering an explicit port bypasses SRV discovery. Split DNS installations should also
+publish the service record in the internal view used by LAN clients.
+[Openworld network documentation](https://www.play-openworld.com/doc/network/)
+
+Browsers use the same hostname over HTTPS. The advertised IP must deliver the game
 port to the game endpoint and TCP 80/443 to Nginx Proxy Manager (NPM). A server that
 previously used the shared name can select a personal subdomain from Network.
 

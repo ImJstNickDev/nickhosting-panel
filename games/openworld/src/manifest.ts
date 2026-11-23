@@ -19,7 +19,11 @@ export const openworldManifest = gameManifestSchema.parse({
     wake: 'manual',
   },
   backupPolicy: { offline: 'required' },
-  connection: { mode: 'custom-subdomain', zoneSettingKey: 'dnsBaseDomain' },
+  connection: {
+    mode: 'custom-subdomain',
+    zoneSettingKey: 'dnsBaseDomain',
+    srv: { service: '_openworld', proto: 'udp' },
+  },
   serverPermissions: [
     ...openworldTelemetryPermissions,
     {

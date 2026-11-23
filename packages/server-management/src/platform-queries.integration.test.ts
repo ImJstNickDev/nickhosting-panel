@@ -2,12 +2,15 @@ import { randomUUID } from 'node:crypto';
 import { type AuthContext, authSessionId } from '@nickhosting/core';
 import { recordAudit } from '@nickhosting/database';
 import { createTestDatabase } from '@nickhosting/database/testing';
+import { planConnection } from '@nickhosting/external-services';
 import { minecraftDigest, minecraftManifest } from '@nickhosting/minecraft';
 import { sql } from 'kysely';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { openworldManifest } from '../../../games/openworld/src/manifest.js';
 import { satisfactoryManifest } from '../../../games/satisfactory/src/manifest.js';
 import { setUserLimits } from './admission.js';
 import { setGatewayPolicy } from './gateway-orchestration.js';
+import { getGatewayPresentationVariables } from './gateway-presentation.js';
 import { minecraftMappingDigest } from './minecraft-registry.js';
 import {
   deletePlatformProject,
@@ -1395,12 +1398,14 @@ describe('M5 platform browser queries and metadata', () => {
       .where('server_id', '=', id)
       .execute();
     const assignmentId = randomUUID();
-    const confirmed = {
-      hostname: 'old.example.test',
+    const confirmed = planConnection({
+      mode: 'custom-subdomain',
+      zoneName: 'example.test',
+      subdomain: 'old',
+      target: { type: 'A', content: '192.0.2.50' },
       port: 22222,
-      displayAddress: 'old.example.test',
-      records: [{ type: 'SRV', data: { port: 22222 } }],
-    };
+      srv: { service: '_minecraft', protocol: 'tcp' },
+    });
     for (const mode of ['gateway', 'direct'] as const) {
       await f.db
         .updateTable('managed_servers')
@@ -1546,6 +1551,155 @@ describe('M5 platform browser queries and metadata', () => {
     await f.db.deleteFrom('dns_assignments').where('id', '=', assignmentId).execute();
     result = await getPlatformConnections(f.db, f.context, id);
     expect(result.ports.every((p) => p.hostname === null && p.displayAddress === null)).toBe(true);
+  });
+  it('presents a confirmed Openworld UDP service without a port and keeps the port during upgrade', async () => {
+    const id = await f.server();
+    await f.db
+      .updateTable('game_integrations')
+      .set({ manifest: openworldManifest })
+      .where('id', '=', f.gameId)
+      .execute();
+    const allocation = await f.db
+      .selectFrom('server_allocations')
+      .select('id')
+      .where('server_id', '=', id)
+      .where('is_primary', '=', true)
+      .executeTakeFirstOrThrow();
+    const port = 26012;
+    const gatewayId = randomUUID();
+    await f.db
+      .insertInto('gateway_routes')
+      .values({
+        id: randomUUID(),
+        gateway_id: gatewayId,
+        server_id: id,
+        allocation_id: allocation.id,
+        public_address: '192.0.2.50',
+        public_port: port,
+        transport: 'udp',
+        lease_expires_at: new Date(Date.now() + 60000),
+      })
+      .execute();
+    const desired = planConnection({
+      mode: 'custom-subdomain',
+      zoneName: 'example.test',
+      subdomain: 'world',
+      target: { type: 'CNAME', content: 'edge.example.test' },
+      port,
+      srv: { service: '_openworld', protocol: 'udp' },
+    });
+    const assignment = randomUUID();
+    const addressRecord = desired.records[0];
+    const srv = desired.records[1];
+    if (!addressRecord || srv?.type !== 'SRV') throw new Error('Invalid fixture');
+    const explicit = `${desired.hostname}:${port}`;
+    const previous = { ...desired, records: [addressRecord], displayAddress: explicit };
+    await f.db
+      .insertInto('dns_assignments')
+      .values({
+        id: assignment,
+        server_id: id,
+        hostname: desired.hostname,
+        state: 'pending',
+        plan: JSON.stringify({ connection: desired, confirmedConnection: previous }),
+        ownership_token: randomUUID(),
+        ledger: '[]',
+      })
+      .execute();
+    async function assertDisplay(address: string) {
+      const network = await getPlatformConnections(f.db, f.context, id);
+      expect(network.ports.find((p) => p.primary && p.transport === 'udp')).toMatchObject({
+        hostname: desired.hostname,
+        displayAddress: address,
+        port,
+      });
+      expect(
+        (
+          await getGatewayPresentationVariables(f.db, [
+            { id, runtimeId: 'dedicated', gameVersion: 'a1.2.9' },
+          ])
+        ).get(id)?.address,
+      ).toBe(address);
+    }
+    await assertDisplay(explicit);
+    for (const wrong of [
+      { ...srv, name: '_minecraft._tcp.world.example.test' },
+      { ...srv, data: { ...srv.data, target: 'other.example.test' } },
+      { ...srv, data: { ...srv.data, port: port + 1 } },
+    ]) {
+      await f.db
+        .updateTable('dns_assignments')
+        .set({
+          state: 'active',
+          plan: JSON.stringify({ connection: { ...desired, records: [addressRecord, wrong] } }),
+        })
+        .where('id', '=', assignment)
+        .execute();
+      await assertDisplay(explicit);
+    }
+    await f.db
+      .updateTable('dns_assignments')
+      .set({ state: 'active', plan: JSON.stringify({ connection: desired }) })
+      .where('id', '=', assignment)
+      .execute();
+    await assertDisplay(desired.hostname);
+    await f.db
+      .updateTable('gateway_routes')
+      .set({ public_port: port + 1 })
+      .where('server_id', '=', id)
+      .execute();
+    expect(
+      (await getPlatformConnections(f.db, f.context, id)).ports.find((p) => p.transport === 'udp')
+        ?.displayAddress,
+    ).toBeNull();
+    const knownGateway = planConnection({
+      mode: 'custom-subdomain',
+      zoneName: 'example.test',
+      subdomain: 'world',
+      target: { type: 'A', content: '192.0.2.50' },
+      port,
+      srv: { service: '_openworld', protocol: 'udp' },
+    });
+    await f.db
+      .updateTable('dns_assignments')
+      .set({ plan: JSON.stringify({ connection: knownGateway }) })
+      .where('id', '=', assignment)
+      .execute();
+    const movedAddress = `${desired.hostname}:${port + 1}`;
+    expect(
+      (await getPlatformConnections(f.db, f.context, id)).ports.find((p) => p.transport === 'udp')
+        ?.displayAddress,
+    ).toBe(movedAddress);
+    expect(
+      (
+        await getGatewayPresentationVariables(f.db, [
+          { id, runtimeId: 'dedicated', gameVersion: 'a1.2.9' },
+        ])
+      ).get(id)?.address,
+    ).toBe(movedAddress);
+    await f.db
+      .updateTable('dns_assignments')
+      .set({ plan: JSON.stringify({ connection: desired }) })
+      .where('id', '=', assignment)
+      .execute();
+
+    await f.db
+      .updateTable('managed_servers')
+      .set({ connection_mode: 'direct' })
+      .where('id', '=', id)
+      .execute();
+    await f.db
+      .updateTable('server_allocations')
+      .set({ direct_endpoint: JSON.stringify({ hostname: 'edge.example.test', port }) })
+      .where('id', '=', allocation.id)
+      .execute();
+    const direct = await getPlatformConnections(f.db, f.context, id);
+    expect(direct.ports.find((p) => p.primary && p.transport === 'udp')?.displayAddress).toBe(
+      desired.hostname,
+    );
+    expect(direct.ports.find((p) => p.primary && p.transport === 'tcp')?.displayAddress).toBe(
+      explicit,
+    );
   });
   it('uses frozen direct endpoints without claiming reachability or falling back to private addresses', async () => {
     const id = await f.server();

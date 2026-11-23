@@ -663,6 +663,62 @@ describe('Domain choices and management (isolated responses, real components)', 
     await check(page.getByRole('status')).toHaveText('');
     expect(writes).toEqual([]);
   });
+  it('copies the confirmed Openworld hostname from both address fields and lists its explicit UDP port', async () => {
+    const hostname = 'explore.games.example.test';
+    await page.addInitScript(() => {
+      Object.defineProperty(navigator, 'clipboard', {
+        configurable: true,
+        value: {
+          writeText: async (value: string) => sessionStorage.setItem('copied-address', value),
+        },
+      });
+    });
+    await page.route('**/v1/platform/servers/domain-fixture/connections', (route) =>
+      route.fulfill({
+        json: {
+          connectionMode: 'gateway',
+          mode: 'custom-subdomain',
+          addressState: 'active',
+          srv: { service: '_openworld', proto: 'udp' },
+          ports: [
+            {
+              primary: true,
+              role: 'game',
+              transport: 'tcp',
+              hostname,
+              port: 28000,
+              displayAddress: `${hostname}:28000`,
+              status: 'configured',
+            },
+            {
+              primary: true,
+              role: 'game',
+              transport: 'udp',
+              hostname,
+              port: 28001,
+              displayAddress: hostname,
+              status: 'configured',
+            },
+          ],
+        },
+      }),
+    );
+    await open('network');
+    const gamePort = page.getByRole('row').filter({ hasText: 'UDP' });
+    await check(gamePort.getByRole('cell', { name: '28001' })).toBeVisible();
+    await page.getByRole('button', { name: 'Copy', exact: true }).click();
+    await check
+      .poll(() => page.evaluate(() => sessionStorage.getItem('copied-address')))
+      .toBe(hostname);
+    await open('summary');
+    await page.evaluate(() => sessionStorage.removeItem('copied-address'));
+    const copy = page.locator('button.console-summary-address');
+    await check(copy).toContainText(hostname);
+    await copy.click();
+    await check
+      .poll(() => page.evaluate(() => sessionStorage.getItem('copied-address')))
+      .toBe(hostname);
+  });
   it('truncates long console hostnames on mobile, exposes their full value and localizes actions', async () => {
     displayAddress = `${'long-'.repeat(10)}hostname.games.example.test`;
     addressState = 'active';

@@ -1,6 +1,11 @@
 import { randomUUID } from 'node:crypto';
 import { createTestDatabase } from '@nickhosting/database/testing';
-import { minecraftDigest, minecraftVerificationChecks } from '@nickhosting/minecraft';
+import { planConnection } from '@nickhosting/external-services';
+import {
+  minecraftDigest,
+  minecraftManifest,
+  minecraftVerificationChecks,
+} from '@nickhosting/minecraft';
 import { sql } from 'kysely';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { lockResources } from './admission.js';
@@ -64,7 +69,7 @@ beforeEach(async () => {
   };
   await f.db
     .insertInto('game_integrations')
-    .values({ id: 'minecraft', version: '1.0.0', manifest: {} })
+    .values({ id: 'minecraft', version: minecraftManifest.version, manifest: minecraftManifest })
     .onConflict((c) => c.column('id').doNothing())
     .execute();
   await f.db
@@ -351,11 +356,14 @@ describe('Minecraft declared-capability Gateway registration', () => {
         ?.previewVariables.en,
     ).toMatchObject(values);
     const assignmentId = randomUUID();
-    const connection = {
-      hostname: 'world.example.test',
+    const connection = planConnection({
+      mode: 'custom-subdomain',
+      zoneName: 'example.test',
+      subdomain: 'world',
+      target: { type: 'A', content: '192.0.2.50' },
       port: 27001,
-      records: [{ type: 'SRV', data: { port: 27001 } }],
-    };
+      srv: { service: '_minecraft', protocol: 'tcp' },
+    });
     await f.db
       .insertInto('dns_assignments')
       .values({

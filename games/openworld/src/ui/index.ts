@@ -198,7 +198,9 @@ export const openworldUiModule = defineTrustedGameUiModule({
         required: true,
       },
     ],
-    connectionModes: [{ mode: 'custom-subdomain' }],
+    connectionModes: [
+      { mode: 'custom-subdomain', srv: { service: '_openworld', transport: 'udp' } },
+    ],
   }),
   assets: {
     ...(openworldGameArtwork.src
