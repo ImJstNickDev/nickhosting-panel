@@ -268,14 +268,8 @@ it.each(['en', 'it'])(
       .click();
     await select('Openworld · #1');
     await next(locale);
-    await check(page.getByRole('radio', { name: /a1\.2\.10/ })).toBeDisabled();
-    await check(
-      page.getByText(
-        locale === 'en' ? /Requires a direct connection/ : /Richiede una connessione diretta/,
-      ),
-    ).toBeVisible();
     await check(page.getByText(/glibc 2\.38/)).toBeVisible();
-    await check(page.getByRole('radio', { name: /a1\.2\.9/ })).toBeChecked();
+    await check(page.getByRole('radio', { name: /a1\.2\.10/ })).toBeChecked();
     await page
       .locator('.installer-version')
       .filter({ has: page.getByRole('radio', { name: /a1\.2\.8/ }) })

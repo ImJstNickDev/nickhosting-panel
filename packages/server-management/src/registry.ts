@@ -73,6 +73,7 @@ import { assertNoModpackPublication } from './minecraft-modpack-schema.js';
 import { requireMinecraftChoice } from './minecraft-registry.js';
 import { bindMinecraftSource } from './minecraft-sources.js';
 import { minecraftProvisionStartup } from './minecraft-startup.js';
+import { type OpenworldUpdatePlan, openworldUpdateSelection } from './openworld-update-plan.js';
 import { backupSchemaAvailable } from './provider-backup-events.js';
 import { retryableProvision } from './provision-retry.js';
 import { integrationImageCandidates, mappingProvisionImage } from './runtime-images.js';
@@ -171,6 +172,7 @@ export const operationSchema = z.discriminatedUnion('action', [
       confirm: z.literal(true),
       backupBefore: z.boolean().default(false),
       minecraftVersion: minecraftVersionRequest.optional(),
+      openworldVersion: openworldUpdateSelection.optional(),
     })
     .strict(),
   z
@@ -1129,6 +1131,7 @@ export async function enqueueLockedServerOperation(
     minecraftInitialContent?: MinecraftPreparedContent;
     minecraftVersionTarget?: import('./minecraft-modpacks-plan.js').MinecraftModpackRuntimeBinding;
     satisfactoryContent?: true;
+    openworldUpdate?: OpenworldUpdatePlan;
   } = {},
 ) {
   const value = parse(operationSchema, input);
@@ -1164,6 +1167,42 @@ export async function enqueueLockedServerOperation(
       (value.action === 'wipe' && value.backupBefore))
   )
     throw new DomainError('forbidden');
+  const requestedUpdate = 'openworldVersion' in value ? value.openworldVersion : undefined;
+  if (requestedUpdate || options.openworldUpdate) {
+    const update = options.openworldUpdate;
+    if (
+      !update ||
+      !requestedUpdate ||
+      automation ||
+      value.action !== 'reinstall' ||
+      value.minecraftVersion ||
+      update.source.version !== requestedUpdate.expectedVersion ||
+      update.target.version !== requestedUpdate.version ||
+      update.source.version === update.target.version ||
+      update.backupBefore !== value.backupBefore ||
+      update.waitForEmpty !== (requestedUpdate.mode === 'when-empty') ||
+      (requestedUpdate.mode === 'timed' ? update.delaySeconds < 1 : update.delaySeconds !== 0) ||
+      (requestedUpdate.noticeSeconds !== undefined &&
+        update.delaySeconds !== requestedUpdate.noticeSeconds)
+    )
+      throw new DomainError('forbidden');
+    const profile = await tx
+      .selectFrom('openworld_server_profiles as p')
+      .innerJoin('runtime_egg_mappings as m', (join) => join.on('m.id', '=', server.mapping_id))
+      .select(['p.version', 'p.sha256', 'p.size'])
+      .where('p.server_id', '=', serverId)
+      .where('m.game_id', '=', 'openworld')
+      .where('m.runtime_id', '=', 'dedicated')
+      .forUpdate('p')
+      .executeTakeFirst();
+    if (
+      server.installation_state !== 'installed' ||
+      !server.pterodactyl_uuid ||
+      !profile ||
+      !isDeepStrictEqual(profile, update.source)
+    )
+      throw new DomainError('conflict');
+  }
   if (value.action === 'minecraft-content') {
     if (!options.minecraftPlan) throw new DomainError('forbidden');
     for (const permission of minecraftContentPermissionKeys(options.minecraftPlan.command))
@@ -1271,6 +1310,10 @@ export async function enqueueLockedServerOperation(
     throw new DomainError('operation_uncertain');
   const jobId = randomUUID();
   const plan: Record<string, unknown> = automation ? { gatewayAutomation: automation } : {};
+  if (options.openworldUpdate) {
+    plan.managedVersionUpdate = true;
+    plan.openworldUpdate = options.openworldUpdate;
+  }
   if (options.requestSource) plan.requestSource = options.requestSource;
   if (value.action === 'minecraft-content') {
     if (
@@ -1353,19 +1396,20 @@ export async function enqueueLockedServerOperation(
       }
     }
   }
-  const onlineWorldContent =
-    value.action === 'minecraft-content' && minecraftContentAllowsOnline(options.minecraftPlan);
-  if (onlineWorldContent && !['offline', 'running'].includes(server.runtime_state))
+  const allowsRunning =
+    Boolean(options.openworldUpdate) ||
+    (value.action === 'minecraft-content' && minecraftContentAllowsOnline(options.minecraftPlan));
+  if (allowsRunning && !['offline', 'running'].includes(server.runtime_state))
     throw new DomainError('conflict');
   const reservation = await tx
     .selectFrom('resource_reservations')
     .selectAll()
     .where('server_id', '=', serverId)
     .executeTakeFirst();
-  if (onlineWorldContent && reservation && reservation.state !== 'running')
+  if (allowsRunning && reservation && reservation.state !== 'running')
     throw new DomainError('operation_uncertain');
   if (
-    !onlineWorldContent &&
+    !allowsRunning &&
     [
       'configure',
       'reinstall',
@@ -1393,7 +1437,7 @@ export async function enqueueLockedServerOperation(
       .execute();
   }
   if (
-    !onlineWorldContent &&
+    !allowsRunning &&
     [
       'wipe',
       'reinstall',
@@ -1504,7 +1548,18 @@ export async function enqueueLockedServerOperation(
     plan,
     computeAction
       ? () => reserveStartInTransaction(tx, serverId, jobId, computeAction, env)
-      : undefined,
+      : options.openworldUpdate
+        ? async () => {
+            await tx
+              .insertInto('openworld_server_updates')
+              .values({
+                job_id: jobId,
+                server_id: serverId,
+                phase: 'preparing',
+              })
+              .execute();
+          }
+        : undefined,
   );
 }
 
@@ -1519,6 +1574,7 @@ export async function enqueueServerOperation(
     minecraftInitialContent?: MinecraftPreparedContent;
     minecraftVersionTarget?: import('./minecraft-modpacks-plan.js').MinecraftModpackRuntimeBinding;
     satisfactoryContent?: true;
+    openworldUpdate?: OpenworldUpdatePlan;
   } = {},
 ) {
   const value = parse(operationSchema, input);
@@ -1645,7 +1701,8 @@ export async function replayManagedGameOperation(
   const value = parse(operationSchema, input);
   if (
     value.action !== 'satisfactory-content' &&
-    !('minecraftVersion' in value && value.minecraftVersion)
+    !('minecraftVersion' in value && value.minecraftVersion) &&
+    !('openworldVersion' in value && value.openworldVersion)
   )
     throw new DomainError('validation_failed');
   const hash = digest({ kind: 'operation', subject: context.subjectUserId, serverId, value });

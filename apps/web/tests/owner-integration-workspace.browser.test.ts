@@ -200,7 +200,19 @@ describe('Owner integration workspace (real components, isolated API responses)'
       const path = '/v1/owner/integrations/openworld/versions';
       let calls = 0;
       const item = (version: string) => ({ version, size: 1234567, sha256: 'a'.repeat(64) });
-      const before = [item('a1.2.9'), item('a1.2.8')];
+      const before = [
+        {
+          ...item('a1.2.9'),
+          gatewayFailure: { reason: 'version_mismatch', checkedAt: '2026-11-21T10:00:00Z' },
+        },
+        item('a1.2.8'),
+      ];
+      let notice = 60;
+      await page.route('**/v1/owner/integrations/openworld/update-settings', async (route) => {
+        if (route.request().method() === 'PUT')
+          notice = route.request().postDataJSON().noticeSeconds;
+        return route.fulfill({ json: { noticeSeconds: notice, locked: false } });
+      });
       await page.route(`**${path}**`, (route) => {
         if (route.request().method() === 'POST') calls++;
         if (calls === 2)
@@ -226,6 +238,23 @@ describe('Owner integration workspace (real components, isolated API responses)'
       );
       const table = page.getByRole('table', { name: title });
       await check(table.getByText('a1.2.8', { exact: true })).toBeVisible();
+      await check(
+        table
+          .getByRole('row')
+          .filter({ hasText: 'a1.2.9' })
+          .getByText(locale === 'en' ? /Gateway test failed/ : /Test Gateway fallito/),
+      ).toBeVisible();
+      const delay = page.getByRole('spinbutton');
+      await check(delay).toHaveValue('60');
+      await delay.fill('120');
+      await page
+        .getByRole('button', {
+          name: locale === 'en' ? 'Save changes' : 'Salva modifiche',
+          exact: true,
+        })
+        .click();
+      await check(delay).toHaveValue('120');
+      await check.poll(() => notice).toBe(120);
       await page.getByRole('button', { name: sync }).click();
       await check(table.getByText('a1.2.10', { exact: true })).toBeVisible();
       await check(page.getByText('Metiva', { exact: true })).toBeVisible();

@@ -70,7 +70,38 @@ export interface Database
     synced_at: Date;
   };
   game_connection_versions: { server_id: string; game_id: string; version: string };
+  openworld_update_artifacts: { job_id: string; sha256: string; archive: Buffer };
+  openworld_update_settings: { singleton: Generated<boolean>; notice_seconds: number };
+  openworld_gateway_release_checks: {
+    version: string;
+    sha256: string;
+    outcome: 'passed' | 'failed';
+    reason: 'verified' | 'version_mismatch' | 'protocol_mismatch';
+    checked_at: Date;
+  };
+  openworld_server_updates: {
+    job_id: string;
+    server_id: string;
+    phase:
+      | 'preparing'
+      | 'waiting-empty'
+      | 'notice'
+      | 'stopping'
+      | 'backup'
+      | 'installing'
+      | 'verifying'
+      | 'starting'
+      | 'completed'
+      | 'failed'
+      | 'cancelled';
+    deadline: Date | null;
+    restart: boolean | null;
+    warning: 'notice_failed' | 'reminder_failed' | null;
+    created_at: Generated<Date>;
+    updated_at: Generated<Date>;
+  };
   openworld_server_profiles: {
+    history_sha256: string | null;
     dashboard_credential_prepared: Generated<boolean>;
     server_id: string;
     version: string;

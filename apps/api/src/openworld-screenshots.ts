@@ -45,7 +45,7 @@ export function registerOpenworldScreenshotRoutes(
           return attributedOpenworldScreenshots(
             options.db,
             scope.serverId,
-            scope.binding,
+            scope.historyBinding ?? scope.binding,
             files,
             filter,
           );

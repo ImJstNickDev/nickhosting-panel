@@ -13,7 +13,11 @@ import type { DB, Environment } from './admission.js';
 
 const tickets = 'openworld:linux-x64:install:v1';
 const ticketLifetime = 30 * 60_000;
-const claim = z.object({ expires: z.int().positive(), release: openworldReleaseSchema });
+const claim = z.object({
+  expires: z.int().positive(),
+  release: openworldReleaseSchema,
+  updateJob: z.uuid().optional(),
+});
 interface ReleaseCatalog {
   source: 'metiva' | 'official';
   syncedAt: Date;
@@ -30,12 +34,14 @@ export function issueOpenworldArtifactUrl(
   codec: SecretCodec,
   publicUrl: string | undefined,
   release: OpenworldRelease,
+  updateJob?: string,
 ) {
   if (!publicUrl) throw new DomainError('configuration_invalid');
   const url = new URL('/v1/runtime-artifacts/openworld', publicUrl);
   const value = {
     expires: Date.now() + ticketLifetime,
     release: openworldReleaseSchema.parse(release),
+    ...(updateJob ? { updateJob: z.uuid().parse(updateJob) } : {}),
   };
   const envelope = codec.encrypt(JSON.stringify(value), tickets);
   url.searchParams.set('ticket', Buffer.from(JSON.stringify(envelope)).toString('base64url'));
@@ -48,9 +54,9 @@ export function readOpenworldInstallTicket(codec: SecretCodec, ticket: string | 
       JSON.parse(Buffer.from(ticket, 'base64url').toString()),
       tickets,
     );
-    const { expires, release } = claim.parse(JSON.parse(verified));
+    const { expires, release, updateJob } = claim.parse(JSON.parse(verified));
     if (expires <= Date.now()) throw new Error();
-    return release;
+    return updateJob ? { ...release, updateJob } : release;
   } catch {
     throw new DomainError('forbidden');
   }
@@ -149,7 +155,17 @@ export async function downloadOpenworldRelease(
   db: DB,
   codec: SecretCodec,
   env: Environment,
-  release: OpenworldRelease,
+  release: OpenworldRelease & { updateJob?: string },
 ) {
+  if (release.updateJob) {
+    const staged = await db
+      .selectFrom('openworld_update_artifacts')
+      .select('archive')
+      .where('job_id', '=', release.updateJob)
+      .where('sha256', '=', release.sha256)
+      .executeTakeFirst();
+    if (!staged || staged.archive.byteLength !== release.size) throw new DomainError('not_found');
+    return staged.archive;
+  }
   return readOpenworldArchive(release, await getGameMetivaToken(db, codec, 'openworld', env));
 }

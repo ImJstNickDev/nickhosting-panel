@@ -123,8 +123,12 @@ export interface FileMutationContext {
   listFiles(directory: string): Promise<ServerFile[]>;
 }
 export interface GameRuntimeHooks extends GameBackupHooks<GameLifecycleContext> {
+  versionUpdate?: import('./game-version-update.js').GameUpdateHooks;
   /** Issue narrowly scoped installer credentials at the provider handoff. */
-  installerEnvironment?(context: GameLifecycleContext): Promise<Record<string, string>>;
+  installerEnvironment?(
+    context: GameLifecycleContext,
+    current?: ApplicationServer,
+  ): Promise<Record<string, string>>;
   configureProvision(context: GameLifecycleContext): Promise<boolean>;
   installationRetry?(
     context: GameLifecycleContext,

@@ -147,7 +147,7 @@ async function scopedServer(db: DB, context: AuthContext, serverId: string) {
 
 // Installed release metadata is authoritative; manifest compatibility ranges and
 // integration versions are not the version installed in an individual server.
-const installedServerVersion = sql<string | null>`(
+const installedServerVersion = sql<string | null>`coalesce((
   select nullif(combination.combination->>'release', '')
   from minecraft_server_profiles as profile
   join minecraft_combinations as combination on combination.id = profile.combination_id
@@ -155,7 +155,11 @@ const installedServerVersion = sql<string | null>`(
   where profile.server_id = managed_servers.id and profile.installed = true
     and combination.mapping_id = managed_servers.mapping_id
     and version_mapping.game_id = 'minecraft'
-)`;
+), (
+  select v.version from game_connection_versions v
+    join runtime_egg_mappings m on m.id = managed_servers.mapping_id and m.game_id = v.game_id
+    where v.server_id = managed_servers.id and managed_servers.installation_state = 'installed'
+))`;
 
 export async function listPlatformServers(
   db: DB,

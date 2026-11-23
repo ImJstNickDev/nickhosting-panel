@@ -210,7 +210,11 @@ export async function authorizeQueuedEffect(
     throw new DomainError('forbidden');
   if (operation.plan.scheduleAutomation !== undefined)
     await authorizeScheduledEffect(db, jobId, serverId);
-  if (operation.action === 'backup' && operation.phase === 'backup_resume') {
+  if (
+    (operation.action === 'backup' ||
+      (operation.action === 'reinstall' && operation.plan.managedVersionUpdate === true)) &&
+    operation.phase === 'backup_resume'
+  ) {
     const gateway = await db
       .selectFrom('gateway_server_states')
       .select('generation')
@@ -902,8 +906,13 @@ export async function createManagementRuntime(options: ManagementOptions) {
     },
     finalizeGameStart: async (context: import('./lifecycle.js').GameLifecycleContext) =>
       (await gameRuntime(context.db, context.server.id))?.finalizeStart?.(context) ?? true,
-    gameInstallerEnvironment: async (context: import('./lifecycle.js').GameLifecycleContext) =>
-      (await gameRuntime(context.db, context.server.id))?.installerEnvironment?.(context),
+    gameVersionUpdate: async (context: import('./lifecycle.js').GameLifecycleContext) =>
+      (await gameRuntime(context.db, context.server.id))?.versionUpdate,
+    gameInstallerEnvironment: async (
+      context: import('./lifecycle.js').GameLifecycleContext,
+      current?: ApplicationServer,
+    ) =>
+      (await gameRuntime(context.db, context.server.id))?.installerEnvironment?.(context, current),
     configureGameProvision: async (context: import('./lifecycle.js').GameLifecycleContext) =>
       (await gameRuntime(context.db, context.server.id))?.configureProvision(context) ?? true,
     minecraftVersionChange: async (
@@ -1219,7 +1228,9 @@ export async function createManagementRuntime(options: ManagementOptions) {
       if (
         ['start', 'restart'].includes(operation.action) ||
         (operation.action === 'provision' && operation.phase === 'initial_start') ||
-        (operation.action === 'backup' && operation.phase === 'backup_resume')
+        ((operation.action === 'backup' ||
+          (operation.action === 'reinstall' && operation.plan.managedVersionUpdate === true)) &&
+          operation.phase === 'backup_resume')
       ) {
         await stage('runtime_image', () =>
           assertRuntimeImage(serverId, connection, false, {

@@ -115,6 +115,7 @@ export function observeOpenworld(
 export const openworldGatewayAdapter: GatewayProtocolAdapter = {
   id: 'openworld',
   startupHint: 'provider_running',
+  drainUdpOnStop: true,
   supports: (route) =>
     route.protocol?.handlerId === 'openworld' &&
     openworldSupportsGateway(route.protocol.gameVersion) &&

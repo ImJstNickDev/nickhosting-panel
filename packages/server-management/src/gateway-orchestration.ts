@@ -19,6 +19,7 @@ import { type GatewayPolicyContext, loadGatewayPolicyContext } from './gateway-p
 import { requireMinecraftGatewayProtocol } from './gateway-registry.js';
 import { currentInteractiveContext } from './interactive-context.js';
 import { minecraftContentAllowsOnline } from './minecraft-content-contracts.js';
+import { openworldUpdateMatchesGateway } from './openworld-update-gateway.js';
 import {
   assertGatewaySleepFence,
   authorizeServer,
@@ -30,6 +31,20 @@ import { resolveAutoWakeValues } from './wake-policy.js';
 
 type State = Selectable<Database['gateway_server_states']>;
 type Server = Selectable<Database['managed_servers']>;
+function canObserveDuringMaintenance(
+  operation:
+    | Pick<Selectable<Database['server_operations']>, 'server_id' | 'action' | 'plan'>
+    | undefined,
+  server: { id: string; game_id: string },
+  state: State,
+) {
+  return (
+    operation?.server_id === server.id &&
+    (operation.action === 'backup' ||
+      openworldUpdateMatchesGateway(operation, server.game_id, state))
+  );
+}
+
 function matchingSleepOperation(
   operation: Selectable<Database['server_operations']> | undefined,
   serverId: string,
@@ -1138,7 +1153,7 @@ export async function reportGatewayObservation(
       !value.processStartedAt ||
       server.runtime_state !== 'running' ||
       (server.active_operation_id &&
-        activeOperation?.action !== 'backup' &&
+        !canObserveDuringMaintenance(activeOperation, server, state) &&
         !(
           activeOperation?.action === 'minecraft-content' &&
           minecraftContentAllowsOnline(activeOperation.plan.minecraftContent)
@@ -1185,7 +1200,7 @@ export async function reportGatewayObservation(
         (job.state !== 'succeeded' &&
           !(
             job.state === 'failed' &&
-            operation.action === 'backup' &&
+            canObserveDuringMaintenance(operation, server, state) &&
             operation.plan.backupResumeOutcome === 'succeeded'
           )) ||
         !operation.effect_started_at ||
@@ -1193,7 +1208,7 @@ export async function reportGatewayObservation(
         operation.server_id !== serverId ||
         !(
           ['start', 'restart'].includes(operation.action) ||
-          (operation.action === 'backup' &&
+          (canObserveDuringMaintenance(operation, server, state) &&
             operation.plan.backupResumeOutcome === 'succeeded' &&
             operation.plan.startConfirmed === true &&
             operation.effect_state === 'confirmed' &&
@@ -1521,16 +1536,23 @@ async function reconcileLocked(
         return getGatewayState(tx, serverId, options);
       }
     }
-    const resumedBackup =
+    const resumeOperation =
       job.state === 'failed'
         ? await tx
             .selectFrom('server_operations')
-            .select('plan')
+            .select(['action', 'plan', 'server_id'])
             .where('job_id', '=', job.id)
-            .where('action', '=', 'backup')
+            .where('server_id', '=', serverId)
+            .where('action', 'in', ['backup', 'reinstall'])
             .executeTakeFirst()
         : undefined;
-    if (job.state === 'failed' && resumedBackup?.plan.backupResumeOutcome !== 'succeeded')
+    if (
+      job.state === 'failed' &&
+      !(
+        canObserveDuringMaintenance(resumeOperation, server, state) &&
+        resumeOperation?.plan.backupResumeOutcome === 'succeeded'
+      )
+    )
       await block(
         tx,
         state,

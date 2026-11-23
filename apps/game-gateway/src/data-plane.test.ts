@@ -715,6 +715,40 @@ describe('persistent Gateway fixture forwarding', () => {
     expect((await exchange(tcp.port, 'ready-again')).toString()).toBe('ready-again');
     expect((await datagram(udp.port, 'ready-again')).toString()).toBe('ready-again');
   });
+  it('drains new Openworld gameplay peers without interrupting existing sessions or server-list queries', async () => {
+    const backend = await udpFixture();
+    const routeBefore = route(backend.port, 'udp');
+    routeBefore.protocol = { handlerId: 'openworld', gameVersion: 'a1.2.10', role: 'game' };
+    const running = {
+      protocols: [openworldGatewayAdapter],
+      policy: { maxClassificationBytes: 65536 },
+    };
+    const f = plane([routeBefore], running);
+    const clients = [createSocket('udp4'), createSocket('udp4'), createSocket('udp4')] as const;
+    cleanups.push(async () => {
+      for (const c of clients) c.close();
+    });
+    const [player, list, newcomer] = clients;
+    const status = openworldStatusRequest(Buffer.from('list'));
+    await f.gateway.applySnapshot(f.snapshot());
+    expect((await datagram(backend.port, 'before', player)).toString()).toBe('before');
+    expect(await datagram(backend.port, status, list)).toEqual(status);
+    const endpoint = {
+      ...routeBefore,
+      revision: 2,
+      presentation: { serverName: 'Fixture', messages: {}, stopping: true },
+    };
+    await f.gateway.applySnapshot(f.snapshot([endpoint], 2));
+    expect((await datagram(backend.port, 'existing', player)).toString()).toBe('existing');
+    const dropped = f.gateway.metrics().udpDropped;
+    list.send('first gameplay', backend.port, '127.0.0.1');
+    newcomer.send('new peer', backend.port, '127.0.0.1');
+    await vi.waitFor(() => expect(f.gateway.metrics().udpDropped).toBe(dropped + 2));
+    expect(await datagram(backend.port, status, newcomer)).toEqual(status);
+    await f.gateway.applySnapshot(f.snapshot([{ ...routeBefore, revision: 3 }], 3));
+    expect((await datagram(backend.port, 'reopened', newcomer)).toString()).toBe('reopened');
+  });
+
   it('Openworld idle reports distinguish a server-list query, a connecting peer and an online player', async () => {
     const backend = await udpFixture();
     backend.socket.removeAllListeners('message');

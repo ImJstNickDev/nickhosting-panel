@@ -9,11 +9,91 @@ import './versions.css';
 interface Catalog {
   source: 'metiva' | 'official';
   syncedAt: string;
-  releases: { version: string; size: number; sha256: string }[];
+  releases: {
+    version: string;
+    size: number;
+    sha256: string;
+    gatewayFailure?: { reason: 'version_mismatch' | 'protocol_mismatch'; checkedAt: string };
+  }[];
+}
+interface Settings {
+  noticeSeconds: number;
+  locked: boolean;
 }
 const path = '/v1/owner/integrations/openworld/versions';
 const queryKey = ['integration-versions', 'openworld'];
 const pageSize = 25;
+
+const settingsPath = '/v1/owner/integrations/openworld/update-settings';
+const settingsKey = ['integration-update-settings', 'openworld'];
+
+function UpdateNoticeSetting() {
+  const t = useT();
+  const cache = useQueryClient();
+  const [draft, setDraft] = useState<string>();
+  const settings = useQuery({
+    queryKey: settingsKey,
+    queryFn: ({ signal }) => api<Settings>(settingsPath, { signal }),
+  });
+  const save = useMutation({
+    mutationFn: (noticeSeconds: number) =>
+      api<Settings>(settingsPath, { method: 'PUT', body: { noticeSeconds } }),
+    onSuccess: (result) => {
+      cache.setQueryData(settingsKey, result);
+      setDraft(undefined);
+    },
+  });
+  if (settings.isPending) return <Loading />;
+  if (settings.error || !settings.data)
+    return <ErrorNotice error={settings.error} retry={() => void settings.refetch()} />;
+  const data = settings.data;
+  const value = draft ?? String(data.noticeSeconds);
+  const valid = /^\d+$/.test(value) && Number(value) >= 1 && Number(value) <= 86400;
+  return (
+    <form
+      className="openworld-update-notice"
+      onSubmit={(event) => {
+        event.preventDefault();
+        if (valid && !data.locked && !save.isPending) save.mutate(Number(value));
+      }}
+    >
+      <label htmlFor="openworld-update-notice">{t('games.openworld.defaultNotice')}</label>
+      <div>
+        <input
+          id="openworld-update-notice"
+          type="number"
+          min={1}
+          max={86400}
+          step={1}
+          required
+          disabled={data.locked || save.isPending}
+          value={value}
+          onChange={(event) => {
+            save.reset();
+            setDraft(event.target.value);
+          }}
+        />
+        {data.locked ? (
+          <span className="muted">{t('owner.source.environment')}</span>
+        ) : (
+          <button
+            className="secondary"
+            type="submit"
+            disabled={!valid || Number(value) === data.noticeSeconds || save.isPending}
+          >
+            {t('web.save')}
+          </button>
+        )}
+        {save.isSuccess && (
+          <span className="muted" role="status">
+            {t('web.saved')}
+          </span>
+        )}
+      </div>
+      {save.error && <ErrorNotice error={save.error} />}
+    </form>
+  );
+}
 
 export default function OpenworldVersions() {
   const t = useT();
@@ -50,6 +130,7 @@ export default function OpenworldVersions() {
         </button>
       }
     >
+      <UpdateNoticeSetting />
       {sync.error && <ErrorNotice error={sync.error} />}
       {catalog.isPending ? (
         <Loading />
@@ -80,7 +161,15 @@ export default function OpenworldVersions() {
               <tbody>
                 {filtered.slice((current - 1) * pageSize, current * pageSize).map((release) => (
                   <tr key={release.version}>
-                    <th scope="row">{release.version}</th>
+                    <th scope="row">
+                      <span>{release.version}</span>
+                      {release.gatewayFailure && (
+                        <small className="openworld-gateway-failure">
+                          {t(`games.openworld.gatewayCheck.${release.gatewayFailure.reason}`)} ·{' '}
+                          <Time value={release.gatewayFailure.checkedAt} />
+                        </small>
+                      )}
+                    </th>
                     <td>{format.bytes(release.size)}</td>
                   </tr>
                 ))}

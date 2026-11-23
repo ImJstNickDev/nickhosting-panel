@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { DomainError } from '@nickhosting/core';
 import { z } from 'zod';
+import { openworldVersionId } from './version-policy.js';
 
 const mirrorBase = 'https://metiva.imjstnick.com/p/pascard-openworld/r/dedicated-linux-server-x64';
 const upstreamOrigin = 'https://core.openworld.pascard.com';
@@ -8,7 +9,7 @@ const officialFiles = 'https://ow-bucket.s3.eu-west-par.io.cloud.ovh.net';
 const archiveLimit = 128 * 1024 * 1024;
 const manifestLimit = 8 * 1024 * 1024;
 export const openworldReleaseSchema = z.object({
-  version: z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$/),
+  version: z.string().regex(openworldVersionId),
   sha256: z.string().regex(/^[a-f0-9]{64}$/),
   size: z.number().int().positive().max(archiveLimit),
 });

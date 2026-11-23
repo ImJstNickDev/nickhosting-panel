@@ -54,7 +54,7 @@ export function createOpenworldCaptureCollector(
     if (!saved) return;
     const collected = await native(scope, async (origin, token, signal) => {
       const state = captureCursor(
-        saved.binding === scope.binding && saved.process_ref === process
+        saved.binding === (scope.historyBinding ?? scope.binding) && saved.process_ref === process
           ? saved.evidence
           : undefined,
       );
@@ -79,7 +79,7 @@ export function createOpenworldCaptureCollector(
       const claimed = await tx
         .updateTable('openworld_capture_cursors')
         .set({
-          binding: scope.binding,
+          binding: scope.historyBinding ?? scope.binding,
           process_ref: process,
           evidence: JSON.stringify(collected.state),
           next_scan_at: new Date(
@@ -96,7 +96,7 @@ export function createOpenworldCaptureCollector(
           .insertInto('openworld_capture_owners')
           .values({
             server_id: id,
-            binding: scope.binding,
+            binding: scope.historyBinding ?? scope.binding,
             file_name: c.name,
             file_bytes: String(c.bytes),
             mtime_ms: String(c.mtimeMs),

@@ -31,8 +31,9 @@ import {
 import type { GameRuntimeHooks, TrustedGameModule } from './game-modules.js';
 import type { GameLifecycleContext } from './lifecycle.js';
 import { issueOpenworldArtifactUrl, listOpenworldReleases } from './openworld-catalog.js';
-
 import { prepareOpenworldDashboardOnStart } from './openworld-dashboard.js';
+import { createOpenworldUpdateHooks } from './openworld-update-engine.js';
+import { openworldUpdatePlanSchema } from './openworld-update-plan.js';
 
 const id = 'openworld';
 
@@ -272,6 +273,9 @@ export function createOpenworldModuleRuntime(
       !file?.is_file ||
       file.is_symlink ||
       !file.size ||
+      (context.operation().plan.managedVersionUpdate === true &&
+        file.size !==
+          (context.operation().plan.openworldBinary as { size?: number } | undefined)?.size) ||
       !assets ||
       assets.is_file ||
       assets.is_symlink
@@ -282,12 +286,20 @@ export function createOpenworldModuleRuntime(
     return true;
   }
   return {
-    async installerEnvironment(context) {
-      const release = await context.db
-        .selectFrom('openworld_server_profiles')
-        .select(['version', 'sha256', 'size'])
-        .where('server_id', '=', context.server.id)
-        .executeTakeFirstOrThrow();
+    versionUpdate: createOpenworldUpdateHooks(codec, env),
+    async installerEnvironment(context, current) {
+      const operation = context.operation();
+      const update =
+        operation.action === 'reinstall' && operation.plan.openworldUpdate
+          ? openworldUpdatePlanSchema.parse(operation.plan.openworldUpdate)
+          : undefined;
+      const release =
+        update?.target ??
+        (await context.db
+          .selectFrom('openworld_server_profiles')
+          .select(['version', 'sha256', 'size'])
+          .where('server_id', '=', context.server.id)
+          .executeTakeFirstOrThrow());
       const dashboard = await context.db
         .selectFrom('server_allocations')
         .select(['port', 'private_only'])
@@ -302,8 +314,16 @@ export function createOpenworldModuleRuntime(
         OW_ARCHIVE_SIZE: String(release.size),
         OW_SHA256: release.sha256,
         OW_WEB_PORT: String(dashboard.port),
-        OW_WEB_PASSWORD: randomBytes(32).toString('base64url'),
-        OW_DOWNLOAD_URL: issueOpenworldArtifactUrl(codec, values.publicUrl, release),
+        OW_WEB_PASSWORD:
+          update && typeof current?.container.environment?.OW_WEB_PASSWORD === 'string'
+            ? current.container.environment.OW_WEB_PASSWORD
+            : randomBytes(32).toString('base64url'),
+        OW_DOWNLOAD_URL: issueOpenworldArtifactUrl(
+          codec,
+          values.publicUrl,
+          release,
+          update ? operation.job_id : undefined,
+        ),
       };
     },
     prepareStart: prepareOpenworldDashboardOnStart,

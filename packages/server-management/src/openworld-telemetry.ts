@@ -34,6 +34,7 @@ type Sample = { data: OpenworldTelemetryData[Resource]; observedAt: number };
 export type OpenworldScope = {
   serverId: string;
   binding: string;
+  historyBinding?: string;
   version: string;
   liveKey: string;
   origin: string;
@@ -155,6 +156,7 @@ export async function readOpenworldScope(
       'member.role as member_role',
       'sub.permission_keys',
       'p.sha256',
+      'p.history_sha256',
       'p.version',
       'p.dashboard_credential_prepared',
       'm.nest_id',
@@ -245,21 +247,24 @@ export async function readOpenworldScope(
     }
   }
   if (scope.identity_invalidated) throw new DomainError('provenance_mismatch');
-  const binding = createHash('sha256')
-    .update(
-      JSON.stringify([
-        directoryServerIdentity(scope),
-        scope.mapping_id,
-        scope.nest_id,
-        scope.egg_id,
-        scope.sha256,
-        scope.pterodactyl_node_id,
-        scope.provider_instance,
-        scope.provider_url,
-        scope.claims,
-      ]),
-    )
-    .digest('hex');
+  const bindingFor = (release: string) =>
+    createHash('sha256')
+      .update(
+        JSON.stringify([
+          directoryServerIdentity(scope),
+          scope.mapping_id,
+          scope.nest_id,
+          scope.egg_id,
+          release,
+          scope.pterodactyl_node_id,
+          scope.provider_instance,
+          scope.provider_url,
+          scope.claims,
+        ]),
+      )
+      .digest('hex');
+  const binding = bindingFor(scope.sha256);
+  const historyBinding = scope.history_sha256 ? bindingFor(scope.history_sha256) : binding;
   // Snapshots survive power cycles. Credentials and live values belong to one running process.
   const liveKey = JSON.stringify([
     binding,
@@ -277,8 +282,11 @@ export async function readOpenworldScope(
     version: scope.version,
     binding,
     liveKey,
+    historyBinding,
     canInspectPlayers,
-    ...(portrait?.skin_binding === binding && portrait.png ? { savedSkin: portrait.png } : {}),
+    ...(portrait?.skin_binding === historyBinding && portrait.png
+      ? { savedSkin: portrait.png }
+      : {}),
   };
   if (!ready)
     return {
@@ -350,7 +358,7 @@ export async function archiveOpenworldVitals(
       {
         server_id: scope.serverId,
         account_id: account,
-        binding: scope.binding,
+        binding: scope.historyBinding ?? scope.binding,
         observed_at: new Date(at),
         vitals: JSON.stringify(Object.fromEntries(values)),
       },

@@ -53,6 +53,7 @@ import { registerOpenworldRulesRoutes } from './openworld-rules.js';
 import { registerOpenworldThumbnailRoute } from './openworld-screenshot-thumbnails.js';
 import { registerOpenworldScreenshotRoutes } from './openworld-screenshots.js';
 import { registerOpenworldTelemetryRoutes } from './openworld-telemetry.js';
+import { registerOpenworldUpdateRoutes } from './openworld-updates.js';
 import { registerOpenworldWorldMapRoutes } from './openworld-world-map.js';
 import { registerPlatformRoutes } from './platform.js';
 import { registerProfilePhotoRoutes } from './profile-photo.js';
@@ -734,6 +735,7 @@ export function createApp(options: Options) {
     management: options.management,
     logger: options.logger,
   });
+  registerOpenworldUpdateRoutes(app, { db, env, codec: options.codec, principal });
   registerOpenworldRoutes(app, { db, env, codec: options.codec, principal });
   registerSatisfactoryRoutes(app, { db, principal });
   registerSatisfactoryOverviewRoutes(app, { db, codec: options.codec, principal });

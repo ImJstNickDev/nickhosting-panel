@@ -22,11 +22,9 @@ The node needs a private backend pool even when gameplay uses direct delivery. D
 also needs an explicitly configured advertised endpoint. Each instance has a distinct public
 UDP endpoint. DNS service discovery points the client to that endpoint.
 
-The version step lists releases from the synchronized Linux x64 catalog. The selected
-node determines which releases the user can install. A Gateway-only node can install
-releases with verified UDP support. A node with direct delivery can also install
-other releases supported by the egg. NickHosting checks available allocations when
-the user submits the request.
+The version step lists releases from the synchronized Linux x64 catalog. NickHosting accepts new publisher builds on
+Gateway-enabled and direct nodes when supported by the egg. NickHosting checks
+available allocations when the user submits the request.
 
 For standalone installations, the egg can retrieve the requested release from the publisher.
 NickHosting issues a short-lived URL for the pinned ZIP during provider handoff.
@@ -40,6 +38,8 @@ After changing the installer or launch helper, regenerate the JSON using
 Open **Owner → Integrations → Openworld → Versions** to see the catalog used by
 the creation wizard. Use **Sync versions** to fetch the current releases. A successful sync
 replaces the saved catalog. An upstream failure leaves the last successful sync intact.
+The same page sets the default in-game update notice, initially 60 seconds.
+`NH_OPENWORLD_UPDATE_NOTICE_SECONDS` overrides the Owner value (1–86400 seconds).
 
 Under **Owner → Settings → Credentials**, set the global Metiva access token.
 Under **Owner → Integrations → Openworld → General**, an integration token overrides it.
@@ -56,6 +56,29 @@ The mirror and publisher can expose different lists of releases.
 Run `node games/openworld/prepare-artwork.mjs` to cache the two official graphics locally.
 The web UI serves those local files; the public Git repository contains the retrieval
 script and pinned checksums. The game and wizard remain usable without the graphics.
+
+## Updating an installed server
+
+Open **Server → Settings → Version** or select the update icon beside the installed
+version in Console. Choose the target release and whether to back up. NickPanel
+downloads and verifies the archive while the existing server remains available.
+The Console shows progress after a page reload and allows cancellation until
+shutdown begins.
+
+With players present, timed updates announce the target in chat and wait for the
+selected interval. The default is 60 seconds and can be changed under **Owner →
+Integrations → Openworld → Versions**. Turning off the notice starts shutdown
+as soon as preparation finishes. **Wait until the server is empty** replaces the
+timer and requires a confirmed empty server or a confirmed stop. Failure to
+deliver a courtesy message leaves the timed update scheduled.
+
+The egg replaces the distribution and preserves the instance data. An optional
+backup runs after shutdown and before installation. NickPanel checks the installed
+executable against the one in the selected archive before publishing its version
+and reconciling DNS. A server that was online starts again after a successful
+installation, subject to current power consent. An offline server stays offline.
+Player history, saved skin previews and attributed screenshots remain attached
+to the instance through a version change.
 
 ## Dashboard and gameplay
 
@@ -286,10 +309,23 @@ pre-a1.2.0-1. The a1.0.10 package requires glibc 2.38 and cannot run on the Debi
 Bookworm image used by this egg. When that release is present in the catalog, the
 wizard shows the runtime requirement beside its disabled option.
 
-For supported releases, the Openworld Gateway module verifies readiness using a correlated UDP
-server-information response from the assigned backend, checks the release and reads player
-counts. Once ready, the existing UDP data plane forwards traffic. Other releases use
-direct delivery when configured. Wake is manual.
+Published releases that can run on the egg are eligible for Gateway delivery immediately.
+For each managed route, the Gateway verifies the exact installed version in a correlated
+UDP status reply from the assigned backend before forwarding traffic. Direct delivery
+remains available on nodes configured for it. Wake is manual.
+
+After an isolated Gateway release test, a regular Owner can submit its evidence to
+`POST /v1/owner/integrations/openworld/versions/:version/gateway-check`. Supply the
+tested Linux archive's `sha256`, UTC `checkedAt`, four-byte `nonce` and complete
+`statusPacketHex` (both byte sequences in lowercase hex). The latest test for that
+version and archive wins. An incompatible correlated status reply appears alongside
+the release in the Owner Versions list. A passing retest clears the notice. Raw packet evidence must match the query ID.
+
+When a controlled build produces no usable status packet, the Owner can record an
+explicit failure on the same endpoint with the archive SHA-256, `checkedAt`,
+`kind: "controlled-incompatibility"`, `observedVersion` from the independently verified running build,
+`serverReady: true`, the number of `probes`, and `result` set to `no-status-reply`
+or `unrecognized-reply`. Routine server outages never create catalog warnings.
 
 With an idle timeout enabled, a Gateway-routed server can sleep after fresh status samples
 report zero players throughout that interval. Active UDP sessions and recent join or

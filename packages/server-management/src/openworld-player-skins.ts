@@ -73,7 +73,7 @@ export function createOpenworldSkinCollector(
         .selectFrom('openworld_player_skins')
         .select(['account_id', 'skin_hash'])
         .where('server_id', '=', scope.serverId)
-        .where('binding', '=', scope.binding)
+        .where('binding', '=', scope.historyBinding ?? scope.binding)
         .where(
           'account_id',
           'in',
@@ -131,7 +131,7 @@ export function createOpenworldSkinCollector(
           .values(
             stable.map(({ p, head, body }) => ({
               server_id: scope.serverId,
-              binding: scope.binding,
+              binding: scope.historyBinding ?? scope.binding,
               account_id: p.account,
               skin_hash: p.hash,
               observed_at: new Date(observedAt),

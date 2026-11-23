@@ -22,6 +22,7 @@ import { openworldInventoryCatalogs } from './player-inventory-catalog.js';
 import { openworldRulesCatalogs } from './rules-catalog.js';
 import { openworldSeedCatalogs } from './seed-catalog.js';
 import { openworldTelemetryCatalogs } from './telemetry-catalog.js';
+import { openworldUpdateCatalogs } from './update-catalog.js';
 
 const catalogSchema = z.object({
   mappings: z.array(
@@ -58,7 +59,7 @@ function options(raw: unknown, handler: string, values: UiValues): UiOption[] {
         disabled: !available,
         ...(!available && {
           reasonKey: openworldSupportsRuntime(version)
-            ? 'games.openworld.requiresDirect'
+            ? 'games.openworld.nodeUnavailable'
             : 'games.openworld.incompatibleRuntime',
         }),
       };
@@ -187,6 +188,18 @@ export const openworldUiModule = defineTrustedGameUiModule({
         columns: [],
         forms: [],
       },
+      {
+        id: 'version',
+        titleKey: 'games.openworld.update.title',
+        loader: 'telemetry',
+        renderer: 'openworld-version',
+        navigation: { group: 'config', order: 10, icon: 'settings', placement: 'settings' },
+        requiredPermissions: ['server:manage'],
+        managePermissions: ['server:manage'],
+        requiredCapabilities: [],
+        forms: [],
+        columns: [],
+      },
       openworldDashboardSection,
     ],
     ports: [
@@ -218,13 +231,19 @@ export const openworldUiModule = defineTrustedGameUiModule({
       'games.openworld.gamePort': 'Game',
       'games.openworld.versions': 'Versions',
       'games.openworld.catalogTitle': 'Dedicated server · Linux x64',
+      'games.openworld.defaultNotice': 'Default update notice (seconds)',
+      'games.openworld.gatewayCheck.version_mismatch':
+        'Gateway test failed · Unexpected version in status reply',
+      'games.openworld.gatewayCheck.protocol_mismatch':
+        'Gateway test failed · Unsupported status reply',
       'games.openworld.officialManifest': 'Official manifest',
       'games.openworld.name': 'Openworld',
       'games.openworld.runtime': 'Dedicated server',
       'games.openworld.version': 'Game version',
-      'games.openworld.requiresDirect': 'Requires a direct connection on this node.',
+      'games.openworld.nodeUnavailable': 'Unavailable on this node.',
       'games.openworld.incompatibleRuntime':
         'Requires glibc 2.38. The server uses Debian Bookworm.',
+      ...openworldUpdateCatalogs.en,
       ...openworldDashboardCatalogs.en,
       ...openworldTelemetryCatalogs.en,
       ...openworldPlayerCatalogs.en,
@@ -262,12 +281,18 @@ export const openworldUiModule = defineTrustedGameUiModule({
       'games.openworld.gamePort': 'Gioco',
       'games.openworld.versions': 'Versioni',
       'games.openworld.catalogTitle': 'Server dedicato · Linux x64',
+      'games.openworld.defaultNotice': 'Preavviso predefinito per gli aggiornamenti (secondi)',
+      'games.openworld.gatewayCheck.version_mismatch':
+        'Test Gateway fallito · Versione inattesa nella risposta di stato',
+      'games.openworld.gatewayCheck.protocol_mismatch':
+        'Test Gateway fallito · Risposta di stato non supportata',
       'games.openworld.officialManifest': 'Manifest ufficiale',
       'games.openworld.name': 'Openworld',
       'games.openworld.runtime': 'Server dedicato',
       'games.openworld.version': 'Versione del gioco',
-      'games.openworld.requiresDirect': 'Richiede una connessione diretta su questo nodo.',
+      'games.openworld.nodeUnavailable': 'Non disponibile su questo nodo.',
       'games.openworld.incompatibleRuntime': 'Richiede glibc 2.38. Il server usa Debian Bookworm.',
+      ...openworldUpdateCatalogs.it,
       ...openworldDashboardCatalogs.it,
       ...openworldTelemetryCatalogs.it,
       ...openworldPlayerCatalogs.it,

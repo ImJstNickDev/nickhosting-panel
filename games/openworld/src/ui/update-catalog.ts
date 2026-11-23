@@ -1,0 +1,81 @@
+const messages = {
+  title: ['Version', 'Versione'],
+  installed: ['Installed version', 'Versione installata'],
+  available: ['New version available', 'Nuova versione disponibile'],
+  latest: ['Latest version', 'Ultima versione'],
+  current: ['Up to date', 'Versione aggiornata'],
+  target: ['Update to', 'Aggiorna alla versione'],
+  review: ['Review update', 'Prepara aggiornamento'],
+  workflow: ['Openworld update', 'Aggiornamento Openworld'],
+  from: ['From', 'Da'],
+  to: ['To', 'A'],
+  delay: ['Give players advance notice', 'Dai un preavviso ai giocatori'],
+  duration: ['Notice in seconds', 'Preavviso in secondi'],
+  timedHint: [
+    'With players online, the countdown starts when the update is ready.',
+    'Con giocatori online, il conto alla rovescia inizia quando l’aggiornamento è pronto.',
+  ],
+  immediateHint: [
+    'The server will stop as soon as the update is ready.',
+    'Il server si fermerà appena l’aggiornamento sarà pronto.',
+  ],
+  empty: ['Wait until the server is empty', 'Attendi che il server sia vuoto'],
+  emptyHint: [
+    'Prepare the update now and install it when the last player leaves.',
+    'Prepara subito l’aggiornamento e installalo quando esce l’ultimo giocatore.',
+  ],
+  backup: ['Back up before installing', 'Crea un backup prima di installare'],
+  running: [
+    'The server will restart after installation.',
+    'Il server si riavvierà dopo l’installazione.',
+  ],
+  offline: [
+    'The server is offline and will stay offline after installation.',
+    'Il server è spento e resterà spento dopo l’installazione.',
+  ],
+  submit: ['Update server', 'Aggiorna server'],
+  openConsole: ['Follow in Console', 'Segui in Console'],
+  details: ['Version settings', 'Impostazioni versione'],
+  cancel: ['Cancel update', 'Annulla aggiornamento'],
+  last: ['Last update', 'Ultimo aggiornamento'],
+  notice_failed: [
+    'The player announcement could not be delivered. The update will continue.',
+    'Invio dell’avviso ai giocatori non riuscito. L’aggiornamento prosegue.',
+  ],
+  reminder_failed: [
+    'The reminder could not be delivered. The update will continue.',
+    'Invio del promemoria non riuscito. L’aggiornamento prosegue.',
+  ],
+  remaining: ['Time before shutdown', 'Tempo prima dell’arresto'],
+  stepPrepare: ['Prepare files', 'Prepara i file'],
+  stepWait: ['Wait', 'Attesa'],
+  stepStop: ['Stop server', 'Arresta il server'],
+  stepBackup: ['Create backup', 'Crea il backup'],
+  stepInstall: ['Install release', 'Installa la versione'],
+  stepVerify: ['Verify installation', 'Verifica l’installazione'],
+  stepStart: ['Start server', 'Avvia il server'],
+  preparing: ['Preparing files', 'Preparazione dei file'],
+  'waiting-empty': ['Waiting for players to leave', 'In attesa che escano i giocatori'],
+  notice: ['Waiting for shutdown', 'In attesa dell’arresto'],
+  stopping: ['Stopping server', 'Arresto del server'],
+  installing: ['Installing the update', 'Installazione in corso'],
+  verifying: ['Verifying installation', 'Verifica dell’installazione'],
+  starting: ['Starting server', 'Avvio del server'],
+  completed: ['Update complete', 'Aggiornamento completato'],
+  failed: ['Update failed', 'Aggiornamento non riuscito'],
+  cancelled: ['Update cancelled', 'Aggiornamento annullato'],
+  backupPhase: ['Creating backup', 'Creazione del backup'],
+  retryRequest: ['Check request', 'Verifica richiesta'],
+  uncertain: [
+    'The request may have been accepted. Check it before submitting another update.',
+    'La richiesta potrebbe essere già stata accettata. Verificala prima di inviare un altro aggiornamento.',
+  ],
+};
+const catalog = (locale: 0 | 1) =>
+  Object.fromEntries(
+    Object.entries(messages).map(([name, pair]) => [
+      `games.openworld.update.${name}`,
+      pair[locale],
+    ]),
+  );
+export const openworldUpdateCatalogs = { en: catalog(0), it: catalog(1) };

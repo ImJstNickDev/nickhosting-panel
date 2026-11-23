@@ -164,7 +164,9 @@ export function ConsoleSummary({
   resources,
   availability,
   observedAt,
+  runtimeAction,
 }: {
+  runtimeAction?: ReactNode;
   observedAt?: number;
   serverId: string;
   resources?: DisplayResources;
@@ -226,6 +228,7 @@ export function ConsoleSummary({
                 .filter(Boolean)
                 .join(' ')}
             </span>
+            {runtimeAction}
           </span>
         </SummaryCard>
       )}

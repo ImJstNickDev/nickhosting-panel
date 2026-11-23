@@ -225,6 +225,9 @@ const OpenworldPerformanceSection = sectionView(async () => ({
 const OpenworldOverviewSection = sectionView(async () => ({
   default: (await import('../integrations/openworld/overview.js')).OpenworldOverview,
 }));
+const OpenworldVersionSection = sectionView(async () => ({
+  default: (await import('../integrations/openworld/version-settings.js')).OpenworldVersionSettings,
+}));
 const OpenworldDashboardSection = sectionView(async () => ({
   default: (await import('../integrations/openworld/dashboard.js')).OpenworldDashboard,
 }));
@@ -242,6 +245,7 @@ const sectionViews = new Map<string, ComponentType<GameSectionViewProps> & { pre
   ['openworld-players', OpenworldPlayersSection],
   ['openworld-overview', OpenworldOverviewSection],
   ['openworld-performance', OpenworldPerformanceSection],
+  ['openworld-version', OpenworldVersionSection],
   ['openworld-dashboard', OpenworldDashboardSection],
   ['satisfactory-overview', SatisfactoryOverviewSection],
   ['satisfactory-worlds', SatisfactoryWorldsSection],

@@ -34,3 +34,23 @@
 .openworld-versions td {
   text-align: end;
 }
+
+.openworld-update-notice {
+  display: grid;
+  gap: 0.35rem;
+  margin-block-end: 1rem;
+}
+.openworld-update-notice > div {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+.openworld-update-notice input {
+  width: 7rem;
+}
+.openworld-gateway-failure {
+  display: block;
+  color: var(--danger, #a13a36);
+  font-weight: 400;
+}

@@ -77,7 +77,7 @@ describe('Openworld UDP server information', () => {
     bytes.writeUInt16LE(13, 26);
     expect(readOpenworldStatus(bytes, id)).toBeUndefined();
   });
-  it.each(['a1.0.11', 'a1.1.3', 'a1.2.8', 'pre-a1.2.0-1', 'a1.2.9'])(
+  it.each(['a1.0.11', 'a1.1.3', 'a1.2.8', 'pre-a1.2.0-1', 'a1.2.9', 'a1.2.10', 'a2.8.13'])(
     'samples the assigned %s backend and checks the pinned version',
     async (version) => {
       const backend = createSocket('udp4');
@@ -112,7 +112,11 @@ describe('Openworld UDP server information', () => {
             ...next,
             route: {
               ...next.route,
-              protocol: { handlerId: 'openworld', gameVersion: 'a1.2.10', role: 'game' },
+              protocol: {
+                handlerId: 'openworld',
+                gameVersion: 'different-pinned-version',
+                role: 'game',
+              },
             },
           }),
         ).toEqual({ ready: false });

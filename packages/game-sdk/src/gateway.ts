@@ -407,6 +407,9 @@ export interface GatewayProtocolAdapter {
   /** Opt in only when every upstream stream is registered through beginForwarding.
    * Unforwarded frontends remain lease-owned during temporary backend churn. */
   readonly managesTcpForwarding?: boolean;
+  /** During a declared stop, continue existing UDP gameplay and status queries
+   * while refusing the first gameplay datagram from another peer. */
+  readonly drainUdpOnStop?: boolean;
   /** Pure, bounded packet classification for online activity accounting. */
   isStatusDatagram?(input: Uint8Array, direction: 'client' | 'backend'): boolean;
   /** Trusted ordering of roles within one server. Lower numbers run first;

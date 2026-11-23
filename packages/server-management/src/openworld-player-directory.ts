@@ -23,8 +23,10 @@ type WithFiles = <T>(
   id: string,
   work: (files: FilemanReadService) => Promise<T>,
 ) => Promise<T>;
-const authorized = (db: DB, who: AuthContext, id: string) =>
-  readOpenworldScope(db, id, { who, resource: 'player' });
+const authorized = async (db: DB, who: AuthContext, id: string) => {
+  const scope = await readOpenworldScope(db, id, { who, resource: 'player' });
+  return { version: scope.version, binding: scope.historyBinding ?? scope.binding };
+};
 
 async function checkBinding(db: DB, who: AuthContext, id: string, binding: string) {
   if ((await authorized(db, who, id)).binding !== binding)

@@ -1,30 +1,12 @@
 import type { ConnectionMode } from '@nickhosting/game-sdk';
 
-// Each listed Linux release was started with the dedicated egg and answered the
-// correlated server-information query with its own version. Keep future releases
-// on direct delivery until their UDP behavior has been verified.
-const gatewayVersions = new Set([
-  'a1.2.9',
-  'a1.2.8',
-  'a1.2.7',
-  'a1.2.6',
-  'a1.2.5',
-  'a1.2.4',
-  'a1.2.3',
-  'a1.2.2',
-  'a1.2.1',
-  'a1.2.0',
-  'pre-a1.2.0-1',
-  'a1.1.3',
-  'a1.1.2',
-  'a1.1.1',
-  'a1.1.0',
-  'a1.0.13',
-  'a1.0.12',
-  'a1.0.11',
-]);
+export const openworldVersionId = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$/;
 
-export const openworldSupportsGateway = (version: string) => gatewayVersions.has(version);
+// The catalog pins the actual published build. Compatibility diagnostics are
+// advisory; the data plane still requires a correlated reply for that build.
+export const openworldSupportsGateway = (version: string) =>
+  openworldVersionId.test(version) && openworldSupportsRuntime(version);
+
 // The publisher names alpha releases aX.Y.Z and their preview builds pre-aX.Y.Z-N.
 export function openworldSupportsSrv(version: string | null | undefined) {
   const parts = /^(pre-)?a(\d+)\.(\d+)\.(\d+)(?:-(\d+))?$/.exec(version ?? '');

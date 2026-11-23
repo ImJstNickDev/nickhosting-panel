@@ -34,7 +34,7 @@ afterAll(async () => {
 
 it.each([
   ['a1.2.8', 'gateway', 'gateway-only'],
-  ['a1.2.10', 'direct', 'mixed'],
+  ['a1.2.10', 'gateway', 'mixed'],
   ['a1.2.9', 'direct', 'direct-only'],
   ['a1.2.9', 'gateway', 'local-conflict'],
   ['a1.2.9', 'gateway', 'sibling-conflict'],
@@ -217,8 +217,8 @@ it.each([
           game: { id: 'openworld', configuration: { version: 'a1.2.10' } },
         }),
       });
-      expect(rejected.status).toBe(409);
-      expect(await rejected.json()).toEqual({ code: 'direct_connection_unavailable' });
+      expect(rejected.status).toBe(404);
+      expect(await rejected.json()).toEqual({ code: 'not_found' });
       expect(f.adapter.listAllocations).toHaveBeenCalledTimes(requestsBeforeChoices);
     }
     if (poolMode === 'direct-only') {
@@ -266,7 +266,12 @@ it.each([
         .selectAll()
         .where('server_id', '=', row.id)
         .executeTakeFirstOrThrow(),
-    ).toEqual({ server_id: row.id, dashboard_credential_prepared: true, ...current });
+    ).toEqual({
+      server_id: row.id,
+      dashboard_credential_prepared: true,
+      history_sha256: null,
+      ...current,
+    });
     const gateway = await f.db
       .selectFrom('gateway_routes')
       .selectAll()

@@ -67,6 +67,7 @@ export interface GatewayDataPlaneOptions {
 }
 
 interface UdpSession {
+  forwardedClientGameplay?: boolean;
   lastGameplayAt?: number;
   socket: DatagramSocket;
   lastActivity: number;
@@ -1003,6 +1004,16 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
     }
     const key = `${remote.family}:${remote.address}:${remote.port}`;
     let session = listener.sessions.get(key);
+    const status = isStatusDatagram(listener, message, 'client');
+    if (
+      !status &&
+      !session?.forwardedClientGameplay &&
+      listener.route.presentation?.stopping === true &&
+      protocol(listener.route)?.drainUdpOnStop
+    ) {
+      counters.udpDropped++;
+      return;
+    }
     if (!session) {
       if (sessionsCount() + pendingUdpIntents >= policy.maxUdpSessions) {
         counters.udpDropped++;
@@ -1034,13 +1045,16 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
       });
     }
     session.lastActivity = now();
-    if (!isStatusDatagram(listener, message, 'client')) session.lastGameplayAt = now();
     if (
       session.queuedBytes + session.socket.getSendQueueSize() + message.length >
       policy.maxUdpQueuedBytes
     ) {
       counters.udpDropped++;
       return;
+    }
+    if (!status) {
+      session.lastGameplayAt = now();
+      session.forwardedClientGameplay = true;
     }
     counters.udpBytesToBackend += message.length;
     recordClientActivity(listener);

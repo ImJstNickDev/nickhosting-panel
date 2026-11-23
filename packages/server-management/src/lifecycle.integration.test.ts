@@ -1,5 +1,12 @@
-import { randomUUID } from 'node:crypto';
-import { authSessionId, createLogger, DomainError, type LogRecord } from '@nickhosting/core';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
+import { buffer } from 'node:stream/consumers';
+import {
+  authSessionId,
+  createLogger,
+  DomainError,
+  type LogRecord,
+  SecretCodec,
+} from '@nickhosting/core';
 import { createDatabase, type Database } from '@nickhosting/database';
 import { createTestDatabase } from '@nickhosting/database/testing';
 import { commandDigest, enqueueCommand } from '@nickhosting/jobs';
@@ -17,6 +24,7 @@ import {
 import type { Kysely } from 'kysely';
 import { sql } from 'kysely';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+import { ZipFile } from 'yazl';
 import { uploadNotPublished } from '../../pterodactyl-adapter/src/upload-dispatch.js';
 import type { BackendAllocationPool } from './allocation-pool.js';
 import { removeFilemanDirectory } from './fileman-directory.js';
@@ -28,6 +36,12 @@ import {
   resolveUncertainOperation,
 } from './lifecycle.js';
 import { applyMinecraftWorldRemoval } from './minecraft-content.js';
+import {
+  downloadOpenworldRelease,
+  issueOpenworldArtifactUrl,
+  readOpenworldInstallTicket,
+} from './openworld-catalog.js';
+import { createOpenworldUpdateHooks } from './openworld-update-engine.js';
 import {
   recordNativeInstallationCompletion,
   wakeInstallationOperation,
@@ -6207,4 +6221,349 @@ describe('integration-declared installer retries', () => {
     expect(await f.run()).toBe('failed');
     expect(f.adapter.reinstallWithConfirmation).not.toHaveBeenCalled();
   });
+});
+
+describe('managed Openworld update lifecycle', () => {
+  function stream(bytes: Uint8Array) {
+    return new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(bytes);
+        controller.close();
+      },
+    });
+  }
+  async function setup({
+    running = false,
+    waitForEmpty = false,
+    delaySeconds = 0,
+    backupBefore = false,
+  } = {}) {
+    const codec = new SecretCodec({ activeKeyId: 'test', keys: { test: randomBytes(32) } });
+    const binary = Buffer.from('verified test binary');
+    const zip = new ZipFile();
+    zip.addEmptyDirectory('assets');
+    for (const key of ['openworld-server', 'README.txt', 'THIRD-PARTY-NOTICES.txt', 'assets/test'])
+      zip.addBuffer(binary, key);
+    const output = buffer(zip.outputStream);
+    zip.end();
+    const bytes = await output;
+    const target = {
+      version: 'a1.2.10',
+      size: bytes.length,
+      sha256: createHash('sha256').update(bytes).digest('hex'),
+    };
+    const source = { ...target, version: 'a1.2.9', sha256: '1'.repeat(64) };
+    const plan = { source, target, backupBefore, waitForEmpty, delaySeconds };
+    const f = await fixture('reinstall', {
+      managedVersionUpdate: true,
+      openworldUpdate: plan,
+      backupBefore,
+    });
+    const { db, serverId, jobId } = f;
+    await db
+      .insertInto('openworld_server_profiles')
+      .values({ server_id: serverId, ...source })
+      .execute();
+    await db
+      .insertInto('openworld_server_updates')
+      .values({ job_id: jobId, server_id: serverId, phase: 'preparing' })
+      .execute();
+    await db
+      .updateTable('managed_servers')
+      .set({
+        installation_state: 'installed',
+        intent: 'auto_wake_enabled',
+        runtime_state: running ? 'running' : 'offline',
+      })
+      .where('id', '=', serverId)
+      .execute();
+    if (running) await f.prepareReservation();
+    f.setState(running ? 'running' : 'offline');
+    let physical = running;
+    const startEpoch = () => new Date(f.now().getTime() - 8).toISOString();
+    f.options.confirmAlreadyStopped = vi.fn(async () => !physical);
+    f.options.observeProcessStart = vi.fn(async () => (physical ? startEpoch() : null));
+    const originalStop = f.adapter.stopWithConfirmation.getMockImplementation();
+    f.adapter.stopWithConfirmation.mockImplementation(async (...args) => {
+      if (!originalStop) throw Error();
+      const result = await originalStop(...args);
+      physical = false;
+      return result;
+    });
+    f.adapter.power.mockImplementation(async () => {
+      physical = true;
+      f.setState('running');
+    });
+    const download = vi.fn(async () => bytes);
+    const occupancy = vi.fn(async (): Promise<number | null> => 2);
+    const kick = vi.fn(async () => {});
+    const hooks = createOpenworldUpdateHooks(codec, {}, { download, occupancy, kick });
+    f.options.gameVersionUpdate = async () => hooks;
+    const command = vi.fn(async (_id: string, _text: string) => {});
+    const read = vi.fn(async () => ({ body: stream(binary) }));
+    Object.assign(f.adapter, { sendCommand: command, downloadFile: read });
+    const progress = () =>
+      db
+        .selectFrom('openworld_server_updates')
+        .selectAll()
+        .where('job_id', '=', jobId)
+        .executeTakeFirstOrThrow();
+    const run = async () => {
+      f.tick();
+      return f.run();
+    };
+    return {
+      ...f,
+      run,
+      source,
+      target,
+      progress,
+      download,
+      occupancy,
+      kick,
+      command,
+      read,
+      codec,
+      bytes,
+    };
+  }
+
+  it('prepares and serves the job-pinned archive before notice, tolerates broadcast failure, then verifies and restarts once', async () => {
+    const f = await setup({ running: true, delaySeconds: 100, backupBefore: true });
+    f.command.mockRejectedValue(new Error('chat unavailable'));
+    f.download.mockImplementation(async () => {
+      f.tick(130000);
+      return f.bytes;
+    });
+    await f.run();
+    expect((await f.progress()).deadline?.getTime()).toBe(f.now().getTime() + 100000);
+    expect(await f.progress()).toMatchObject({
+      phase: 'notice',
+      restart: true,
+      warning: 'notice_failed',
+    });
+    expect(f.adapter.stopWithConfirmation).not.toHaveBeenCalled();
+    expect(f.command.mock.calls[0]?.[1]).toContain('a1.2.10');
+    const url = new URL(
+      issueOpenworldArtifactUrl(f.codec, 'https://panel.example', f.target, f.jobId),
+    );
+    const claim = readOpenworldInstallTicket(f.codec, url.searchParams.get('ticket') ?? undefined);
+    expect(await downloadOpenworldRelease(f.db, f.codec, {}, claim)).toEqual(f.bytes);
+    const deadline = (await f.progress()).deadline;
+    await f.run();
+    expect((await f.progress()).deadline).toEqual(deadline);
+    expect(f.command).toHaveBeenCalledTimes(1);
+    expect(f.download).toHaveBeenCalledTimes(1);
+    for (let i = 0; i < 14 && (await f.progress()).phase !== 'completed'; i++) await f.run();
+    expect(await f.progress()).toMatchObject({ phase: 'completed' });
+    expect(f.adapter.createBackup).toHaveBeenCalledTimes(1);
+    expect(f.adapter.reinstallWithConfirmation).toHaveBeenCalledTimes(1);
+    expect(f.adapter.stopWithConfirmation).toHaveBeenCalledTimes(1);
+    expect(f.adapter.power).toHaveBeenCalledTimes(1);
+    expect(f.kick).toHaveBeenCalledTimes(1);
+    expect((await f.server()).runtime_state).toBe('running');
+    expect((await f.reservation())?.state).toBe('running');
+    expect(
+      await f.db
+        .selectFrom('openworld_server_profiles')
+        .selectAll()
+        .where('server_id', '=', f.serverId)
+        .executeTakeFirst(),
+    ).toMatchObject({ ...f.target, history_sha256: f.source.sha256 });
+    await expect(downloadOpenworldRelease(f.db, f.codec, {}, claim)).rejects.toMatchObject({
+      code: 'not_found',
+    });
+  });
+
+  it('waits for proven empty, cancels before shutdown, and preserves the running reservation', async () => {
+    const f = await setup({ running: true, waitForEmpty: true });
+    f.occupancy.mockResolvedValueOnce(null).mockResolvedValue(1);
+    await f.run();
+    await f.run();
+    expect((await f.progress()).phase).toBe('waiting-empty');
+    await f.db
+      .updateTable('openworld_server_updates')
+      .set({ phase: 'cancelled' })
+      .where('job_id', '=', f.jobId)
+      .execute();
+    expect(await f.run()).toBe('failed');
+    expect((await f.progress()).phase).toBe('cancelled');
+    expect((await f.server()).active_operation_id).toBeNull();
+    expect(await f.reservation()).toBeTruthy();
+    expect(f.adapter.stopWithConfirmation).not.toHaveBeenCalled();
+    expect(f.adapter.reinstallWithConfirmation).not.toHaveBeenCalled();
+  });
+
+  it('reopens the empty wait if a player arrives before dispatch, and updates once all have gone', async () => {
+    const f = await setup({ running: true, waitForEmpty: true });
+    f.occupancy.mockResolvedValueOnce(0).mockResolvedValueOnce(1).mockResolvedValue(0);
+    await f.run();
+    expect((await f.progress()).phase).toBe('waiting-empty');
+    expect((await f.operation()).phase).toBe('planned');
+    expect(f.adapter.reinstallWithConfirmation).not.toHaveBeenCalled();
+    for (let i = 0; i < 10 && (await f.progress()).phase !== 'completed'; i++) await f.run();
+    expect((await f.progress()).phase).toBe('completed');
+    expect(f.kick).not.toHaveBeenCalled();
+    expect(f.adapter.reinstallWithConfirmation).toHaveBeenCalledTimes(1);
+    expect(f.adapter.power).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([true, false])(
+    'resumes the prior running binary after a definite backup rejection (recovered marker = %s)',
+    async (replay) => {
+      const f = await setup({ running: true, backupBefore: true });
+      f.adapter.createBackup.mockRejectedValue(
+        new PterodactylError('invalid_request', 'client', 'rejected', 400),
+      );
+      if (replay) {
+        await f.db
+          .updateTable('openworld_server_updates')
+          .set({ phase: 'backup' })
+          .where('job_id', '=', f.jobId)
+          .execute();
+        await f.db
+          .deleteFrom('resource_reservations')
+          .where('server_id', '=', f.serverId)
+          .execute();
+        const op = await f.operation();
+        await f.db
+          .updateTable('server_operations')
+          .set({
+            phase: 'backup',
+            effect_state: 'none',
+            plan: JSON.stringify({
+              ...op.plan,
+              backupOfflineConfirmed: true,
+              backupWasRunning: true,
+              backupPriorIntent: 'auto_wake_enabled',
+              backupGatewayGeneration: null,
+              rejected: true,
+            }),
+          })
+          .where('job_id', '=', f.jobId)
+          .execute();
+        f.setState('offline');
+      }
+      for (let i = 0; i < 8 && (await f.progress()).phase !== 'failed'; i++) await f.run();
+      expect((await f.progress()).phase).toBe('failed');
+      expect(f.adapter.power).toHaveBeenCalledTimes(1);
+      expect(f.adapter.reinstallWithConfirmation).not.toHaveBeenCalled();
+      expect((await f.server()).runtime_state).toBe('running');
+      expect((await f.reservation())?.state).toBe('running');
+      expect((await f.operation()).plan.backupResumeOutcome).toBe('succeeded');
+    },
+  );
+
+  it('restores the original version after confirmed installer capacity refusal', async () => {
+    const f = await setup({ running: true });
+    f.options.reserveInstallation = vi.fn(async () => {
+      throw new DomainError('resources_unavailable');
+    });
+    for (let i = 0; i < 6 && (await f.progress()).phase !== 'failed'; i++) await f.run();
+    expect((await f.progress()).phase).toBe('failed');
+    expect((await f.server()).runtime_state).toBe('running');
+    expect((await f.operation()).plan).toMatchObject({
+      backupResumeOutcome: 'succeeded',
+      gameUpdatePreinstallFailure: 'resources_unavailable',
+    });
+    expect(f.adapter.reinstallWithConfirmation).not.toHaveBeenCalled();
+    expect(f.adapter.power).toHaveBeenCalledTimes(1);
+  });
+
+  it('schedules a 24h notice straight to its reminder and makes no provider reads before then', async () => {
+    const f = await setup({ running: true, delaySeconds: 86400 });
+    await f.run();
+    const receipt = await f.progress();
+    const job = await f.db
+      .selectFrom('operation_jobs')
+      .select('next_attempt_at')
+      .where('id', '=', f.jobId)
+      .executeTakeFirstOrThrow();
+    expect(job.next_attempt_at.getTime()).toBe((receipt.deadline?.getTime() ?? 0) - 30000);
+    f.adapter.getApplicationServer.mockClear();
+    for (let i = 0; i < 4; i++) {
+      // Even a spurious wake from an outbox event cannot trigger remote reads.
+      await f.db
+        .updateTable('operation_jobs')
+        .set({ next_attempt_at: f.now() })
+        .where('id', '=', f.jobId)
+        .execute();
+      await f.run();
+    }
+    expect(f.adapter.getApplicationServer).not.toHaveBeenCalled();
+    expect(f.command).toHaveBeenCalledTimes(1);
+  });
+
+  it('polls current occupancy without polling provider power on every occupied or unknown sample', async () => {
+    const f = await setup({ running: true, waitForEmpty: true });
+    await f.run();
+    const stopped = vi.mocked(f.options.confirmAlreadyStopped ?? vi.fn());
+    stopped.mockClear();
+    f.adapter.getApplicationServer.mockClear();
+    await f.run();
+    await f.run();
+    await f.run();
+    expect(stopped).not.toHaveBeenCalled();
+    expect(f.adapter.getApplicationServer).not.toHaveBeenCalled();
+    f.occupancy.mockResolvedValue(null);
+    await f.run();
+    await f.run();
+    await f.run();
+    expect(stopped).toHaveBeenCalledTimes(1);
+    expect((await f.progress()).phase).toBe('waiting-empty');
+  });
+
+  it('fails a proven oversized installed binary without repeating verification or promotion', async () => {
+    const f = await setup();
+    f.read.mockRejectedValue(new PterodactylError('invalid_response', 'client', 'rejected'));
+    f.adapter.listFiles.mockResolvedValue([
+      {
+        name: 'openworld-server',
+        is_file: true,
+        is_symlink: false,
+        size: 100000,
+        mode: '-rwx',
+        mimetype: 'application/octet-stream',
+        created_at: f.now().toISOString(),
+        modified_at: f.now().toISOString(),
+      },
+    ]);
+    for (let i = 0; i < 6 && (await f.progress()).phase !== 'failed'; i++) await f.run();
+    expect((await f.progress()).phase).toBe('failed');
+    expect(f.read).toHaveBeenCalledTimes(1);
+    expect(
+      (
+        await f.db
+          .selectFrom('openworld_server_profiles')
+          .select('version')
+          .where('server_id', '=', f.serverId)
+          .executeTakeFirstOrThrow()
+      ).version,
+    ).toBe(f.source.version);
+  });
+
+  it.each([true, false])(
+    'keeps the server stopped, and records only a verified installed binary (match = %s)',
+    async (matches) => {
+      const f = await setup({ delaySeconds: 60 });
+      if (!matches)
+        f.read.mockImplementation(async () => ({ body: stream(Buffer.from('previous version')) }));
+      for (let i = 0; i < 6 && !['completed', 'failed'].includes((await f.progress()).phase); i++)
+        await f.run();
+      expect((await f.progress()).phase).toBe(matches ? 'completed' : 'failed');
+      expect(
+        (
+          await f.db
+            .selectFrom('openworld_server_profiles')
+            .select('version')
+            .where('server_id', '=', f.serverId)
+            .executeTakeFirstOrThrow()
+        ).version,
+      ).toBe(matches ? f.target.version : f.source.version);
+      expect(f.occupancy).not.toHaveBeenCalled();
+      expect(f.adapter.reinstallWithConfirmation).toHaveBeenCalledTimes(1);
+      expect(f.adapter.stopWithConfirmation).not.toHaveBeenCalled();
+      expect(f.adapter.power).not.toHaveBeenCalled();
+    },
+  );
 });
