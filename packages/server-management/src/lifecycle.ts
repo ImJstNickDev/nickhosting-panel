@@ -324,6 +324,14 @@ const installed = (remote: ApplicationServer) =>
   !remote.status && (remote.container.installed === true || remote.container.installed === 1);
 const installationPending = (remote: ApplicationServer) =>
   remote.status === 'installing' || !remote.container.installed;
+const updateRequiresStoppedProcess = (operation: Pick<Operation, 'action' | 'phase' | 'plan'>) =>
+  operation.action === 'reinstall' &&
+  operation.plan.managedVersionUpdate === true &&
+  operation.plan.backupOfflineConfirmed === true &&
+  operation.plan.gameVersionVerified !== true &&
+  operation.plan.gameUpdatePreinstallFailure === undefined &&
+  operation.plan.backupFailed !== true &&
+  operation.phase !== 'backup_resume';
 /** Only pre-effect mod mutations can own a reservation recreated by reconciliation. */
 const pendingSatisfactoryMods = (
   operation: Pick<Operation, 'action' | 'phase' | 'effect_state' | 'plan'>,
@@ -1152,7 +1160,7 @@ export async function processServerOperation(
         }),
       );
     };
-    const recoverModReservation = async (): Promise<boolean> => {
+    const recoverOfflineReservation = async (): Promise<boolean> => {
       const reserved = await db
         .selectFrom('resource_reservations')
         .select('operation_id')
@@ -1201,21 +1209,29 @@ export async function processServerOperation(
           .forUpdate()
           .executeTakeFirst();
         if (!reservation) return true;
+        const versionUpdate = updateRequiresStoppedProcess(current);
+        const installer = await tx
+          .selectFrom('installation_reservations')
+          .select('operation_id')
+          .where('server_id', '=', server.id)
+          .executeTakeFirst();
         if (
           fresh.deleted_at ||
           fresh.active_operation_id !== jobId ||
           fresh.node_id !== server.node_id ||
           fresh.owner_id !== server.owner_id ||
-          fresh.installation_state !== 'installed' ||
+          (fresh.installation_state !== 'installed' &&
+            !(
+              versionUpdate &&
+              (fresh.installation_state === 'installing' ||
+                (fresh.installation_state === 'failed' &&
+                  current.plan.installationEffectPrepared === true))
+            )) ||
           current.lease_token !== token ||
-          !pendingSatisfactoryMods(current) ||
+          (!versionUpdate && !pendingSatisfactoryMods(current)) ||
           reservation.operation_id !== jobId ||
           reservation.physical_host_id !== node.physical_host_id ||
-          (await tx
-            .selectFrom('installation_reservations')
-            .select('server_id')
-            .where('server_id', '=', server.id)
-            .executeTakeFirst())
+          (installer && !(versionUpdate && installer.operation_id === jobId))
         )
           return false;
         await tx
@@ -1243,7 +1259,14 @@ export async function processServerOperation(
           .forShare()
           .execute();
         const remote = await ownedRemote(tx, fresh, options);
-        if (!installed(remote)) return false;
+        // The installer has its own capacity claim. Releasing the stopped game's
+        // claim cannot release installer capacity or confirm installer completion.
+        const knownInstallerState =
+          versionUpdate &&
+          current.plan.installationEffectPrepared === true &&
+          (['install_failed', 'reinstall_failed'].includes(remote.status ?? '') ||
+            (installer?.operation_id === jobId && installationPending(remote)));
+        if (!installed(remote) && !knownInstallerState) return false;
         const observerPreflight = options.verifyObservationHost?.(server.id, tx);
         await observerPreflight;
         if (
@@ -1258,7 +1281,21 @@ export async function processServerOperation(
           .where('server_id', '=', server.id)
           .where('operation_id', '=', jobId)
           .execute();
-        await event('servers.operation.stop_confirmed', { source: 'content_quiescence' }, tx);
+        if (versionUpdate)
+          await tx
+            .updateTable('managed_servers')
+            .set({
+              runtime_state: 'offline',
+              readiness: 'unknown',
+              last_observed_at: nowOf(options),
+            })
+            .where('id', '=', server.id)
+            .execute();
+        await event(
+          'servers.operation.stop_confirmed',
+          { source: versionUpdate ? 'version_update_quiescence' : 'content_quiescence' },
+          tx,
+        );
         return true;
       });
     };
@@ -3392,6 +3429,8 @@ export async function processServerOperation(
       } else if (managedUpdate) {
         // Reconfirm after the persisted offline proof; never install over an
         // independently (re)started process. A running installer has its own receipt.
+        if (!(await recoverOfflineReservation()))
+          return wait('game_update_stop', 'operation_uncertain');
         await requireQuiescentReservation();
         if (
           operation.plan.installationEffectPrepared !== true &&
@@ -3399,7 +3438,7 @@ export async function processServerOperation(
         )
           return wait('game_update_stop');
       } else if (!onlineWorldContent && !metadataContent) {
-        if (pendingSatisfactoryMods(operation) && !(await recoverModReservation()))
+        if (pendingSatisfactoryMods(operation) && !(await recoverOfflineReservation()))
           return wait('offline_confirmation', 'operation_uncertain');
         await requireQuiescentReservation();
         if (!(await offline())) return wait('offline_confirmation');
@@ -4201,7 +4240,7 @@ export async function reconcileManagedServer(
       }
     }
   }
-  const activeModOperation =
+  const activeOfflineOperation =
     server.active_operation_id &&
     current.current_state !== 'offline' &&
     server.runtime_state === 'offline'
@@ -4212,9 +4251,19 @@ export async function reconcileManagedServer(
           .where('server_id', '=', server.id)
           .executeTakeFirst()
       : undefined;
+  // A resources sample may predate the stop inside an ongoing version update.
+  if (
+    activeOfflineOperation &&
+    updateRequiresStoppedProcess(activeOfflineOperation) &&
+    options.confirmAlreadyStopped
+  ) {
+    suppressCachedRunning = await options.confirmAlreadyStopped(server.id, db, {
+      providerServer: Promise.resolve(remote),
+    });
+  }
   const activeStoppedMods =
-    activeModOperation &&
-    pendingSatisfactoryMods(activeModOperation) &&
+    activeOfflineOperation &&
+    pendingSatisfactoryMods(activeOfflineOperation) &&
     server.installation_state === 'installed' &&
     installed(remote) &&
     !(await db

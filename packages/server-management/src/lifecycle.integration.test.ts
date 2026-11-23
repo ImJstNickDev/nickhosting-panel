@@ -6328,6 +6328,27 @@ describe('managed Openworld update lifecycle', () => {
     };
   }
 
+  it('suppresses a cached running sample and recovers an existing job reservation after reinstall', async () => {
+    const f = await setup({ running: true });
+    for (let i = 0; i < 10 && !(await f.operation()).plan.installConfirmed; i++) await f.run();
+    expect((await f.operation()).plan.installConfirmed).toBe(true);
+    f.setState('running');
+    await reconcileManagedServer(f.db, f.serverId, f.options);
+    expect(await f.reservation()).toBeUndefined();
+    await f.prepareReservation();
+    const proof = f.options.confirmAlreadyStopped;
+    f.options.confirmAlreadyStopped = async () => false;
+    await f.run();
+    expect(await f.reservation()).toBeTruthy();
+    expect(f.adapter.power).not.toHaveBeenCalled();
+    f.setState('offline');
+    f.options.confirmAlreadyStopped = proof;
+    for (let i = 0; i < 12 && (await f.progress()).phase !== 'completed'; i++) await f.run();
+    expect((await f.progress()).phase).toBe('completed');
+    expect(f.adapter.power).toHaveBeenCalledTimes(1);
+    expect(f.adapter.reinstallWithConfirmation).toHaveBeenCalledTimes(1);
+  });
+
   it('prepares and serves the job-pinned archive before notice, tolerates broadcast failure, then verifies and restarts once', async () => {
     const f = await setup({ running: true, delaySeconds: 100, backupBefore: true });
     f.command.mockRejectedValue(new Error('chat unavailable'));
