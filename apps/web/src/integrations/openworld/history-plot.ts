@@ -1,6 +1,4 @@
-import type { OpenworldTelemetryData } from '../../../../../games/openworld/src/telemetry.js';
-
-export type History = OpenworldTelemetryData['history'];
+export type History = { t: number[]; [series: string]: (number | null)[] | undefined };
 export type Sample = { stamp: number; row: number };
 
 export function orderedSamples(history: History): Sample[] {
@@ -56,7 +54,7 @@ export function plotPercent(value: number, low: number, high: number) {
 
 export function seriesPath(
   samples: Sample[],
-  values: History['tps'],
+  values: History[string],
   timeAt: (stamp: number) => number,
   heightAt: (value: number) => number,
 ) {

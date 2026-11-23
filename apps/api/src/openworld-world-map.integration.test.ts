@@ -616,6 +616,15 @@ it('loads factories only with performance access and only while the bound server
     });
   }
   expect(f.reads.filter((r) => r === 'ovm')).toHaveLength(1);
+  f.state.asset = (url) =>
+    url.pathname === '/api/live/ovm' ? Response.json({ enabled: true, hz: 18 }) : undefined;
+  f.state.clock += 999;
+  expect((await (await factories()).json()).hz).toBe(19.9);
+  f.state.clock += 1;
+  const next = await Promise.all([factories(), f.request('', undefined, 'owner', 'factories')]);
+  for (const response of next) expect((await response.json()).hz).toBe(18);
+  expect(f.reads.filter((r) => r === 'ovm')).toHaveLength(2);
+  expect(f.target).toHaveBeenCalledTimes(1);
   await f.grant(read);
   expect((await factories()).status).toBe(403);
   expect(f.writes).toEqual([]);

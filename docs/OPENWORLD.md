@@ -267,10 +267,19 @@ to return to the player's position. A reconnected player's previous marker canno
 the new session. The existing moderation grant still covers teleport to the game's
 checkpoint destinations.
 
-**Factories** uses the performance permission. It shows the factory simulation's
-measured and target frequency, step time (including p95), power production and
-consumption, battery storage, and items and fluids in transit. The most expensive
-columns link to their location when the reader also has map access.
+**Factories** requires the performance permission. While visible on a running
+server, the workspace refreshes once per second from the native
+`GET /api/live/ovm` snapshot. The protected NickPanel route
+`GET /v1/servers/:id/openworld/factories` also supplies the optional Map layer.
+The snapshot includes device counts, networks by medium, blocked or overloaded
+systems, energy generation and battery storage, rotation, radio, pumps and
+items and fluids in transit. Item quantities describe the sampled contents of
+the networks.
+
+The simulation view uses Openworld’s own history (up to ten minutes), phase
+timings, scheduler measurements and memory estimates. Its most expensive
+columns link to their location when the reader also has map access and the
+game reports usable planetary coordinates.
 
 In **Map**, open **Layers → Creatures** to see the active population by species and the
 number of items on the ground in the selected world. Enable creature positions to

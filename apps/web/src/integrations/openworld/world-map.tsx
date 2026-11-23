@@ -7,6 +7,7 @@ import { useFormat, useT } from '../../app/i18n.js';
 import { Check, ErrorNotice, Loading, Select } from '../../components/ui.js';
 import { Pagination, SearchField } from '../../components/workspace-controls.js';
 import type { AtlasCameraSnapshot, AtlasMode } from './atlas-types.js';
+import { useFactoryConnection } from './factory-connection.js';
 import type { SeedLegend } from './map-atlas-data.js';
 import {
   CheckpointDialog,
@@ -282,16 +283,17 @@ function MapWorld({
   const [following, setFollowing] = useState<{ id: number; joinedAt: number; name: string } | null>(
     null,
   );
-  const factoryFeed = useFactoryData(server, withFactories);
+  const factoryFeed = useFactoryData(server, withFactories, 10_000);
+  const { cached: cachedFactories } = useFactoryConnection(factoryFeed);
   const factoryPins = useMemo(
     () =>
-      withFactories && !factoryFeed.error
+      withFactories && !factoryFeed.error && !cachedFactories
         ? (factoryFeed.data?.topColumns ?? []).flatMap((c) => {
             const p = factoryMapPoint(c);
             return p && p.world === world.key ? [{ ...p, nodes: c.nodes }] : [];
           })
         : [],
-    [withFactories, factoryFeed.data, factoryFeed.error, world.key],
+    [withFactories, factoryFeed.data, factoryFeed.error, cachedFactories, world.key],
   );
   const index = useMapData<Index>(server, `/index?${query}`),
     checkpoints = useMapData<{ checkpoints: MapCheckpoint[] }>(

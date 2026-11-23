@@ -61,7 +61,7 @@ function share(value: number | undefined, total: number | undefined) {
     : undefined;
 }
 
-function Composition({
+export function Composition({
   slices,
   total,
   summaryId,

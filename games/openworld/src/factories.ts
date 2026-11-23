@@ -18,19 +18,100 @@ const column = z.object({
   nodes: count,
   nets: count,
 });
+const countByType = z
+  .record(z.string().regex(/^[a-z][a-z0-9_-]{0,63}$/i), z.int().nonnegative())
+  .refine((counts) => Object.keys(counts).length <= 256)
+  .nullish();
+const itemType = z.object({ name: z.string().min(1).max(256), count: z.int().nonnegative() });
+const historySample = z.object({
+  t: z.number().nonnegative().max(8_640_000_000_000_000),
+  hz: metric,
+  stepMs: metric,
+  cpuMs: metric,
+  nodes: count,
+});
 const snapshot = z.object({
   enabled: z.boolean().nullish(),
   paused: z.boolean().nullish(),
   scope: z.enum(['loaded', 'world']).nullish().catch(null),
   hz: metric,
   targetHz: metric,
+  cappedHz: metric,
+  speed: metric,
+  cpuMs: metric,
+  lateMsP95: metric,
+  debtMs: metric,
+  droppedPerSecond: metric,
+  duty: metric,
+  priority: z.int().nullish(),
+  qos: z.string().max(64).nullish(),
   steps: count,
+  simSeconds: metric,
+  uptimeSeconds: metric,
+  loadedColumns: count,
   stepMs: z.object({ mean: metric, p95: metric, max: metric }).nullish(),
-  counts: z.object({ nodes: count, nets: count, pieces: count }).nullish(),
-  power: z
-    .object({ producedW: metric, usedW: metric, storedJ: metric, capacityJ: metric })
+  phasesMs: z
+    .object({
+      commands: metric,
+      topology: metric,
+      signals: metric,
+      rotation: metric,
+      electric: metric,
+      fluids: metric,
+      items: metric,
+      radio: metric,
+      events: metric,
+    })
     .nullish(),
-  transit: z.object({ items: count, fluidVoxels: count }).nullish(),
+  counts: z
+    .object({
+      nodes: count,
+      nets: count,
+      pieces: count,
+      frozen: count,
+      tooLong: count,
+      tripped: count,
+      byDevice: countByType,
+      byMedium: countByType,
+    })
+    .nullish(),
+  memory: z
+    .object({
+      totalBytes: count,
+      nodes: count,
+      links: count,
+      transit: count,
+      systems: count,
+      index: count,
+      other: count,
+      topology: count,
+    })
+    .nullish(),
+  power: z
+    .object({
+      producedW: metric,
+      usedW: metric,
+      storedJ: metric,
+      capacityJ: metric,
+      systems: count,
+    })
+    .nullish(),
+  transit: z
+    .object({
+      items: count,
+      fluidVoxels: count,
+      itemTypes: z.array(itemType).max(1024).nullish(),
+    })
+    .nullish(),
+  rotation: z.object({ systems: count, jammed: count, deliveredW: metric }).nullish(),
+  radio: z.object({ emitters: count, receivers: count, channels: count }).nullish(),
+  pumps: z.object({ count, pumpedVoxels: count, pendingTerrainVoxels: count }).nullish(),
+  history: z
+    .preprocess(
+      (value) => (Array.isArray(value) ? value.slice(-600) : value),
+      z.array(historySample),
+    )
+    .nullish(),
   topColumns: z.array(column).max(256).nullish(),
 });
 export type OpenworldFactoriesSnapshot = z.infer<typeof snapshot>;

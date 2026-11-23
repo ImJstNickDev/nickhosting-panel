@@ -398,7 +398,7 @@ export function createOpenworldWorldMap(options: OpenworldNativeOptions) {
         id,
         undefined,
         (scope) =>
-          factories.get(scope.liveKey, 3000, () => withNative(scope, readOpenworldFactories)),
+          factories.get(scope.liveKey, 1000, () => withNative(scope, readOpenworldFactories)),
         { resource: 'factories' },
       );
     },

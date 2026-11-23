@@ -190,3 +190,14 @@
     margin-left: 0;
   }
 }
+
+.ow-history-guide {
+  stroke: #966321;
+  stroke-width: 1.5px;
+  stroke-dasharray: 3 4;
+}
+.ow-history-readout .ow-legend i.ow-guide-key {
+  height: 0;
+  background: none;
+  border-bottom: 2px dashed #966321;
+}
