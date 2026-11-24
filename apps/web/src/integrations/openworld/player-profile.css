@@ -1,0 +1,355 @@
+.ow-people-commands,
+.ow-directory-tools,
+.ow-directory-summary,
+.ow-profile-banner,
+.ow-source-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+.ow-directory-tools {
+  justify-content: space-between;
+  border-bottom: 1px solid var(--line);
+  padding-bottom: 14px;
+}
+.ow-directory-tools .workspace-search {
+  min-width: 0;
+  width: min(100%, 280px);
+}
+.ow-directory-tools .ow-switcher,
+.ow-source-picker {
+  margin: 0;
+}
+.ow-directory-summary {
+  justify-content: space-between;
+  margin-block: 10px;
+}
+.ow-people-list .ow-player-link {
+  flex: 1;
+}
+:where(.ow-people-list) .ow-avatar img {
+  width: 100%;
+  height: 100%;
+}
+.ow-presence {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.42em;
+}
+.ow-presence::before {
+  content: "";
+  width: 0.5em;
+  height: 0.5em;
+  border-radius: 50%;
+  background: #909995;
+}
+.ow-presence.is-live::before {
+  background: #387e57;
+}
+.ow-directory-date,
+.ow-source-time {
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+.ow-profile-banner {
+  font-size: 0.82rem;
+  color: var(--muted);
+  margin: 2px 0 14px;
+}
+.ow-profile-banner > span + span:empty {
+  display: none;
+}
+.ow-profile-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+  gap: 4px;
+}
+.ow-profile-tabs button {
+  padding: 7px 10px;
+  white-space: nowrap;
+}
+.ow-source-row {
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+.ow-source-row:empty {
+  display: none;
+}
+.ow-profile .ow-detail-content {
+  padding-top: 12px;
+}
+.ow-source-picker button {
+  font-size: 0.78rem;
+}
+.ow-character {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 14px;
+  margin-bottom: 16px;
+}
+.ow-character-portrait {
+  flex: 0 0 auto;
+}
+.ow-character-portrait .ow-avatar {
+  width: 66px;
+  height: 76px;
+  font-size: 1.8rem;
+}
+.ow-body-skin {
+  display: grid;
+  place-items: center;
+  height: 128px;
+  width: 82px;
+  border-radius: 6px;
+  background: #f0f4f1;
+}
+.ow-body-skin img {
+  height: 116px;
+  width: 72px;
+  object-fit: contain;
+  image-rendering: pixelated;
+}
+.ow-character-location {
+  display: grid;
+  gap: 4px;
+  flex: 1 1 110px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.ow-character-location > span {
+  font-size: 0.84rem;
+  color: var(--muted);
+}
+.ow-character-location > strong {
+  font-size: 1.18rem;
+}
+.ow-character-location > a {
+  width: fit-content;
+  font-size: 0.86rem;
+  margin-top: 5px;
+}
+.ow-identity-details {
+  margin-top: 15px;
+}
+.ow-identity-details .ow-metrics {
+  margin-top: 12px;
+}
+.ow-profile-gallery .ow-heading h2 {
+  font-size: 1rem;
+}
+.ow-capture-filter {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-bottom: 14px;
+  font-size: 0.86rem;
+}
+.ow-capture-filter input {
+  width: auto;
+}
+@media (max-width: 640px) {
+  .ow-directory-tools .workspace-search {
+    width: 100%;
+  }
+  .ow-directory-date {
+    width: 100%;
+    margin-left: 50px;
+  }
+  .ow-profile-tabs button {
+    flex: 1 1 auto;
+  }
+  .ow-people-list .ow-roster-stats {
+    margin-inline-start: 50px;
+  }
+}
+.ow-profile-back {
+  justify-self: start;
+  font-weight: 600;
+}
+.ow-profile .ow-heading {
+  margin-bottom: 6px;
+}
+.ow-profile .ow-heading h2 {
+  overflow-wrap: anywhere;
+}
+.ow-people a.ow-player-link {
+  color: inherit;
+  text-decoration: none;
+  padding-block: 2px;
+  border-radius: 3px;
+}
+.ow-profile-tabs + .ow-source-row .ow-source-picker ~ .ow-stamp > .ow-live {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+}
+@media (max-width: 640px) {
+  .ow-profile-tabs {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .ow-profile-tabs:has(> button:nth-of-type(3):last-child),
+  .ow-profile-tabs:has(> button:nth-of-type(6):last-child) {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
+.ow-character-workspace {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(164px, 208px);
+  align-items: start;
+  gap: clamp(16px, 3vw, 32px);
+}
+.ow-character-main {
+  min-width: 0;
+}
+.ow-player-commands {
+  min-width: 0;
+}
+.ow-character-workspace .ow-player-commands {
+  border-inline-start: 1px solid var(--line);
+  padding-inline-start: 18px;
+}
+.ow-player-commands h3 {
+  font-size: 0.95rem;
+  margin: 0 0 10px;
+}
+.ow-command-list {
+  display: grid;
+  gap: 2px;
+}
+.ow-command-list button.secondary {
+  display: flex;
+  align-items: center;
+  justify-content: start;
+  gap: 9px;
+  width: 100%;
+  min-height: 36px;
+  padding: 6px 8px;
+  font-size: 0.86rem;
+  text-align: start;
+  color: inherit;
+  background: transparent;
+  border: 1px solid transparent;
+}
+.ow-command-list button.secondary:enabled:hover,
+.ow-command-list button.secondary:focus-visible {
+  background: #f1f4f2;
+  border-color: var(--line);
+}
+.ow-command-list svg {
+  flex-shrink: 0;
+}
+.ow-command-list button[data-destructive] {
+  color: #9a3430;
+}
+.ow-command-list button.secondary:disabled {
+  color: var(--muted);
+  cursor: not-allowed;
+  filter: none;
+}
+.ow-command-list button:not([data-destructive]) + button[data-destructive] {
+  margin-top: 6px;
+}
+.ow-player-command-dialog {
+  width: min(440px, calc(100vw - 32px));
+}
+.ow-player-command-dialog .ow-action-editor {
+  margin-top: 16px;
+}
+.ow-player-command-dialog .field {
+  margin: 0;
+  min-width: 0;
+}
+.ow-player-command-dialog .ow-action-review {
+  border: 0;
+  padding-block: 0 8px;
+}
+@container (max-width: 640px) {
+  .ow-character-workspace {
+    grid-template-columns: 1fr;
+  }
+  .ow-character-workspace .ow-player-commands {
+    border-inline: 0;
+    border-top: 1px solid var(--line);
+    padding: 16px 0 0;
+  }
+  .ow-command-list {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .ow-command-list button:not([data-destructive]) + button[data-destructive] {
+    margin-top: 0;
+  }
+}
+.ow-profile {
+  container-type: inline-size;
+}
+
+.ow-action-toast {
+  position: fixed;
+  z-index: 40;
+  inset-inline: 1rem;
+  inset-block-end: max(1.5rem, env(safe-area-inset-bottom));
+  margin-inline: auto;
+  box-sizing: border-box;
+  width: max-content;
+  max-width: min(25rem, calc(100% - 2rem));
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.15rem 0.6rem;
+  padding: 0.5rem 0.5rem 0.5rem 0.8rem;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  box-shadow: 0 4px 20px #00000012;
+  font-size: 0.875rem;
+  line-height: 1.35;
+}
+.ow-action-toast > svg {
+  color: #24684e;
+}
+.ow-action-toast [role="status"] {
+  overflow-wrap: anywhere;
+}
+.ow-action-toast button {
+  background: transparent;
+  border: 0;
+  font: inherit;
+  min-height: 2rem;
+}
+.ow-action-toast-close {
+  grid-column: 3;
+  grid-row: 1;
+  display: grid;
+  place-items: center;
+  width: 2rem;
+  height: 2rem;
+  padding: 0;
+  color: var(--muted);
+}
+.ow-action-toast-gallery {
+  grid-column: 2;
+  justify-self: start;
+  padding: 0.2rem 0;
+  color: var(--blue);
+  text-decoration: underline;
+  text-underline-offset: 0.18em;
+}
+@media (prefers-reduced-motion: no-preference) {
+  .ow-action-toast {
+    animation: ow-toast-arrive 150ms ease-out;
+  }
+  @keyframes ow-toast-arrive {
+    from {
+      opacity: 0;
+      transform: translateY(4px);
+    }
+  }
+}

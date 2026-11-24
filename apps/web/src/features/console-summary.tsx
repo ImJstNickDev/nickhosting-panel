@@ -4,6 +4,7 @@ import { Link } from 'react-router';
 import { api } from '../api/client.js';
 import { useFormat, useLocale, useT } from '../app/i18n.js';
 import { Tooltip } from '../components/tooltip.js';
+import { primaryPlayerAddress } from './connection.api.js';
 import type { DisplayResources } from './console-resources.js';
 import { getRuntimeArtwork } from './integrations.js';
 import { type Connections, platformPath, useServer } from './service-contracts.js';
@@ -163,7 +164,9 @@ export function ConsoleSummary({
   resources,
   availability,
   observedAt,
+  runtimeAction,
 }: {
+  runtimeAction?: ReactNode;
   observedAt?: number;
   serverId: string;
   resources?: DisplayResources;
@@ -183,12 +186,7 @@ export function ConsoleSummary({
     queryFn: () => api<Connections>(`${platformPath(serverId)}/connections`),
     refetchInterval: 15000,
   });
-  // The connection contract identifies the player endpoint. An auxiliary query or
-  // control port must never substitute for an unconfigured primary allocation.
-  const endpoints =
-    connections.data?.ports.filter((port) => port.primary && port.hostname && port.port) ?? [];
-  const endpoint = endpoints.find((port) => port.status === 'configured') ?? endpoints[0];
-  const address = endpoint?.displayAddress;
+  const address = primaryPlayerAddress(connections.data);
   const addressState = connections.data?.addressState;
   const missingAddress =
     addressState === 'pending'
@@ -230,6 +228,7 @@ export function ConsoleSummary({
                 .filter(Boolean)
                 .join(' ')}
             </span>
+            {runtimeAction}
           </span>
         </SummaryCard>
       )}

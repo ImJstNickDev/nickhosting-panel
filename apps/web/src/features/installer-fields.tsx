@@ -192,6 +192,9 @@ export function VersionList({
                 <span className={presentation === 'cards' ? 'installer-choice-title' : undefined}>
                   {o.label ?? t(o.labelKey ?? '')}
                 </span>
+                {o.disabled && o.reasonKey && (
+                  <span className="muted installer-recommended">{t(o.reasonKey)}</span>
+                )}
                 {(o.recommended || o.latest) && (
                   <span className="installer-recommended muted">
                     {t(o.recommended ? 'gameUi.recommended' : 'gameUi.latest')}

@@ -534,20 +534,20 @@ export function createPterodactylAdapter(options: PterodactylOptions) {
         body,
       );
     },
-    updateStartup(id: number, input: StartupUpdate) {
+    updateStartup(id: number, input: StartupUpdate, includeAllocations = false) {
       const body = parseInput(
         z.strictObject({
           startup: z.string().min(1).max(16384),
           environment: provisionPlanSchema.shape.environment,
           egg: z.number().int().positive(),
           image: z.string().min(1).max(1024),
-          skip_scripts: z.boolean().optional(),
+          skip_scripts: z.boolean(),
         }),
         input,
       );
       return transport.entity(
         'application',
-        `${appServer(id)}/startup`,
+        `${appServer(id)}/startup${includeAllocations ? '?include=allocations' : ''}`,
         applicationServerSchema,
         'PATCH',
         body,

@@ -45,6 +45,7 @@ const localeOf = (user: object): 'en' | 'it' =>
   'locale' in user && user.locale === 'it' ? 'it' : 'en';
 
 export function buildBetterAuth(options: IdentityOptions) {
+  const https = new URL(options.baseURL).protocol === 'https:';
   return betterAuth({
     appName: 'NickHosting',
     baseURL: options.baseURL,
@@ -71,8 +72,12 @@ export function buildBetterAuth(options: IdentityOptions) {
       // The API boundary removes incoming values and supplies the socket peer address.
       // Never trust browser-controlled X-Forwarded-For or X-Real-IP for throttling.
       ipAddress: { ipAddressHeaders: ['x-nh-client-ip'] },
-      useSecureCookies: new URL(options.baseURL).protocol === 'https:',
-      defaultCookieAttributes: { httpOnly: true, sameSite: 'lax' },
+      // Better Auth otherwise prepends __Secure- to every name. Select __Host-
+      // for the entire cookie family so sibling game sites cannot plant parent-
+      // domain session, OAuth, passkey or 2FA cookies. Keep HTTP localhost usable.
+      useSecureCookies: false,
+      ...(https ? { cookiePrefix: '__Host-nh-auth' } : {}),
+      defaultCookieAttributes: { secure: https, path: '/', httpOnly: true, sameSite: 'lax' },
       database: { generateId: 'uuid' },
     },
     rateLimit: { enabled: true, storage: 'database', window: 60, max: 60 },

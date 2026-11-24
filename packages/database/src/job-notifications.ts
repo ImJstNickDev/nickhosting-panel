@@ -5,7 +5,7 @@ import type { Database } from './index.js';
 export interface JobNotificationPool {
   connect(): Promise<PoolClient>;
 }
-type ChangeChannel = 'jobs' | 'gateway' | 'catalogs' | 'worlds';
+type ChangeChannel = 'jobs' | 'gateway' | 'catalogs' | 'worlds' | 'dashboards';
 const channelSql = (kind: ChangeChannel) =>
   `'nh_${kind}_' || md5(current_database() || ':' || current_schema())`;
 
@@ -55,6 +55,37 @@ export function listenForMinecraftWorldScans(
   disconnected: () => void,
 ) {
   return listenForChanges(pool, wake, disconnected, 'worlds');
+}
+
+/** Retry durable requests and cleanup after the Owner saves NPM configuration.
+ * The revision trigger emits a commit-only wakeup to the worker. */
+export async function requeueOpenworldPublications(db: Kysely<Database>) {
+  // Include pre-existing DNS when credentials are configured for the first time.
+  await db
+    .insertInto('openworld_dashboard_publications')
+    .columns(['server_id'])
+    .expression(db.selectFrom('openworld_dashboard_dns').select('server_id'))
+    .onConflict((c) => c.column('server_id').doNothing())
+    .execute();
+  await db
+    .updateTable('openworld_dashboard_publications')
+    .set({ revision: sql`revision + 1`, due_at: sql`now()` })
+    .where((eb) =>
+      eb.or([
+        eb('enabled', '=', true),
+        eb('tracked_hostname', 'is not', null),
+        eb('server_id', 'in', db.selectFrom('openworld_dashboard_dns').select('server_id')),
+      ]),
+    )
+    .execute();
+}
+
+export function listenForDashboardPublications(
+  pool: JobNotificationPool,
+  wake: () => void,
+  disconnected: () => void,
+) {
+  return listenForChanges(pool, wake, disconnected, 'dashboards');
 }
 
 async function listenForChanges(

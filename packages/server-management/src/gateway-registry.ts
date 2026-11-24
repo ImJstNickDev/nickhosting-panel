@@ -30,6 +30,10 @@ import {
   inspectMinecraftCombination,
   loadMinecraftCombinationInspector,
 } from './minecraft-registry.js';
+import {
+  openworldUpdateAllowsRoute,
+  openworldUpdateDrainsUdp,
+} from './openworld-update-gateway.js';
 import { authorizeServer, parse } from './registry.js';
 
 /** Existing managed servers retain declared routing when creation availability is disabled.
@@ -281,6 +285,7 @@ export async function validateGatewayRouteEndpoint(
     !node.enabled ||
     node.physical_host_id !== config.gatewayPhysicalHostId ||
     !claim ||
+    claim.private_only ||
     !claim.protocols.includes(value.transport) ||
     !pool?.gatewayBindAddresses.includes(address) ||
     allocationAddressesOverlap(address, claim.backend_address)
@@ -398,6 +403,11 @@ async function buildGatewayRoutes(
     )
     .innerJoin('user', 'user.id', 'server.owner_id')
     .selectAll('route')
+    .select((eb) =>
+      openworldUpdateDrainsUdp(eb.ref('server.active_operation_id'), eb.ref('server.id')).as(
+        'drains_udp',
+      ),
+    )
     .select([
       'server.node_id',
       'server.name as server_name',
@@ -423,22 +433,31 @@ async function buildGatewayRoutes(
     .where('server.deleted_at', 'is', null)
     .where('server.connection_mode', '=', 'gateway')
     .where('server.pterodactyl_uuid', 'is not', null)
-    // An active reinstall may be between provider startup configuration and
-    // registry confirmation. Withdraw only this route until the operation
-    // releases it; never validate or renew a route with a transitional egg.
+    // Keep the installed process reachable throughout an Openworld update's
+    // download, notice and graceful stop. Installation withdraws the route, as
+    // does any generic reinstall. A restart requires a verified new executable.
     .where((eb) =>
-      eb.not(
-        eb.exists(
-          eb
-            .selectFrom('server_operations as installing')
-            .select('installing.job_id')
-            .whereRef('installing.job_id', '=', 'server.active_operation_id')
-            .whereRef('installing.server_id', '=', 'server.id')
-            .where('installing.action', '=', 'reinstall'),
+      eb.or([
+        eb.not(
+          eb.exists(
+            eb
+              .selectFrom('server_operations as installing')
+              .select('installing.job_id')
+              .whereRef('installing.job_id', '=', 'server.active_operation_id')
+              .whereRef('installing.server_id', '=', 'server.id')
+              .where('installing.action', '=', 'reinstall'),
+          ),
         ),
-      ),
+        openworldUpdateAllowsRoute(
+          eb.ref('mapping.game_id'),
+          eb.ref('mapping.runtime_id'),
+          eb.ref('server.id'),
+          eb.ref('server.active_operation_id'),
+        ),
+      ]),
     )
     .where('node.enabled', '=', true)
+    .where('allocation.private_only', '=', false)
     .where('node.physical_host_id', '=', config.gatewayPhysicalHostId)
     .orderBy('route.id')
     .limit(10001)
@@ -604,9 +623,10 @@ async function buildGatewayRoutes(
       presentation: {
         serverName: row.server_name,
         variables: presentationVariables.get(row.server_id),
-        ...(operation?.action === 'stop' &&
-        row.active_operation_id === operation.job_id &&
-        ['queued', 'running', 'uncertain'].includes(operation.state)
+        ...(row.drains_udp ||
+        (operation?.action === 'stop' &&
+          row.active_operation_id === operation.job_id &&
+          ['queued', 'running', 'uncertain'].includes(operation.state))
           ? { stopping: true }
           : {}),
         messages: gatewayMessageOverridesSchema.parse(policy.gateway_messages ?? {}),

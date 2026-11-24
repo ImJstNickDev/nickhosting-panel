@@ -16,6 +16,15 @@ export const ownerIntegrationWebMessages: Record<string, readonly [string, strin
   'mapping.noNodes': ['No managed nodes configured.', 'Nessun nodo gestito configurato.'],
   'mapping.noNests': ['No nests available.', 'Nessun nest disponibile.'],
   'mapping.noEggs': ['No eggs in this nest.', 'Nessun egg in questo nest.'],
+  'ownerIntegration.metivaOverride': [
+    'Integration token configured',
+    'Token specifico configurato',
+  ],
+  'ownerIntegration.metivaGlobal': [
+    'Using the platform token',
+    'In uso il token della piattaforma',
+  ],
+  'ownerIntegration.metivaClear': ['Remove token', 'Rimuovi token'],
   'ownerIntegration.general': ['General', 'Generale'],
   'ownerIntegration.runtime': ['Runtime', 'Runtime'],
   'ownerIntegration.connection': ['Connection', 'Connessione'],

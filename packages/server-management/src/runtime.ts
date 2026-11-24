@@ -62,6 +62,7 @@ import { assertNoModpackPublication } from './minecraft-modpack-schema.js';
 import { createMinecraftModuleRuntime } from './minecraft-module.js';
 import { runMinecraftVersionChange } from './minecraft-version-change.js';
 import { createMinecraftWorldPreparation } from './minecraft-world-preparation.js';
+import { createOpenworldModuleRuntime } from './openworld-module.js';
 import type { OperationTiming } from './operation-timing.js';
 import { resolveProviderCredential } from './provider-accounts.js';
 import {
@@ -209,7 +210,11 @@ export async function authorizeQueuedEffect(
     throw new DomainError('forbidden');
   if (operation.plan.scheduleAutomation !== undefined)
     await authorizeScheduledEffect(db, jobId, serverId);
-  if (operation.action === 'backup' && operation.phase === 'backup_resume') {
+  if (
+    (operation.action === 'backup' ||
+      (operation.action === 'reinstall' && operation.plan.managedVersionUpdate === true)) &&
+    operation.phase === 'backup_resume'
+  ) {
     const gateway = await db
       .selectFrom('gateway_server_states')
       .select('generation')
@@ -746,6 +751,7 @@ export async function createManagementRuntime(options: ManagementOptions) {
     trustedGameModules,
     new Map<string, import('./game-modules.js').GameRuntimeHooks>([
       [minecraft.id, minecraft],
+      ['openworld', createOpenworldModuleRuntime(options.codec, env)],
       ['satisfactory', createSatisfactoryModuleRuntime(options.codec, env)],
     ]),
   );
@@ -895,8 +901,18 @@ export async function createManagementRuntime(options: ManagementOptions) {
     },
     cleanupGameSecrets: async (serverId: string, connection: Kysely<Database>) =>
       (await gameRuntime(connection, serverId))?.cleanupSecrets?.(serverId, connection),
+    prepareGameStart: async (context: import('./lifecycle.js').GameLifecycleContext) => {
+      await (await gameRuntime(context.db, context.server.id))?.prepareStart?.(context);
+    },
     finalizeGameStart: async (context: import('./lifecycle.js').GameLifecycleContext) =>
       (await gameRuntime(context.db, context.server.id))?.finalizeStart?.(context) ?? true,
+    gameVersionUpdate: async (context: import('./lifecycle.js').GameLifecycleContext) =>
+      (await gameRuntime(context.db, context.server.id))?.versionUpdate,
+    gameInstallerEnvironment: async (
+      context: import('./lifecycle.js').GameLifecycleContext,
+      current?: ApplicationServer,
+    ) =>
+      (await gameRuntime(context.db, context.server.id))?.installerEnvironment?.(context, current),
     configureGameProvision: async (context: import('./lifecycle.js').GameLifecycleContext) =>
       (await gameRuntime(context.db, context.server.id))?.configureProvision(context) ?? true,
     minecraftVersionChange: async (
@@ -1212,7 +1228,9 @@ export async function createManagementRuntime(options: ManagementOptions) {
       if (
         ['start', 'restart'].includes(operation.action) ||
         (operation.action === 'provision' && operation.phase === 'initial_start') ||
-        (operation.action === 'backup' && operation.phase === 'backup_resume')
+        ((operation.action === 'backup' ||
+          (operation.action === 'reinstall' && operation.plan.managedVersionUpdate === true)) &&
+          operation.phase === 'backup_resume')
       ) {
         await stage('runtime_image', () =>
           assertRuntimeImage(serverId, connection, false, {

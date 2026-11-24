@@ -56,6 +56,7 @@ export async function planProvisionGateway(
     .selectFrom('server_allocations')
     .selectAll()
     .where('server_id', '=', server.id)
+    .where('private_only', '=', false)
     .orderBy('id')
     .execute();
   const plan = planSchema.parse({

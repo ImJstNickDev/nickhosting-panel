@@ -86,6 +86,14 @@ export const platformConfigSchema = z
     publicUrl: httpUrl.optional(),
     apiUrl: httpUrl.optional(),
     pterodactylBaseUrl: httpUrl.optional(),
+    npmApiUrl: httpUrl
+      .refine((value) => ['/', '/api', '/api/'].includes(new URL(value).pathname))
+      .optional(),
+    npmAcmeEmail: z
+      .email()
+      .max(254)
+      .refine((value) => !value.includes("'"))
+      .optional(),
     dockerObserverSocket: z
       .string()
       .refine(
@@ -300,6 +308,8 @@ export const configEnvironmentKeys = {
   publicUrl: 'NH_PUBLIC_URL',
   apiUrl: 'NH_API_URL',
   pterodactylBaseUrl: 'NH_PTERODACTYL_BASE_URL',
+  npmApiUrl: 'NH_NPM_API_URL',
+  npmAcmeEmail: 'NH_NPM_ACME_EMAIL',
   dockerObserverSocket: 'NH_DOCKER_OBSERVER_SOCKET',
   pterodactylWebSocketOrigins: 'NH_PTERODACTYL_WEBSOCKET_ORIGINS',
   pterodactylDownloadOrigins: 'NH_PTERODACTYL_DOWNLOAD_ORIGINS',
@@ -440,7 +450,12 @@ export function resolveConfig(
       sources[key] = 'database';
     }
     const alias = legacyContentEnvironmentKeys[key as keyof typeof legacyContentEnvironmentKeys];
-    const value = env[configEnvironmentKeys[key]] ?? (alias ? env[alias] : undefined);
+    const envKey = configEnvironmentKeys[key];
+    const npmDeployment = (key === 'npmApiUrl' || key === 'npmAcmeEmail') && env.NH_DEPLOYMENT_ENV;
+    const prefix = npmDeployment === 'development' ? 'NH_DEV_' : 'NH_PROD_';
+    const value = npmDeployment
+      ? env[envKey.replace(/^NH_/, prefix)]
+      : (env[envKey] ?? (alias ? env[alias] : undefined));
     if (value === undefined) continue;
     if (value.trim() === '') invalid([key]);
     if (

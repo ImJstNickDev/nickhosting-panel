@@ -1,16 +1,13 @@
 import type { GatewayPresentation } from '@nickhosting/core';
-import { z } from 'zod';
+import { connectionModeSchema } from '@nickhosting/game-sdk';
+import { sql } from 'kysely';
 import type { DB } from './admission.js';
-
-const connectionSchema = z.object({
-  hostname: z.string().min(1).max(253),
-  port: z.number().int().min(1).max(65535),
-  records: z.array(
-    z
-      .object({ type: z.string(), data: z.object({ port: z.number() }).passthrough().optional() })
-      .passthrough(),
-  ),
-});
+import {
+  canUseConfirmedEndpoint,
+  confirmedDnsConnection,
+  effectiveConnectionMode,
+  playerAddress,
+} from './connection-address.js';
 
 /** Local, batched presentation metadata. Listener/backend addresses are not public
  * connection addresses. Only confirmed DNS assignments can supply the latter. */
@@ -22,11 +19,27 @@ export async function getGatewayPresentationVariables(
   if (!ids.length) return new Map();
   const [assignments, preferences, routes] = await Promise.all([
     db
-      .selectFrom('dns_assignments')
-      .select(['id', 'server_id', 'state', 'plan'])
-      .where('server_id', 'in', ids)
-      .where('state', '!=', 'deleted')
-      .orderBy('updated_at', 'desc')
+      .selectFrom('dns_assignments as dns')
+      .innerJoin('managed_servers as server', 'server.id', 'dns.server_id')
+      .innerJoin('runtime_egg_mappings as mapping', 'mapping.id', 'server.mapping_id')
+      .innerJoin('game_integrations as game', 'game.id', 'mapping.game_id')
+      .leftJoin('game_connection_versions as profile', (join) =>
+        join
+          .onRef('profile.server_id', '=', 'dns.server_id')
+          .onRef('profile.game_id', '=', 'game.id'),
+      )
+      .select([
+        'game.id as gameId',
+        'profile.version as installedVersion',
+        'dns.id',
+        'dns.server_id',
+        'dns.state',
+        'dns.plan',
+        sql<unknown>`game.manifest->'connection'`.as('mode'),
+      ])
+      .where('dns.server_id', 'in', ids)
+      .where('dns.state', '!=', 'deleted')
+      .orderBy('dns.updated_at', 'desc')
       .execute(),
     db
       .selectFrom('server_dns_preferences')
@@ -35,11 +48,21 @@ export async function getGatewayPresentationVariables(
       .execute(),
     db
       .selectFrom('gateway_routes as route')
-      .innerJoin('server_allocations as allocation', 'allocation.id', 'route.allocation_id')
-      .select(['route.server_id', 'route.public_port'])
+      .innerJoin('server_allocations as allocation', (join) =>
+        join
+          .onRef('allocation.id', '=', 'route.allocation_id')
+          .onRef('allocation.server_id', '=', 'route.server_id'),
+      )
+      .select([
+        'route.server_id',
+        'route.public_port',
+        'route.public_address',
+        'route.transport',
+        'allocation.protocols',
+      ])
       .where('route.server_id', 'in', ids)
       .where('route.enabled', '=', true)
-      .where('route.transport', '=', 'tcp')
+      .where('allocation.private_only', '=', false)
       .where('allocation.is_primary', '=', true)
       .where('allocation.role', '=', 'game')
       .execute(),
@@ -53,11 +76,11 @@ export async function getGatewayPresentationVariables(
   const preferencesByServer = new Map(
     preferences.map((preference) => [preference.server_id, preference]),
   );
-  const portsByServer = new Map<string, Set<number>>();
+  const routesByServer = new Map<string, typeof routes>();
   for (const route of routes) {
-    const ports = portsByServer.get(route.server_id) ?? new Set<number>();
-    ports.add(route.public_port);
-    portsByServer.set(route.server_id, ports);
+    const group = routesByServer.get(route.server_id) ?? [];
+    group.push(route);
+    routesByServer.set(route.server_id, group);
   }
   return new Map(
     servers.map((server) => {
@@ -67,18 +90,31 @@ export async function getGatewayPresentationVariables(
         candidates.find((candidate) => candidate.id === preferred?.assignment_id) ??
         candidates.find((candidate) => candidate.state === 'active') ??
         candidates[0];
-      const intent = assignment?.plan as
-        | { connection?: unknown; confirmedConnection?: unknown }
-        | undefined;
-      const connection = connectionSchema.safeParse(
-        assignment?.state === 'active' ? intent?.connection : intent?.confirmedConnection,
-      );
-      let address = '';
-      if (connection.success && portsByServer.get(server.id)?.has(connection.data.port)) {
-        const { hostname, port, records } = connection.data;
-        const srv = records.some((record) => record.type === 'SRV' && record.data?.port === port);
-        address = srv ? hostname : `${hostname.includes(':') ? `[${hostname}]` : hostname}:${port}`;
-      }
+      const confirmed = confirmedDnsConnection(assignment);
+      const declared = connectionModeSchema.safeParse(assignment?.mode).data;
+      const mode =
+        declared && assignment
+          ? effectiveConnectionMode(declared, assignment.gameId, assignment.installedVersion)
+          : null;
+      const srv = declared?.mode === 'custom-subdomain' ? declared.srv : undefined;
+      const route = routesByServer
+        .get(server.id)
+        ?.find(
+          (route) =>
+            canUseConfirmedEndpoint(confirmed, route.public_address, route.public_port) &&
+            route.transport === (srv?.proto ?? route.protocols[0]),
+        );
+      const address =
+        confirmed && route
+          ? (playerAddress(
+              confirmed.hostname,
+              route.public_port,
+              route.transport,
+              true,
+              mode,
+              confirmed,
+            ) ?? '')
+          : '';
       return [
         server.id,
         {

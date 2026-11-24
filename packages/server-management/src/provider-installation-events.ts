@@ -3,7 +3,11 @@ import { type Database, notifyJobOutbox } from '@nickhosting/database';
 import { providerInstallationEventSchema } from '@nickhosting/pterodactyl-adapter';
 import { type Kysely, sql } from 'kysely';
 
-async function wakeLocked(tx: Kysely<Database>, jobId: string, now: Date) {
+export async function wakeInstallationOperationInTransaction(
+  tx: Kysely<Database>,
+  jobId: string,
+  now: Date,
+) {
   const job = await tx
     .selectFrom('operation_jobs')
     .select('state')
@@ -34,7 +38,7 @@ export async function wakeInstallationOperation(
   jobId: string,
   now = new Date(),
 ) {
-  await db.transaction().execute((tx) => wakeLocked(tx, jobId, now));
+  await db.transaction().execute((tx) => wakeInstallationOperationInTransaction(tx, jobId, now));
 }
 
 /** Signed provider receipts only expedite reconciliation; they never mark an
@@ -121,7 +125,7 @@ export async function applyProviderInstallationEvent(
         }),
       })
       .execute();
-    await wakeLocked(tx, operation.job_id, now);
+    await wakeInstallationOperationInTransaction(tx, operation.job_id, now);
   });
 }
 

@@ -1,6 +1,6 @@
 import type { EncryptedSecret, PlatformConfig } from '@nickhosting/core';
 import type { GameRolloutState } from '@nickhosting/game-sdk';
-import { type Generated, Kysely, PostgresDialect } from 'kysely';
+import { type ColumnType, type Generated, Kysely, PostgresDialect } from 'kysely';
 import { Pool, type PoolConfig } from 'pg';
 import type { GatewayRouteTables } from './gateway-route-types.js';
 import type { GatewayTables } from './gateway-types.js';
@@ -60,6 +60,112 @@ export interface Database
     key: string;
     value: Partial<PlatformConfig>;
     updated_at: Generated<Date>;
+  };
+  openworld_release_catalog: {
+    runtime: 'dedicated-linux-x64';
+    credential_hash: string;
+    source: 'metiva' | 'official';
+    releases: ColumnType<{ version: string; size: number; sha256: string }[], string, string>;
+    sync_order: string;
+    synced_at: Date;
+  };
+  game_connection_versions: { server_id: string; game_id: string; version: string };
+  openworld_update_artifacts: { job_id: string; sha256: string; archive: Buffer };
+  openworld_update_settings: { singleton: Generated<boolean>; notice_seconds: number };
+  openworld_gateway_release_checks: {
+    version: string;
+    sha256: string;
+    outcome: 'passed' | 'failed';
+    reason: 'verified' | 'version_mismatch' | 'protocol_mismatch';
+    checked_at: Date;
+  };
+  openworld_server_updates: {
+    job_id: string;
+    server_id: string;
+    phase:
+      | 'preparing'
+      | 'waiting-empty'
+      | 'notice'
+      | 'stopping'
+      | 'backup'
+      | 'installing'
+      | 'verifying'
+      | 'starting'
+      | 'completed'
+      | 'failed'
+      | 'cancelled';
+    deadline: Date | null;
+    restart: boolean | null;
+    warning: 'notice_failed' | 'reminder_failed' | null;
+    created_at: Generated<Date>;
+    updated_at: Generated<Date>;
+  };
+  openworld_server_profiles: {
+    history_sha256: string | null;
+    dashboard_credential_prepared: Generated<boolean>;
+    server_id: string;
+    version: string;
+    sha256: string;
+    size: number;
+  };
+  openworld_capture_cursors: {
+    server_id: string;
+    next_scan_at: Date;
+    lease: string;
+    binding: string | null;
+    process_ref: string | null;
+    evidence: ColumnType<unknown, string | null, string | null>;
+  };
+  openworld_capture_owners: {
+    server_id: string;
+    binding: string;
+    file_name: string;
+    file_bytes: string;
+    mtime_ms: string;
+    process_ref: string;
+    account_id: string | null;
+    connection_id: string;
+    request_id: string;
+    requested_seq: string;
+    written_seq: string;
+  };
+  openworld_player_directories: {
+    server_id: string;
+    binding: string;
+    indexed_at: Date;
+    indexing: boolean;
+  };
+  openworld_player_vitals: {
+    server_id: string;
+    account_id: string;
+    binding: string;
+    observed_at: Date;
+    vitals: ColumnType<unknown, string, string>;
+  };
+  openworld_player_skins: {
+    server_id: string;
+    account_id: string;
+    binding: string;
+    skin_hash: string;
+    observed_at: Date;
+    head_png: Buffer;
+    body_png: Buffer;
+  };
+  openworld_saved_players: {
+    server_id: string;
+    file_stem: string;
+    revision: string;
+    account_id: string | null;
+    display_name: string | null;
+    saved_at: Date | null;
+    last_seen_at: Date | null;
+  };
+  openworld_telemetry_snapshots: {
+    server_id: string;
+    resource: 'status' | 'players' | 'history' | 'chunks' | 'storage';
+    binding: string;
+    observed_at: Date;
+    data: ColumnType<unknown, string, string>;
   };
   satisfactory_server_state: {
     server_id: string;

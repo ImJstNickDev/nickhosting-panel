@@ -16,7 +16,7 @@ import {
   Notice,
   Section,
 } from '../components/ui.js';
-import { assignmentConnectionChoice } from './connection.api.js';
+import { assignmentConnectionChoice, primaryPlayerAddress } from './connection.api.js';
 import {
   type ConnectionChoice,
   ConnectionFields,
@@ -75,8 +75,7 @@ export function NetworkPage({ serverId }: { serverId: string }) {
   const assignment = connection.data?.primaryDnsAssignmentId
     ? dns.data?.find((item) => item.id === connection.data?.primaryDnsAssignmentId)
     : (dns.data?.find((item) => item.state === 'active') ?? dns.data?.[0]);
-  const primary = connection.data?.ports.find((port) => port.primary && port.displayAddress);
-  const address = primary?.displayAddress;
+  const address = primaryPlayerAddress(connection.data);
   const addressState = connection.data?.addressState;
   const missingAddress =
     addressState === 'pending'

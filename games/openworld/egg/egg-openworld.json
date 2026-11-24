@@ -1,0 +1,105 @@
+{
+  "_comment": "NickHosting Openworld dedicated server",
+  "meta": {
+    "version": "PTDL_v2",
+    "update_url": null
+  },
+  "exported_at": "2026-11-21T00:00:00+00:00",
+  "name": "Openworld Dedicated",
+  "author": "panel@nickhost.ing",
+  "description": "Openworld dedicated server for Linux x64.",
+  "features": null,
+  "docker_images": {
+    "Debian Bookworm": "ghcr.io/ptero-eggs/yolks:debian_bookworm"
+  },
+  "file_denylist": [
+    ".nickhosting-openworld-launch.py",
+    ".nickhosting-openworld-config.json"
+  ],
+  "startup": "/usr/bin/python3 -I -c \"import hashlib,sys; p='.nickhosting-openworld-launch.py'; s=open(p,'rb').read(65536); sys.exit('Invalid Openworld launcher') if hashlib.sha256(s).hexdigest()!='738a479dc2b003e43068b22f5e5cfcd6dc3c25f1312e44ec2af893107a79ab31' else exec(compile(s,p,'exec'))\"",
+  "config": {
+    "files": "{}",
+    "startup": "{\"done\":\"network server started -- port=\"}",
+    "logs": "{}",
+    "stop": "stop"
+  },
+  "scripts": {
+    "installation": {
+      "script": "\"\"\"Install the game distribution in /mnt/server, leaving instance data in place.\"\"\"\nimport hashlib\nimport json\nimport os\nimport shutil\nimport time\nimport stat\nimport tempfile\nfrom pathlib import Path, PurePosixPath\nfrom urllib.error import HTTPError, URLError\nfrom urllib.parse import urlsplit\nfrom urllib.request import urlopen\nfrom zipfile import ZipFile\n\nROOT = Path('/mnt/server')\nMAX_BYTES = 512 * 1024 * 1024\nOFFICIAL_MANIFEST = 'https://core.openworld.pascard.com/manifest.json'\nFILES = {'openworld-server', 'README.txt', 'THIRD-PARTY-NOTICES.txt'}\n\n\ndef manifest(url):\n    with urlopen(url, timeout=30) as source:\n        data = source.read(8 * 1024 * 1024 + 1)\n    if len(data) > 8 * 1024 * 1024:\n        raise ValueError('Release catalog too large')\n    return json.loads(data)\n\n\ndef artifact():\n    version = os.getenv('OW_VERSION') or 'latest'\n    ticket = os.getenv('OW_DOWNLOAD_URL')\n    if ticket:\n        return ticket, int(os.environ['OW_ARCHIVE_SIZE']), os.environ['OW_SHA256']\n    catalog = manifest(OFFICIAL_MANIFEST)['client']\n    if version == 'latest':\n        version = catalog['latest']\n    releases = catalog['recent']\n    for channel in ('alpha', 'snapshot'):\n        if any(item['version'] == version for item in releases):\n            break\n        pages = catalog['channels'].get(channel, {}).get('pages', 0)\n        for page in range(1, min(int(pages), 100) + 1):\n            data = manifest(f'https://core.openworld.pascard.com/c/manifest/client/{channel}-{page}.json')\n            releases = data['versions']\n            if any(item['version'] == version for item in releases):\n                break\n    release = next((item for item in releases if item['version'] == version and not item.get('hidden') and not item.get('below_floor')), None)\n    if not release:\n        raise ValueError('No published server package for selected version')\n    file = release['server']['linux-x64']\n    if os.getenv('OW_SHA256') and os.environ['OW_SHA256'] != file['sha256']:\n        raise ValueError('Published release differs from the selected archive')\n    return file['url'], file['size'], file['sha256']\n\n\ndef download(path):\n    url, size, digest = artifact()\n    if urlsplit(url).scheme != 'https' or not 0 < size <= MAX_BYTES or len(digest) != 64:\n        raise ValueError('Invalid release metadata')\n    for attempt in range(5):\n        try:\n            fetch_package(path, url, size, digest)\n            return\n        except HTTPError as err:\n            if err.code not in (429, 502, 503, 504) or attempt == 4:\n                raise RuntimeError(f'Package request failed (HTTP {err.code})') from None\n            delay = err.headers.get('Retry-After', '')\n            delay = min(int(delay), 30) if delay.isdecimal() else 2 ** attempt\n        except (TimeoutError, URLError, ConnectionError):\n            if attempt == 4:\n                raise RuntimeError('Package request timed out or became unavailable') from None\n            delay = 2 ** attempt\n        time.sleep(delay)\n\n\ndef fetch_package(path, url, size, digest):\n    received = 0\n    checksum = hashlib.sha256()\n    with urlopen(url, timeout=90) as source, path.open('wb') as target:\n        while chunk := source.read(256 * 1024):\n            received += len(chunk)\n            if received > size:\n                raise ValueError('Package exceeds declared size')\n            checksum.update(chunk)\n            target.write(chunk)\n    if received != size or checksum.hexdigest() != digest:\n        raise ValueError('Package did not match the selected release')\n\n\ndef unpack(archive, stage):\n    seen = set()\n    total = 0\n    with ZipFile(archive) as package:\n        if len(package.infolist()) > 50000:\n            raise ValueError('Too many package entries')\n        for entry in package.infolist():\n            name = entry.filename.rstrip('/')\n            path = PurePosixPath(name)\n            kind = stat.S_IFMT(entry.external_attr >> 16)\n            if (not path.parts or str(path) != name or path.is_absolute() or '..' in path.parts\n                    or '\\\\' in name or name in seen or kind not in (0, stat.S_IFREG, stat.S_IFDIR)\n                    or not (path.parts[0] == 'assets' or name in FILES)):\n                raise ValueError('Unexpected package entry')\n            seen.add(name)\n            dest = stage / name\n            if entry.is_dir():\n                dest.mkdir(exist_ok=True, parents=True)\n                continue\n            total += entry.file_size\n            if total > MAX_BYTES * 3:\n                raise ValueError('Unpacked package too large')\n            dest.parent.mkdir(exist_ok=True, parents=True)\n            with package.open(entry) as inp, dest.open('xb') as out:\n                shutil.copyfileobj(inp, out)\n    if not FILES <= seen or not (stage / 'assets').is_dir():\n        raise ValueError('Incomplete dedicated server package')\n    (stage / 'openworld-server').chmod(0o755)\n\n\ndef publish(stage, names):\n    # Validate every destination before the first rename. A misplaced file or\n    # user-created directory must never be discarded as an old distribution.\n    previous = stage.parent / 'previous'\n    previous.mkdir()\n    for name in names:\n        target = ROOT / name\n        if not os.path.lexists(target):\n            continue\n        mode = target.lstat().st_mode\n        if not (stat.S_ISDIR(mode) if name == 'assets' else stat.S_ISREG(mode)):\n            raise ValueError(f'Unexpected existing installation entry: {name}')\n    moved = []\n    published = []\n    try:\n        for name in names:\n            target = ROOT / name\n            if os.path.lexists(target):\n                os.replace(target, previous / name)\n                moved.append(name)\n            os.replace(stage / name, target)\n            published.append(name)\n    except BaseException:\n        for name in reversed(published):\n            os.replace(ROOT / name, stage / name)\n        for name in reversed(moved):\n            os.replace(previous / name, ROOT / name)\n        raise\n\n\ndef install(launcher_name, launcher_source):\n    with tempfile.TemporaryDirectory(dir=ROOT, prefix='.ow-install-') as temp:\n        work = Path(temp)\n        stage = work / 'distribution'\n        stage.mkdir()\n        archive = work / 'server.zip'\n        download(archive)\n        unpack(archive, stage)\n        (stage / launcher_name).write_text(launcher_source, encoding='utf-8')\n        names = sorted(FILES | {'assets', launcher_name})\n        config = ROOT / 'server.json'\n        if not os.path.lexists(config):\n            with (stage / 'server.json').open('x', encoding='utf-8') as document:\n                json.dump({'name': os.getenv('OW_SERVER_NAME') or 'Openworld', 'web': {'enabled': False}}, document, ensure_ascii=False)\n                document.write('\\n')\n            names.append('server.json')\n        elif not stat.S_ISREG(config.lstat().st_mode):\n            raise ValueError('Expected a regular server.json')\n        publish(stage, names)\n\nimport base64\ninstall(\".nickhosting-openworld-launch.py\", base64.b64decode(\"aW1wb3J0IGpzb24KaW1wb3J0IG9zCmltcG9ydCBwYXRobGliCmltcG9ydCBzZWNyZXRzCgpyb290ID0gcGF0aGxpYi5QYXRoLmN3ZCgpCmJhc2UgPSByb290IC8gInNlcnZlci5qc29uIgpsaW5rID0gcm9vdCAvICIubmlja2hvc3Rpbmctb3BlbndvcmxkLWNvbmZpZy5qc29uIgpwYXNzd29yZCA9IG9zLmVudmlyb24ucG9wKCJPV19XRUJfUEFTU1dPUkQiLCAiIikKZ2FtZV9wb3J0ID0gaW50KG9zLmVudmlyb25bIlNFUlZFUl9QT1JUIl0pCndlYl9wb3J0ID0gaW50KG9zLmVudmlyb25bIk9XX1dFQl9QT1JUIl0pCmlmIG5vdCAoMCA8IGdhbWVfcG9ydCA8IDY1NTM2IGFuZCAwIDwgd2ViX3BvcnQgPCA2NTUzNiBhbmQgZ2FtZV9wb3J0ICE9IHdlYl9wb3J0KToKICAgIHJhaXNlIFN5c3RlbUV4aXQoIkludmFsaWQgYWxsb2NhdGVkIE9wZW53b3JsZCBwb3J0cyIpCgphcmdzID0gWyIuL29wZW53b3JsZC1zZXJ2ZXIiLCAiLS1wb3J0Iiwgc3RyKGdhbWVfcG9ydCldCmlmIGJhc2UuZXhpc3RzKCkgb3IgcGFzc3dvcmQ6CiAgICBpZiBub3QgYmFzZS5leGlzdHMoKToKICAgICAgICB3aXRoIGJhc2Uub3BlbigieCIsIGVuY29kaW5nPSJ1dGYtOCIpIGFzIGRvY3VtZW50OgogICAgICAgICAgICBkb2N1bWVudC53cml0ZSgie31cbiIpCiAgICB3aXRoIGJhc2Uub3BlbigicmIiKSBhcyBkb2N1bWVudDoKICAgICAgICByYXcgPSBkb2N1bWVudC5yZWFkKDEwNDg1NzcpCiAgICBpZiBsZW4ocmF3KSA+IDEwNDg1NzY6CiAgICAgICAgcmFpc2UgU3lzdGVtRXhpdCgiT3BlbndvcmxkIGNvbmZpZ3VyYXRpb24gaXMgdG9vIGxhcmdlIikKICAgIHNldHRpbmdzID0ganNvbi5sb2FkcyhyYXcpCiAgICBpZiBub3QgaXNpbnN0YW5jZShzZXR0aW5ncywgZGljdCk6CiAgICAgICAgcmFpc2UgU3lzdGVtRXhpdCgiSW52YWxpZCBPcGVud29ybGQgY29uZmlndXJhdGlvbiIpCiAgICBzZXR0aW5nc1sid2ViIl0gPSB7CiAgICAgICAgImVuYWJsZWQiOiBib29sKHBhc3N3b3JkKSwgImhvc3QiOiAiMC4wLjAuMCIsICJwb3J0Ijogd2ViX3BvcnQsICJwYXNzd29yZCI6IHBhc3N3b3JkCiAgICB9CiAgICBmZCA9IG9zLm1lbWZkX2NyZWF0ZSgib3BlbndvcmxkLWNvbmZpZyIsIGZsYWdzPTApCiAgICB3aXRoIG9zLmZkb3Blbihvcy5kdXAoZmQpLCAidyIsIGVuY29kaW5nPSJ1dGYtOCIpIGFzIGRvY3VtZW50OgogICAgICAgIGpzb24uZHVtcChzZXR0aW5ncywgZG9jdW1lbnQpCiAgICBvcy5sc2VlayhmZCwgMCwgb3MuU0VFS19TRVQpCiAgICBvcy5zZXRfaW5oZXJpdGFibGUoZmQsIFRydWUpCiAgICB0ZW1wb3JhcnkgPSByb290IC8gKCIub3BlbndvcmxkLWNvbmZpZy0iICsgc2VjcmV0cy50b2tlbl9oZXgoMTIpKQogICAgdGVtcG9yYXJ5LnN5bWxpbmtfdG8oIi9wcm9jL3NlbGYvZmQvIiArIHN0cihmZCkpCiAgICBvcy5yZXBsYWNlKHRlbXBvcmFyeSwgbGluaykKICAgIGFyZ3MuZXh0ZW5kKFsiLS1jb25maWciLCBzdHIobGluayldKQpvcy5leGVjdihhcmdzWzBdLCBhcmdzKQo=\").decode(\"utf-8\"))\n",
+      "container": "python:3.12-slim-bookworm",
+      "entrypoint": "python3"
+    }
+  },
+  "variables": [
+    {
+      "name": "Game version",
+      "env_variable": "OW_VERSION",
+      "default_value": "latest",
+      "rules": "required|string|max:128",
+      "description": "",
+      "field_type": "text",
+      "user_viewable": false,
+      "user_editable": false
+    },
+    {
+      "name": "Package SHA-256",
+      "env_variable": "OW_SHA256",
+      "default_value": "",
+      "rules": "nullable|string|size:64",
+      "description": "",
+      "field_type": "text",
+      "user_viewable": false,
+      "user_editable": false
+    },
+    {
+      "name": "Package size",
+      "env_variable": "OW_ARCHIVE_SIZE",
+      "default_value": "",
+      "rules": "nullable|integer|min:1",
+      "description": "",
+      "field_type": "text",
+      "user_viewable": false,
+      "user_editable": false
+    },
+    {
+      "name": "Installer download",
+      "env_variable": "OW_DOWNLOAD_URL",
+      "default_value": "",
+      "rules": "nullable|string|max:8192",
+      "description": "",
+      "field_type": "text",
+      "user_viewable": false,
+      "user_editable": false
+    },
+    {
+      "name": "Server name",
+      "env_variable": "OW_SERVER_NAME",
+      "default_value": "Openworld",
+      "rules": "string|max:100",
+      "description": "",
+      "field_type": "text",
+      "user_viewable": false,
+      "user_editable": false
+    },
+    {
+      "name": "Dashboard port",
+      "env_variable": "OW_WEB_PORT",
+      "default_value": "24711",
+      "rules": "nullable|integer|min:1|max:65535",
+      "description": "",
+      "field_type": "text",
+      "user_viewable": false,
+      "user_editable": false
+    },
+    {
+      "name": "Dashboard password",
+      "env_variable": "OW_WEB_PASSWORD",
+      "default_value": "",
+      "rules": "nullable|string|max:256",
+      "description": "",
+      "field_type": "text",
+      "user_viewable": false,
+      "user_editable": false
+    }
+  ]
+}

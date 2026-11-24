@@ -166,10 +166,22 @@ export function provisioningLogLines(value?: ProvisioningSnapshot | null) {
 /** Only announce a completion observed here; historical snapshots never replay a toast. */
 export function ProvisioningCompletion({ value }: { value?: ProvisioningSnapshot | null }) {
   const t = useT();
+  return (
+    <ObservedCompletion jobId={value?.jobId} state={value?.state} label={t('provisioning.ready')} />
+  );
+}
+export function ObservedCompletion({
+  jobId,
+  state,
+  label,
+}: {
+  jobId?: string;
+  state?: string;
+  label: string;
+}) {
   const observed = useRef<string | undefined>(undefined);
   const [notification, setNotification] = useState<{ jobId: string; leaving: boolean }>();
-  const jobId = value?.jobId;
-  const state = value?.state;
+
   useEffect(() => {
     if (state === 'active' || state === 'uncertain') {
       observed.current = jobId;
@@ -203,7 +215,7 @@ export function ProvisioningCompletion({ value }: { value?: ProvisioningSnapshot
       >
         <path d="m5 12 4 4L19 6" />
       </svg>
-      <strong>{t('provisioning.ready')}</strong>
+      <strong>{label}</strong>
     </div>
   );
 }
@@ -238,7 +250,7 @@ export function ProvisioningHistory({
   );
 }
 
-function StageIcon({ stage, complete }: { stage: ProvisioningStage; complete: boolean }) {
+export function StageIcon({ stage, complete }: { stage: ProvisioningStage; complete: boolean }) {
   return (
     <svg
       viewBox="0 0 24 24"
@@ -266,6 +278,32 @@ function StageIcon({ stage, complete }: { stage: ProvisioningStage; complete: bo
         <path d="m5 12 4 4L19 6" />
       )}
     </svg>
+  );
+}
+
+export function ProvisioningMark({
+  phase,
+  complete = false,
+}: {
+  phase: ProvisioningStage;
+  complete?: boolean;
+}) {
+  return (
+    <div className="provisioning-mark" aria-hidden="true">
+      <span className="provisioning-mark-unit">
+        <i />
+        <i />
+        <i />
+      </span>
+      <span className="provisioning-mark-unit">
+        <i />
+        <i />
+        <i />
+      </span>
+      <span className="provisioning-mark-signal">
+        <StageIcon stage={phase} complete={complete} />
+      </span>
+    </div>
   );
 }
 
@@ -337,21 +375,7 @@ export function ProvisioningPanel({
       data-state={value?.state ?? 'loading'}
       aria-label={t('provisioning.title')}
     >
-      <div className="provisioning-mark" aria-hidden="true">
-        <span className="provisioning-mark-unit">
-          <i />
-          <i />
-          <i />
-        </span>
-        <span className="provisioning-mark-unit">
-          <i />
-          <i />
-          <i />
-        </span>
-        <span className="provisioning-mark-signal">
-          <StageIcon stage={phase} complete={value?.state === 'completed'} />
-        </span>
-      </div>
+      <ProvisioningMark phase={phase} complete={value?.state === 'completed'} />
       <div className="provisioning-current">
         <span className="provisioning-eyebrow">
           {t(

@@ -1,0 +1,49 @@
+import { legacyServerPermissionKeys, ownerServerPermissionKeys } from '@nickhosting/core';
+import { availableGameUiSections } from '@nickhosting/game-sdk/ui';
+import { expect, it } from 'vitest';
+import { openworldManifest } from './manifest.js';
+import { openworldUiModule } from './ui/index.js';
+
+it('separates the roster and performance grants from inspection, moderation and native administration', () => {
+  const definitions = openworldManifest.serverPermissions;
+  const sections = (keys: string[]) =>
+    availableGameUiSections(openworldUiModule, {
+      runtimeId: 'dedicated',
+      permissions: ['server:read', ...keys],
+      capabilities: openworldManifest.capabilities,
+    }).map(({ id }) => id);
+  expect(sections(['game.openworld.players.read'])).toEqual(['players']);
+  expect(sections(['game.openworld.performance.read'])).toEqual([
+    'overview',
+    'performance',
+    'factories',
+  ]);
+  expect(sections(['game.openworld.map.read'])).toEqual(['map']);
+  expect(sections(['game.openworld.seed.inspect'])).toEqual(['seed']);
+  expect(sections(['game.openworld.rules.view'])).toEqual(['rules']);
+  expect(sections(['game.openworld.rules.manage', 'game.openworld.bans.manage'])).toEqual([]);
+  expect(sections(['game.openworld.checkpoints.manage'])).toEqual([]);
+  expect(sections(['game.openworld.dashboard.admin'])).toEqual(['dashboard']);
+  for (const role of ['viewer', 'operator', 'manager', 'owner'] as const) {
+    expect(legacyServerPermissionKeys(role, definitions).sort()).toEqual([
+      'game.openworld.map.read',
+      'game.openworld.performance.read',
+      'game.openworld.players.read',
+    ]);
+  }
+  expect(ownerServerPermissionKeys(definitions, true)).toEqual(
+    expect.arrayContaining([
+      'game.openworld.checkpoints.manage',
+      'game.openworld.players.inspect',
+      'game.openworld.players.moderate',
+      'game.openworld.players.screenshots',
+      'game.openworld.dashboard.admin',
+      'game.openworld.rules.view',
+      'game.openworld.rules.manage',
+      'game.openworld.territory.manage',
+      'game.openworld.roles.manage',
+      'game.openworld.bans.manage',
+      'game.openworld.seed.inspect',
+    ]),
+  );
+});

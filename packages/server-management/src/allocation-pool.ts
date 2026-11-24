@@ -27,7 +27,7 @@ export function allocationAddressesOverlap(first: string, second: string) {
   return !a || !b || a === b || ['0.0.0.0', '::'].includes(a) || ['0.0.0.0', '::'].includes(b);
 }
 
-function privateBackendAddress(value: string) {
+export function privateBackendAddress(value: string) {
   if (isIP(value) === 4) {
     const [a, b] = value.split('.').map(Number);
     return (
@@ -127,7 +127,7 @@ export const backendAllocationPoolSchema = z
         .size === pool.allocations.length &&
       new Set(pool.gatewayBindAddresses).size === pool.gatewayBindAddresses.length &&
       (pool.gatewayBindAddresses.length > 0 ||
-        pool.allocations.every((pin) => pin.directEndpoint)) &&
+        pool.allocations.some((pin) => pin.directEndpoint)) &&
       new Set(
         pool.allocations
           .filter((pin) => pin.directEndpoint)
@@ -154,6 +154,113 @@ export type BackendAllocation = Allocation & {
   delivery?: 'backend' | 'direct';
   directEndpoint?: { hostname: string; port: number };
 };
+export type GatewayListenerConflict = (
+  address: string,
+  port: number,
+  protocols: readonly ('tcp' | 'udp')[],
+) => boolean;
+
+/** Read the host's published port namespace once for any number of candidate ports. */
+export async function gatewayListenerConflicts(
+  db: DB,
+  hostId: string,
+  gatewayId: string,
+  env: Environment,
+): Promise<GatewayListenerConflict> {
+  const [nodes, claims, routes] = await Promise.all([
+    db
+      .selectFrom('managed_nodes')
+      .select(['id', 'backend_allocation_pool'])
+      .where('physical_host_id', '=', hostId)
+      .execute(),
+    db
+      .selectFrom('server_allocations as a')
+      .innerJoin('managed_nodes as n', 'n.id', 'a.node_id')
+      .select(['a.port', 'a.backend_address'])
+      .where('n.physical_host_id', '=', hostId)
+      .execute(),
+    db
+      .selectFrom('gateway_routes as r')
+      .innerJoin('server_allocations as a', 'a.id', 'r.allocation_id')
+      .innerJoin('managed_nodes as n', 'n.id', 'a.node_id')
+      .select(['r.public_port', 'r.public_address', 'r.transport'])
+      .where((eb) =>
+        eb.or([eb('n.physical_host_id', '=', hostId), eb('r.gateway_id', '=', gatewayId)]),
+      )
+      .execute(),
+  ]);
+  const byPort = new Map<number, { address: string; transport?: 'tcp' | 'udp' }[]>();
+  function reserve(port: number, address: string, transport?: 'tcp' | 'udp') {
+    const bindings = byPort.get(port);
+    if (bindings) bindings.push({ address, transport });
+    else byPort.set(port, [{ address, transport }]);
+  }
+  for (const node of nodes) {
+    for (const pin of effectiveBackendAllocationPool(node, env)?.allocations ?? []) {
+      reserve(pin.port, backendAllocationAddress(pin));
+    }
+  }
+  for (const claim of claims) reserve(claim.port, claim.backend_address);
+  for (const route of routes) reserve(route.public_port, route.public_address, route.transport);
+  return (address, port, protocols) =>
+    byPort
+      .get(port)
+      ?.some(
+        (binding) =>
+          (!binding.transport || protocols.includes(binding.transport)) &&
+          allocationAddressesOverlap(address, binding.address),
+      ) ?? false;
+}
+/** Reserve the more restricted private pins before assigning the public game roles. */
+export function assignRoleAllocations(
+  roles: readonly { role: string; primary: boolean; protocols?: readonly ('tcp' | 'udp')[] }[],
+  privateRoles: ReadonlySet<string>,
+  candidates: readonly BackendAllocation[],
+  mode: 'direct' | 'gateway',
+  gatewayAvailable: boolean,
+  listener?: { address: string; conflicts: GatewayListenerConflict },
+) {
+  const selected = new Map<string, BackendAllocation>();
+  const publicPins = candidates.filter((pin) =>
+    mode === 'direct' ? Boolean(pin.directEndpoint) : gatewayAvailable && pin.delivery !== 'direct',
+  );
+  const accepts = (pin: BackendAllocation, role: (typeof roles)[number]) =>
+    mode !== 'gateway' ||
+    !listener ||
+    !listener.conflicts(listener.address, pin.port, role.protocols ?? ['tcp', 'udp']);
+  const publicRoles = roles.filter((role) => !privateRoles.has(role.role));
+  const publicPorts = new Set(
+    publicPins
+      .filter((pin) => !listener || publicRoles.some((role) => accepts(pin, role)))
+      .map((pin) => pin.port),
+  );
+  // Wings publishes both transports for each allocation. A public IP at the
+  // same numeric port would also publish the container's dashboard TCP socket.
+  const privatePins = candidates
+    .filter(
+      (pin) =>
+        !pin.directEndpoint &&
+        pin.delivery !== 'direct' &&
+        privateBackendAddress(pin.backendAddress),
+    )
+    .sort((a, b) => Number(publicPorts.has(a.port)) - Number(publicPorts.has(b.port)));
+  const used = new Set<number>();
+  for (const role of [...roles].sort(
+    (a, b) => Number(privateRoles.has(b.role)) - Number(privateRoles.has(a.role)),
+  )) {
+    const privateOnly = privateRoles.has(role.role);
+    if (privateOnly && role.primary) throw new DomainError('configuration_invalid');
+    const options = privateOnly ? privatePins : publicPins;
+    const index = options.findIndex(
+      (pin) => (!privateRoles.size || !used.has(pin.port)) && (privateOnly || accepts(pin, role)),
+    );
+    if (index === -1) throw new DomainError('allocation_unavailable');
+    const pin = options.splice(index, 1)[0] as BackendAllocation;
+    selected.set(role.role, pin);
+    used.add(pin.port);
+  }
+  return selected;
+}
 export function poolAllowsLoopbackEgg(
   pool: BackendAllocationPool,
   mapping: { nest_id: number; egg_id: number },
@@ -274,6 +381,8 @@ export async function assertServerBackendAllocations(
     new Set(claims.map((claim) => claim.pterodactyl_allocation_id)).size !== claims.length ||
     claims.some(
       (claim) =>
+        (claim.private_only &&
+          claims.some((other) => other.id !== claim.id && other.port === claim.port)) ||
         claim.node_id !== node.id ||
         !allocations.some(
           (allocation) =>
@@ -282,10 +391,14 @@ export async function assertServerBackendAllocations(
             canonicalAllocationAddress(allocation.ip) === claim.address &&
             allocation.backendAddress === claim.backend_address &&
             allocation.port === claim.port &&
-            (server.connection_mode === 'direct'
-              ? isDeepStrictEqual(allocation.directEndpoint ?? null, claim.direct_endpoint) &&
-                claim.direct_endpoint !== null
-              : allocation.delivery !== 'direct'),
+            (claim.private_only
+              ? !allocation.directEndpoint &&
+                allocation.delivery !== 'direct' &&
+                privateBackendAddress(allocation.backendAddress)
+              : server.connection_mode === 'direct'
+                ? isDeepStrictEqual(allocation.directEndpoint ?? null, claim.direct_endpoint) &&
+                  claim.direct_endpoint !== null
+                : allocation.delivery !== 'direct'),
         ),
     )
   )
@@ -326,6 +439,7 @@ export async function assertBackendPoolNamespace(
       'allocation.address',
       'allocation.backend_address',
       'allocation.port',
+      'allocation.private_only',
       'ownerServer.connection_mode',
     ])
     .where('ownerNode.physical_host_id', '=', node.physical_host_id)
@@ -339,7 +453,7 @@ export async function assertBackendPoolNamespace(
     )
       throw new DomainError('allocation_unavailable');
     if (
-      claim.connection_mode !== 'direct' &&
+      (claim.private_only || claim.connection_mode !== 'direct') &&
       pool.gatewayBindAddresses.some((gateway) =>
         allocationAddressesOverlap(gateway, claim.backend_address),
       )
@@ -353,7 +467,11 @@ export async function assertBackendPoolNamespace(
         (claim.address !== pin.address ||
           claim.backend_address !== backendAllocationAddress(pin) ||
           claim.port !== pin.port ||
-          (claim.connection_mode === 'gateway' && pin.delivery === 'direct'))
+          (claim.connection_mode === 'gateway' && pin.delivery === 'direct') ||
+          (claim.private_only &&
+            (pin.delivery === 'direct' ||
+              pin.directEndpoint ||
+              !privateBackendAddress(backendAllocationAddress(pin)))))
       )
         throw new DomainError('allocation_unavailable');
       if (

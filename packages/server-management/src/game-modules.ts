@@ -3,9 +3,11 @@ import {
   DomainError,
   type GatewayPresentation,
   type PlatformConfig,
+  type SecretCodec,
 } from '@nickhosting/core';
 import type { Database, gameCatalog } from '@nickhosting/database';
 import {
+  type ConnectionMode,
   type GameBackupHooks,
   type GameManifest,
   type GatewayMessageDefinition,
@@ -13,6 +15,7 @@ import {
 } from '@nickhosting/game-sdk';
 import type {
   ApplicationServer,
+  Egg,
   PterodactylAdapter,
   ServerFile,
 } from '@nickhosting/pterodactyl-adapter';
@@ -20,6 +23,7 @@ import type { Kysely, Selectable } from 'kysely';
 import type { DB, Environment } from './admission.js';
 import type { GameLifecycleContext } from './lifecycle.js';
 import { minecraftModule } from './minecraft-module.js';
+import { openworldModule } from './openworld-module.js';
 import { satisfactoryModule } from './satisfactory-module.js';
 
 export type ManagedGameServer = Selectable<Database['managed_servers']>;
@@ -41,6 +45,37 @@ export interface TrustedGameModule {
   id: string;
   manifest: GameManifest;
   provisionAsResourceOwner: boolean;
+  /** Adapt the registered address and service discovery declaration to the installed release. */
+  resolveConnectionMode?(
+    mode: ConnectionMode,
+    installedVersion: string | null | undefined,
+  ): ConnectionMode;
+  validateEggMapping?(
+    input: {
+      startup: string;
+      environment: Readonly<Record<string, string>>;
+      portRoles: Array<{
+        role: string;
+        primary: boolean;
+        protocols: ('tcp' | 'udp')[];
+        environmentVariable?: string;
+      }>;
+    },
+    egg: Egg,
+  ): void;
+  prepareCreation?(input: {
+    db: DB;
+    env: Environment;
+    codec?: SecretCodec;
+    context: AuthContext;
+    mappingId: string;
+    configuration: Record<string, unknown>;
+    name: string;
+  }): Promise<{
+    gateway: boolean;
+    environment: Record<string, string>;
+    persist(connection: DB, serverId: string): Promise<void>;
+  }>;
   /** Management screens shipped by this module use compiled declarations even
    * when the registered manifest predates them. Never overrides lifecycle policy. */
   managementCapabilities?: readonly ('players' | 'mods' | 'worlds')[];
@@ -88,11 +123,19 @@ export interface FileMutationContext {
   listFiles(directory: string): Promise<ServerFile[]>;
 }
 export interface GameRuntimeHooks extends GameBackupHooks<GameLifecycleContext> {
+  versionUpdate?: import('./game-version-update.js').GameUpdateHooks;
+  /** Issue narrowly scoped installer credentials at the provider handoff. */
+  installerEnvironment?(
+    context: GameLifecycleContext,
+    current?: ApplicationServer,
+  ): Promise<Record<string, string>>;
   configureProvision(context: GameLifecycleContext): Promise<boolean>;
   installationRetry?(
     context: GameLifecycleContext,
     logs: readonly { at: string; text: string }[],
   ): Promise<number>;
+  /** Upgrade private launch configuration before an authorized managed start or restart. */
+  prepareStart?(context: GameLifecycleContext): Promise<void>;
   /** Complete explicit first-run configuration after confirmed process start. */
   finalizeStart?(context: GameLifecycleContext): Promise<boolean>;
   /** Local protected-store cleanup after proven provider deletion, in its transaction. */
@@ -186,7 +229,11 @@ export function createGameModuleRegistry(modules: readonly TrustedGameModule[]) 
     },
   });
 }
-export const trustedGameModules = createGameModuleRegistry([minecraftModule, satisfactoryModule]);
+export const trustedGameModules = createGameModuleRegistry([
+  minecraftModule,
+  satisfactoryModule,
+  openworldModule,
+]);
 
 /** A registry-bound dispatcher protects all content/lifecycle entry points.
  * Unknown generic games retain M2 lifecycle support but cannot acquire content

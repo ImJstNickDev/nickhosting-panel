@@ -23,6 +23,7 @@ import {
 } from './console-resources.js';
 import { ConsoleSummary } from './console-summary.js';
 import { GameConsoleNotices } from './game-console-notices.js';
+import { useGameConsoleUpdate } from './game-console-update.js';
 import {
   ProvisioningCompletion,
   ProvisioningPanel,
@@ -198,12 +199,16 @@ export function ConsolePage({ serverId }: { serverId: string }) {
     provisioning.value?.jobId !== server.data.activeOperationId
       ? undefined
       : provisioning.value;
-  const showSetup = Boolean(
-    (setup &&
-      setup.state !== 'completed' &&
-      (setup.state !== 'start-denied' || server.data?.runtimeState === 'offline')) ||
-      (!setup && expectedSetup),
-  );
+  const update = useGameConsoleUpdate(serverId, server.data, setup?.jobId);
+  const showSetup =
+    !update.ownsProvisioning &&
+    !update.active &&
+    Boolean(
+      (setup &&
+        setup.state !== 'completed' &&
+        (setup.state !== 'start-denied' || server.data?.runtimeState === 'offline')) ||
+        (!setup && expectedSetup),
+    );
   const installing = showSetup && setup?.stage !== 'starting';
   const heading = useRef<HTMLHeadingElement>(null);
   useEffect(() => {
@@ -463,9 +468,10 @@ export function ConsolePage({ serverId }: { serverId: string }) {
         </Notice>
       )}
       {consoleAvailable && Boolean(error) && <ErrorNotice error={error} />}
-      <ProvisioningCompletion key={serverId} value={setup} />
+      <ProvisioningCompletion key={serverId} value={update.ownsProvisioning ? undefined : setup} />
+      {update.completion}
       {!showSetup && <GameConsoleNotices server={server.data} state={powerState} />}
-      <div className={`console-workspace${showSetup ? ' is-provisioning' : ''}`}>
+      <div className={`console-workspace${showSetup || update.progress ? ' is-provisioning' : ''}`}>
         <div className="console-heading">
           <h1 ref={heading} tabIndex={-1}>
             {server.data?.name}
@@ -485,6 +491,7 @@ export function ConsolePage({ serverId }: { serverId: string }) {
                   className={action === 'start' ? '' : 'secondary'}
                   disabled={
                     powerBusy ||
+                    update.active ||
                     !server.data.availableActions[action] ||
                     (action === 'stop' && powerState === 'offline') ||
                     (action === 'kill' && !killAvailable)
@@ -552,22 +559,24 @@ export function ConsolePage({ serverId }: { serverId: string }) {
             <Notice>{t('web.unavailable')}</Notice>
           )}
         </div>
-        {showSetup ? (
-          <ProvisioningPanel
-            serverId={serverId}
-            name={server.data?.name ?? ''}
-            value={setup}
-            error={provisioning.error ?? provisioning.streamError}
-            retry={provisioning.retry}
-          />
-        ) : (
-          <ConsoleSummary
-            serverId={serverId}
-            resources={resources}
-            observedAt={sampleAt}
-            availability={resources ? 'ready' : live.isPending ? 'loading' : 'unavailable'}
-          />
-        )}
+        {update.progress ??
+          (showSetup ? (
+            <ProvisioningPanel
+              serverId={serverId}
+              name={server.data?.name ?? ''}
+              value={setup}
+              error={provisioning.error ?? provisioning.streamError}
+              retry={provisioning.retry}
+            />
+          ) : (
+            <ConsoleSummary
+              runtimeAction={update.runtimeAction}
+              serverId={serverId}
+              resources={resources}
+              observedAt={sampleAt}
+              availability={resources ? 'ready' : live.isPending ? 'loading' : 'unavailable'}
+            />
+          ))}
       </div>
       <ConfirmDialog
         open={restart}

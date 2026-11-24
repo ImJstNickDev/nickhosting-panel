@@ -4,6 +4,7 @@ import {
   assertPermission,
   DomainError,
   hasPermission,
+  ownerServerPermissionKeys,
 } from '@nickhosting/core';
 import { type Database, getSettings, recordAudit, secretStatus } from '@nickhosting/database';
 import { gameManifestSchema } from '@nickhosting/game-sdk';
@@ -12,6 +13,12 @@ import { z } from 'zod';
 import { listUnifiedActivity } from './activity.js';
 import { type DB, type Environment, lockResources, validHostSnapshot } from './admission.js';
 import { hostPolicyOverrides, resolveHostOverride } from './configuration.js';
+import {
+  canUseConfirmedEndpoint,
+  confirmedDnsConnection,
+  effectiveConnectionMode,
+  playerAddress,
+} from './connection-address.js';
 import { trustedGameModules } from './game-modules.js';
 import {
   type GatewayPolicy,
@@ -140,7 +147,7 @@ async function scopedServer(db: DB, context: AuthContext, serverId: string) {
 
 // Installed release metadata is authoritative; manifest compatibility ranges and
 // integration versions are not the version installed in an individual server.
-const installedServerVersion = sql<string | null>`(
+const installedServerVersion = sql<string | null>`coalesce((
   select nullif(combination.combination->>'release', '')
   from minecraft_server_profiles as profile
   join minecraft_combinations as combination on combination.id = profile.combination_id
@@ -148,7 +155,11 @@ const installedServerVersion = sql<string | null>`(
   where profile.server_id = managed_servers.id and profile.installed = true
     and combination.mapping_id = managed_servers.mapping_id
     and version_mapping.game_id = 'minecraft'
-)`;
+), (
+  select v.version from game_connection_versions v
+    join runtime_egg_mappings m on m.id = managed_servers.mapping_id and m.game_id = v.game_id
+    where v.server_id = managed_servers.id and managed_servers.installation_state = 'installed'
+))`;
 
 export async function listPlatformServers(
   db: DB,
@@ -404,7 +415,10 @@ function describeServer(
   const scope = { ownerUserId: row.owner_id, memberRole: row.member_role ?? undefined };
   const permissionKeys =
     context.role === 'owner' || row.owner_id === context.subjectUserId
-      ? definitions.map(({ key }) => key)
+      ? ownerServerPermissionKeys(
+          definitions,
+          context.sessionType === 'regular' && row.owner_id === context.subjectUserId,
+        )
       : sharedServerPermissionKeys(definitions, scope.memberRole, row.direct_permissions);
   const manage = hasPermission(context, 'server:manage', scope),
     operate = permissionKeys.includes('console.power');
@@ -1432,13 +1446,17 @@ export async function getPlatformConnections(
     db
       .selectFrom('runtime_egg_mappings as m')
       .innerJoin('game_integrations as g', 'g.id', 'm.game_id')
-      .select('g.manifest')
+      .leftJoin('game_connection_versions as profile', (join) =>
+        join.on('profile.server_id', '=', serverId).onRef('profile.game_id', '=', 'm.game_id'),
+      )
+      .select(['g.id', 'g.manifest', 'profile.version as installedVersion'])
       .where('m.id', '=', server.mapping_id)
       .executeTakeFirstOrThrow(),
     db
       .selectFrom('server_allocations')
       .select(['id', 'role', 'port', 'protocols', 'is_primary', 'direct_endpoint'])
       .where('server_id', '=', serverId)
+      .where('private_only', '=', false)
       .orderBy('role')
       .execute(),
     db
@@ -1466,43 +1484,31 @@ export async function getPlatformConnections(
       .where('server_id', '=', serverId)
       .executeTakeFirst(),
   ]);
-  const manifest = gameManifestSchema.safeParse(mapping.manifest),
-    connection = manifest.success ? manifest.data.connection : null;
+  const manifest = gameManifestSchema.safeParse(mapping.manifest);
+  const declared = manifest.data?.connection;
+  const connection = declared
+    ? effectiveConnectionMode(declared, mapping.id, mapping.installedVersion)
+    : null;
   const assignment =
     assignments.find((a) => a.id === preference?.assignment_id) ??
     assignments.find((a) => a.state === 'active') ??
     assignments[0];
-  const intent = assignment?.plan as
-    | {
-        connection?: {
-          hostname: string;
-          port: number;
-          displayAddress: string;
-          records: Array<{ type: string; data?: { port: number } }>;
-        };
-        confirmedConnection?: {
-          hostname: string;
-          port: number;
-          displayAddress: string;
-          records: Array<{ type: string; data?: { port: number } }>;
-        };
-      }
-    | undefined;
-  const confirmed =
-    assignment?.state === 'active' ? intent?.connection : intent?.confirmedConnection;
+  const confirmed = confirmedDnsConnection(assignment);
   const dnsAddress = connection?.mode === 'custom-subdomain' || connection?.mode === 'shared-host';
   const primaryAllocation = allocations.find((allocation) => allocation.is_primary);
-  const primaryTransport =
-    (connection?.mode === 'custom-subdomain' ? connection.srv?.proto : undefined) ??
-    primaryAllocation?.protocols[0];
+  const serviceTransport = declared?.mode === 'custom-subdomain' ? declared.srv?.proto : undefined;
+  const primaryTransport = serviceTransport ?? primaryAllocation?.protocols[0];
+  const direct = primaryAllocation?.direct_endpoint;
   const primaryPublicHost =
     server.connection_mode === 'direct'
-      ? primaryAllocation?.direct_endpoint?.hostname
+      ? direct && canUseConfirmedEndpoint(confirmed, direct.hostname, direct.port)
+        ? direct.hostname
+        : undefined
       : routes.find(
           (route) =>
             route.allocation_id === primaryAllocation?.id &&
             route.transport === primaryTransport &&
-            (!confirmed || route.public_port === confirmed.port),
+            canUseConfirmedEndpoint(confirmed, route.public_address, route.public_port),
         )?.public_address;
   const confirmedHostFor = (publicHost: string | undefined) =>
     publicHost && publicHost === primaryPublicHost ? (confirmed?.hostname ?? null) : null;
@@ -1515,25 +1521,10 @@ export async function getPlatformConnections(
         : connection?.mode === 'static-host-port'
           ? (settings.values as unknown as Record<string, string>)[connection.hostnameSettingKey]
           : undefined);
-  const display = (
-    host: string | null,
-    port: number | null,
-    primary: boolean,
-    transport: string,
-  ) => {
-    if (!host || !port) return null;
-    const srv = connection?.mode === 'custom-subdomain' ? connection.srv : undefined;
-    return primary &&
-      confirmed?.hostname === host &&
-      confirmed.port === port &&
-      srv?.proto === transport &&
-      confirmed.records.some((r) => r.type === 'SRV' && r.data?.port === port)
-      ? host
-      : `${host.includes(':') ? `[${host}]` : host}:${port}`;
-  };
   return {
     mode: connection?.mode ?? null,
     connectionMode: server.connection_mode,
+    primaryTransport: serviceTransport,
     addressState: assignment?.state ?? (preference?.enabled ? 'pending' : 'unconfigured'),
     primaryDnsAssignmentId: assignment?.id ?? null,
     reachability: server.connection_mode === 'direct' ? ('unverified' as const) : null,
@@ -1559,11 +1550,13 @@ export async function getPlatformConnections(
             transport,
             port: endpoint?.port ?? null,
             hostname: publicHostname,
-            displayAddress: display(
+            displayAddress: playerAddress(
               publicHostname,
               endpoint?.port ?? null,
-              allocation.is_primary,
               transport,
+              allocation.is_primary,
+              connection,
+              confirmed,
             ),
             status: endpoint ? ('configured' as const) : ('unconfigured' as const),
           };
@@ -1584,11 +1577,13 @@ export async function getPlatformConnections(
           transport,
           port: route?.public_port ?? null,
           hostname: publicHostname,
-          displayAddress: display(
+          displayAddress: playerAddress(
             publicHostname,
             route?.public_port ?? null,
-            allocation.is_primary,
             transport,
+            allocation.is_primary,
+            connection,
+            confirmed,
           ),
           status: !route
             ? ('unconfigured' as const)

@@ -7,18 +7,19 @@ export class ApiError extends Error {
     readonly messageKey: string,
     readonly requestId?: string,
     readonly status = 0,
+    readonly retryAfterSeconds?: number,
   ) {
     super(messageKey);
   }
 }
-export function apiError(value: unknown, status = 0): ApiError {
+export function apiError(value: unknown, status = 0, retryAfter?: string | null): ApiError {
   if (value instanceof ApiError) return value;
   const record = value && typeof value === 'object' ? (value as Record<string, unknown>) : {};
   const nested =
     record.error && typeof record.error === 'object'
       ? (record.error as Record<string, unknown>)
       : record;
-  if (nested.error) return apiError(nested, status);
+  if (nested.error) return apiError(nested, status, retryAfter);
   return new ApiError(
     typeof nested.code === 'string' ? nested.code : 'internal_error',
     typeof nested.messageKey === 'string'
@@ -28,6 +29,7 @@ export function apiError(value: unknown, status = 0): ApiError {
         : 'web.errors.request',
     typeof record.requestId === 'string' ? record.requestId : undefined,
     status,
+    status === 429 && retryAfter && /^\d{1,4}$/.test(retryAfter) ? Number(retryAfter) : undefined,
   );
 }
 export const queryClient = new QueryClient({
@@ -62,6 +64,7 @@ export async function api<T = unknown>(
     signal?: AbortSignal;
     headers?: Record<string, string>;
     onDebugTiming?: (timing: ApiDebugTiming) => void;
+    keepalive?: boolean;
   } = {},
 ): Promise<T> {
   const started = options.onDebugTiming ? performance.now() : 0;
@@ -69,6 +72,7 @@ export async function api<T = unknown>(
     method: options.method ?? (options.body === undefined ? 'GET' : 'POST'),
     credentials: 'same-origin',
     signal: options.signal,
+    keepalive: options.keepalive,
     headers: {
       'Accept-Language': locale,
       ...(options.body === undefined ? {} : { 'Content-Type': 'application/json' }),
@@ -78,7 +82,12 @@ export async function api<T = unknown>(
     redirect: 'error',
   });
   try {
-    if (!response.ok) throw apiError(await response.json().catch(() => ({})), response.status);
+    if (!response.ok)
+      throw apiError(
+        await response.json().catch(() => ({})),
+        response.status,
+        response.headers.get('Retry-After'),
+      );
     const method = options.method ?? (options.body === undefined ? 'GET' : 'POST');
     if (method !== 'GET' && path.startsWith('/v1/owner/')) {
       // Catalog visibility depends on Owner mappings, rollout and availability. Never retain

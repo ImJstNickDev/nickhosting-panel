@@ -1,0 +1,75 @@
+import { DomainError } from '@nickhosting/core';
+import type { Hono } from 'hono';
+import { z } from 'zod';
+import { savedAccountId } from '../../../games/openworld/src/offline-players.js';
+import { createOpenworldPlayerDirectory } from '../../../packages/server-management/src/openworld-player-directory.js';
+import type { Variables } from './app.js';
+import type { ServerRouteOptions } from './servers.js';
+
+const pagination = z.object({
+  page: z.coerce.number().int().min(1).max(1000).default(1),
+  q: z.string().trim().max(150).default(''),
+});
+
+export function registerOpenworldPlayerDirectoryRoutes(
+  app: Hono<{ Variables: Variables }>,
+  options: Pick<ServerRouteOptions, 'db' | 'principal'> &
+    Partial<Pick<ServerRouteOptions, 'management'>>,
+  directory = createOpenworldPlayerDirectory(options.db, async (who, id, work) => {
+    if (!options.management) throw new DomainError('integration_unavailable');
+    const runtime = await options.management();
+    return runtime.fileReadScope(
+      who,
+      id,
+      work,
+      AbortSignal.timeout(30000),
+      'game.openworld.players.inspect',
+    );
+  }),
+) {
+  const base = '/v1/servers/:id/openworld/players/saved';
+  app.get(base, async (c) => {
+    c.header('cache-control', 'private, no-store');
+    const who = await options.principal(c);
+    const parsed = pagination.safeParse(c.req.query());
+    if (!parsed.success) throw new DomainError('validation_failed');
+    return c.json(await directory.list(who, c.req.param('id'), parsed.data.q, parsed.data.page));
+  });
+  app.post(`${base}/search`, async (c) => {
+    c.header('cache-control', 'private, no-store');
+    const who = await options.principal(c);
+    if (c.req.header('content-type')?.split(';')[0]?.trim().toLowerCase() !== 'application/json')
+      throw new DomainError('validation_failed');
+    const parsed = pagination
+      .extend({ excludeAccounts: z.array(z.string().regex(savedAccountId)).max(1024).default([]) })
+      .safeParse(await c.req.json().catch(() => undefined));
+    if (!parsed.success) throw new DomainError('validation_failed');
+    const { q, page, excludeAccounts } = parsed.data;
+    return c.json(await directory.list(who, c.req.param('id'), q, page, excludeAccounts));
+  });
+  app.get(`${base}/:uuid/skin`, async (c) => {
+    c.header('cache-control', 'private, no-store');
+    const who = await options.principal(c);
+    const view = c.req.query('view');
+    const hash = c.req.query('h');
+    if ((view !== 'head' && view !== 'body') || !hash || !/^[a-f0-9]{8}$/i.test(hash))
+      throw new DomainError('validation_failed');
+    const image = await directory.skin(
+      who,
+      c.req.param('id'),
+      c.req.param('uuid'),
+      view,
+      hash.toLowerCase(),
+    );
+    c.header('content-type', 'image/png');
+    c.header('x-content-type-options', 'nosniff');
+    c.header('content-security-policy', "default-src 'none'; sandbox");
+    return c.body(image);
+  });
+  app.get(`${base}/:uuid`, async (c) => {
+    c.header('cache-control', 'private, no-store');
+    return c.json(
+      await directory.detail(await options.principal(c), c.req.param('id'), c.req.param('uuid')),
+    );
+  });
+}

@@ -14,6 +14,8 @@ import {
   text,
 } from '../components/ui.js';
 
+import { dashboardSignIn } from './dashboard-sign-in.js';
+
 export function AuthLayout({ children }: { children: React.ReactNode }) {
   const t = useT();
   const { requestedLocale, setLocale } = useLocale();
@@ -63,13 +65,15 @@ export function Login() {
   const config = useWebConfig();
   const navigate = useNavigate();
   const [params] = useSearchParams();
+  const dashboard = dashboardSignIn(params);
   const securityReturn = params.get('reauth') === 'security';
+  const loginSearch = dashboard ? `?${dashboard.search}` : securityReturn ? '?reauth=security' : '';
   const [challenge, setChallenge] = useState(params.has('two-factor'));
   const [recovery, setRecovery] = useState(false);
   const [error, setError] = useState<unknown>();
   async function completed() {
     await identityChanged();
-    navigate(securityReturn ? '/settings/security' : '/', { replace: true });
+    navigate(dashboard?.path ?? (securityReturn ? '/settings/security' : '/'), { replace: true });
   }
   return (
     <AuthLayout>
@@ -138,8 +142,8 @@ export function Login() {
                     const result = await api<{ url: string }>('/api/auth/sign-in/social', {
                       body: {
                         provider: 'discord',
-                        callbackURL: `${location.origin}/auth/callback${securityReturn ? '?reauth=security' : ''}`,
-                        errorCallbackURL: `${location.origin}/login${securityReturn ? '?reauth=security' : ''}`,
+                        callbackURL: `${location.origin}/auth/callback${loginSearch}`,
+                        errorCallbackURL: `${location.origin}/login${loginSearch}`,
                       },
                     });
                     location.assign(result.url);

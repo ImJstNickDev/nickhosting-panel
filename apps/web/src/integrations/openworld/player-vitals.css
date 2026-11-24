@@ -1,0 +1,110 @@
+.ow-player-hud {
+  flex: 1 1 220px;
+  min-width: 0;
+  display: grid;
+  gap: 12px;
+  width: 100%;
+  max-width: 22rem;
+}
+.ow-hud-gauge {
+  --ow-track: #63323b;
+  --ow-fill: #ce3d50;
+  --ow-shine: #f68a92;
+  --ow-lowlight: #9c293a;
+  min-width: 0;
+}
+.ow-hud-hunger {
+  --ow-track: #68502f;
+  --ow-fill: #d8973e;
+  --ow-shine: #f9c67b;
+  --ow-lowlight: #956025;
+}
+.ow-hud-air {
+  --ow-track: #365560;
+  --ow-fill: #66b6cc;
+  --ow-shine: #b1e5ef;
+  --ow-lowlight: #39859e;
+}
+.ow-hud-label {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  padding-inline-start: 28px;
+  font:
+    700 0.82rem / 1.25 "OW Nunito",
+    sans-serif;
+}
+.ow-hud-label strong {
+  font:
+    500 0.88rem / 1 "OW Pixelify",
+    monospace;
+  font-variant-numeric: tabular-nums;
+}
+.ow-hud-bar {
+  position: relative;
+  display: flex;
+  align-items: center;
+  height: 20px;
+}
+.ow-hud-icon {
+  position: relative;
+  z-index: 1;
+  width: 24px;
+  height: 24px;
+  margin-right: -2px;
+  flex-shrink: 0;
+}
+.ow-hud-scale {
+  display: block;
+  height: 12px;
+  flex: 1;
+  box-sizing: content-box;
+  padding: 1px;
+  border: 2px solid #3d3939;
+  background: var(--ow-track);
+  box-shadow:
+    inset 0 1px #b7abab,
+    inset 0 -1px #857b7b;
+}
+.ow-hud-scale > span {
+  display: block;
+  height: 100%;
+  background: var(--ow-fill);
+  box-shadow:
+    inset 0 2px var(--ow-shine),
+    inset 0 -2px var(--ow-lowlight);
+}
+.ow-hud-reserve-scale {
+  position: absolute;
+  inset: 2px 3px auto 25px;
+  height: 3px;
+  background: #3b2c18;
+}
+.ow-hud-reserve-scale > span {
+  display: block;
+  height: 100%;
+  background: #ffe59b;
+}
+.ow-hud-gauge small {
+  display: block;
+  text-align: end;
+  margin-top: 1px;
+  color: var(--muted);
+  font-size: 0.72rem;
+}
+.ow-hud-gauge small b {
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+@media (forced-colors: active) {
+  .ow-hud-scale,
+  .ow-hud-reserve-scale {
+    border: 1px solid CanvasText;
+  }
+  .ow-hud-scale > span,
+  .ow-hud-reserve-scale > span {
+    background: Highlight;
+    forced-color-adjust: none;
+  }
+}

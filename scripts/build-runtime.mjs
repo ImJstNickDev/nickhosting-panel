@@ -33,6 +33,10 @@ for (const parent of ['apps', 'packages', 'games']) {
     );
   }
 }
+await cp(
+  'apps/api/src/openworld-thumbnail-worker.cjs',
+  `${output}/apps/api/src/openworld-thumbnail-worker.cjs`,
+);
 await cp('packages/database/migrations', `${output}/packages/database/migrations`, {
   recursive: true,
 });

@@ -1,4 +1,4 @@
-import { useQuery } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useEffect, useState } from 'react';
 import { useLocation } from 'react-router';
 import { ApiError, api } from '../api/client.js';
@@ -18,7 +18,10 @@ import {
   Textarea,
 } from '../components/ui.js';
 import { GlobalWakeSettings } from './auto-wake-policy.js';
+import { resetMetivaCatalogs } from './integration-metiva-token.js';
 import { domainSettingKeys, OwnerDomains } from './owner-domains.js';
+import { OwnerProxyManager } from './owner-proxy-manager.js';
+import { OwnerSecretForm } from './owner-secret-form.js';
 import { OwnerStoragePolicy } from './owner-storage-policy.js';
 import { GlobalSleepSettings } from './sleep-timeout.js';
 
@@ -70,6 +73,7 @@ const groups = [
   'content',
 ];
 export function OwnerSettingsPage() {
+  const queryClient = useQueryClient();
   const t = useT(),
     session = useSession();
   const format = useFormat();
@@ -168,6 +172,8 @@ export function OwnerSettingsPage() {
                   ![
                     ...domainSettingKeys,
                     'cloudflareZoneId',
+                    'npmApiUrl',
+                    'npmAcmeEmail',
                     'dnsBaseDomain',
                     'defaultIdleTimeoutSeconds',
                     'idleTimeoutUserAccess',
@@ -224,28 +230,42 @@ export function OwnerSettingsPage() {
         </Section>
       ))}
       <Section title={t('owner.credentials')}>
+        <span id="credentials" />
         <p className="muted">{t('owner.writeOnly')}</p>
         <div className="settings-list">
-          {value.secrets.map((secret) => (
-            <details key={secret.name}>
-              <summary>
-                {t(`owner.secret.${secret.name}`)}{' '}
-                <small>{t(secret.configured ? 'owner.configured' : 'web.unconfigured')}</small>
-              </summary>
-              {!editable || secret.locked ? (
-                <Notice>
-                  {t(editable ? 'owner.environmentLocked' : 'owner.readOnlySettings')}
-                </Notice>
-              ) : (
-                <SecretForm
-                  name={secret.name}
-                  onSaved={async () => {
-                    await settings.refetch();
-                  }}
-                />
-              )}
-            </details>
-          ))}
+          {value.secrets.map((secret) =>
+            secret.name === 'npmAccessToken' ? (
+              <OwnerProxyManager
+                key={secret.name}
+                config={value.config}
+                secret={secret}
+                editable={editable}
+                onSaved={() => settings.refetch()}
+              />
+            ) : (
+              <details key={secret.name}>
+                <summary>
+                  {t(`owner.secret.${secret.name}`)}{' '}
+                  <small>{t(secret.configured ? 'owner.configured' : 'web.unconfigured')}</small>
+                </summary>
+                {!editable || secret.locked ? (
+                  <Notice>
+                    {t(editable ? 'owner.environmentLocked' : 'owner.readOnlySettings')}
+                  </Notice>
+                ) : (
+                  <OwnerSecretForm
+                    path={`/v1/owner/secrets/${secret.name}`}
+                    allowClear={secret.name === 'metivaAccessToken' && secret.configured}
+                    onSaved={async () => {
+                      if (secret.name === 'metivaAccessToken')
+                        await resetMetivaCatalogs(queryClient);
+                      await settings.refetch();
+                    }}
+                  />
+                )}
+              </details>
+            ),
+          )}
         </div>
       </Section>
       <Dialog
@@ -380,30 +400,6 @@ function SettingForm({
           />
         ))}
       {primitiveArray && <small>{t('owner.onePerLine')}</small>}
-    </ActionForm>
-  );
-}
-function SecretForm({ name, onSaved }: { name: string; onSaved: () => Promise<void> }) {
-  const t = useT();
-  const [value, setValue] = useState('');
-  return (
-    <ActionForm
-      onSubmit={async () => {
-        await api(`/v1/owner/secrets/${name}`, { method: 'PUT', body: { value } });
-        setValue('');
-        await onSaved();
-      }}
-    >
-      <Input
-        label={t('owner.newCredential')}
-        name="value"
-        type="password"
-        autoComplete="new-password"
-        value={value}
-        onChange={(event) => setValue(event.target.value)}
-        required
-        maxLength={4096}
-      />
     </ActionForm>
   );
 }

@@ -68,6 +68,10 @@ function NotFound() {
 // Keep one route tree; the data router enables draft-safe SPA navigation blocking.
 const routes = createRoutesFromElements(
   <Route HydrateFallback={Loading} ErrorBoundary={RouteError}>
+    <Route
+      path="/dashboard/authorize"
+      lazy={() => import('./features/dashboard-sign-in-route.js')}
+    />
     <Route path="/login" lazy={page(auth, 'Login')} />
     <Route path="/invite/:token" lazy={page(auth, 'Invite')} />
     <Route path="/setup" lazy={page(auth, 'Setup')} />

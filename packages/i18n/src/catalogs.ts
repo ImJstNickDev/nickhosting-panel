@@ -140,6 +140,8 @@ export const en = {
   'errors.game_setup_conflict':
     'This server is already configured. Connect it using its existing administrator credentials.',
   'errors.game_request_unsupported': 'The game does not support this action.',
+  'errors.game_request_timeout': 'The game server took too long to respond.',
+  'errors.game_request_rejected': 'The game declined this action.',
   'errors.game_save_failed':
     'The game could not save the world. Check the server log and available storage before retrying.',
   'errors.resources_unavailable': 'There is not enough available capacity to start this server.',
@@ -344,6 +346,8 @@ export const it: Record<MessageKey, string> = {
   'errors.game_setup_conflict':
     'Questo server è già configurato. Collegalo usando le credenziali amministratore esistenti.',
   'errors.game_request_unsupported': 'Il gioco non supporta questa azione.',
+  'errors.game_request_timeout': 'Il server di gioco ha impiegato troppo tempo a rispondere.',
+  'errors.game_request_rejected': 'Il gioco ha rifiutato questa azione.',
   'errors.game_save_failed':
     'Il gioco non è riuscito a salvare il mondo. Controlla il log del server e lo spazio disponibile prima di riprovare.',
   'errors.resources_unavailable':

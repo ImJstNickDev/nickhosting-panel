@@ -120,6 +120,7 @@ export const applicationServerSchema = z.object({
     .object({
       startup_command: z.string(),
       image: z.string(),
+      skip_scripts: z.boolean().optional(),
       installed: z.union([z.boolean(), z.number()]),
       /** Internal attestation only. Never return this provider environment to browsers/logs. */
       environment: z
@@ -273,6 +274,6 @@ export type StartupUpdate = {
   environment: Record<string, string | number | boolean>;
   egg: number;
   image: string;
-  skip_scripts?: boolean;
+  skip_scripts: boolean;
 };
 export type PowerAction = 'start' | 'stop' | 'restart' | 'kill';

@@ -1,10 +1,12 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
+import { readFile } from 'node:fs/promises';
 import { type AuthContext, authSessionId, dnsNameWords, SecretCodec } from '@nickhosting/core';
 import { createTestDatabase } from '@nickhosting/database/testing';
 import { CloudflareDnsProvider, SftpGoAdapter } from '@nickhosting/external-services';
 import type { GameManifest } from '@nickhosting/game-sdk';
 import { sql } from 'kysely';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { openworldManifest } from '../../../games/openworld/src/manifest.js';
 import { satisfactoryManifest } from '../../../games/satisfactory/src/manifest.js';
 import {
   getGameConnectionAvailability,
@@ -209,7 +211,7 @@ async function fixture(mode: 'custom-subdomain' | 'static-host-port' = 'custom-s
   let loseSftpWrite = false,
     failSftpReadAfterWrite = false,
     failSftpWrites = false,
-    loseDnsWrite = false,
+    loseDnsWrite: boolean | 'SRV' = false,
     failDns = false;
   const sftpCalls: string[] = [],
     dnsCalls: string[] = [];
@@ -265,7 +267,7 @@ async function fixture(mode: 'custom-subdomain' | 'static-host-port' = 'custom-s
         records.delete(id);
         result = { id };
       }
-      if (loseDnsWrite) {
+      if (loseDnsWrite === true || (loseDnsWrite === 'SRV' && body.type === 'SRV')) {
         loseDnsWrite = false;
         throw new Error('isolated response lost');
       }
@@ -325,8 +327,8 @@ async function fixture(mode: 'custom-subdomain' | 'static-host-port' = 'custom-s
     failSftpWrites: (value: boolean) => {
       failSftpWrites = value;
     },
-    loseDns: () => {
-      loseDnsWrite = true;
+    loseDns: (kind: true | 'SRV' = true) => {
+      loseDnsWrite = kind;
     },
     failDns: (value: boolean) => {
       failDns = value;
@@ -335,6 +337,74 @@ async function fixture(mode: 'custom-subdomain' | 'static-host-port' = 'custom-s
       clock = new Date(clock.getTime() + 3_700_000);
     },
     subdomain: `fixture-${number}`,
+  };
+}
+
+async function legacyOpenworldDns(
+  reservation: 'active' | 'released' = 'active',
+  version = 'a1.2.10',
+) {
+  const f = await fixture();
+  const legacy = {
+    ...openworldManifest,
+    connection: { mode: 'custom-subdomain', zoneSettingKey: 'dnsBaseDomain' },
+  };
+  await f.db
+    .insertInto('game_integrations')
+    .values({ id: 'openworld', version: '1.0.0', manifest: JSON.stringify(legacy) })
+    .onConflict((oc) => oc.column('id').doUpdateSet({ manifest: JSON.stringify(legacy) }))
+    .execute();
+  await f.db
+    .updateTable('runtime_egg_mappings')
+    .where('game_id', '=', f.gameId)
+    .set({ game_id: 'openworld', runtime_id: 'dedicated' })
+    .execute();
+  await f.db
+    .insertInto('openworld_server_profiles')
+    .values({ server_id: f.serverId, version, sha256: '0'.repeat(64), size: 1 })
+    .execute();
+  await f.db
+    .updateTable('server_allocations')
+    .where('server_id', '=', f.serverId)
+    .set({ protocols: ['udp'] })
+    .execute();
+  await f.db
+    .updateTable('gateway_routes')
+    .where('server_id', '=', f.serverId)
+    .set({ transport: 'udp', public_port: 27123 })
+    .execute();
+  const id = randomUUID();
+  const assigned = await assignServerDns(
+    f.db,
+    f.context,
+    f.serverId,
+    { assignmentId: id, subdomain: f.subdomain },
+    f.options,
+  );
+  expect(assigned.connection.displayAddress).toBe(`${assigned.connection.hostname}:27123`);
+  expect(f.records.size).toBe(1);
+  const [address] = [...f.records.values()];
+  if (reservation === 'released')
+    await f.db
+      .updateTable('dns_hostname_reservations')
+      .where('owner_id', '=', id)
+      .where('hostname', '=', assigned.connection.hostname)
+      .set({ release_after: new Date() })
+      .execute();
+  const migration = await readFile(
+    new URL('../../database/migrations/096_openworld_dns_srv.sql', import.meta.url),
+    'utf8',
+  );
+  await f.db.transaction().execute(async (tx) => {
+    await sql`DROP INDEX dns_assignments_srv_upgrade`.execute(tx);
+    await sql.raw(migration).execute(tx);
+  });
+  return {
+    ...f,
+    id,
+    host: assigned.connection.hostname,
+    address,
+    service: `_openworld._udp.${assigned.connection.hostname}`,
   };
 }
 
@@ -1673,6 +1743,274 @@ describe('durable server external services', () => {
     expect(result.connection.records).toEqual([]);
     expect(s.dnsCalls).toEqual([]);
   });
+  it('leaves a released Openworld hostname out of the SRV backfill', async () => {
+    const f = await legacyOpenworldDns('released');
+    const before = f.dnsCalls.length;
+    await reconcileExternalServices(f.db, f.options);
+    expect(f.dnsCalls).toHaveLength(before);
+    expect([...f.records.values()]).toEqual([f.address]);
+    const row = await f.db
+      .selectFrom('dns_assignments')
+      .select(['plan', 'state'])
+      .where('id', '=', f.id)
+      .executeTakeFirstOrThrow();
+    expect(row.state).toBe('active');
+    expect(row.plan).not.toHaveProperty('reconcileSrv');
+  });
+  it('checks the Openworld wizard hostname before there is an installed version and validates its SRV at publication', async () => {
+    const f = await legacyOpenworldDns('active', 'a1.2.9');
+    await f.db
+      .insertInto('game_rollouts')
+      .values({ integration_id: 'openworld', state: 'public', allowlist: [] })
+      .onConflict((oc) => oc.column('integration_id').doUpdateSet({ state: 'public' }))
+      .execute();
+    const subdomain = 'after-version';
+    const host = `${subdomain}.example.test`;
+    f.records.set('f'.repeat(32), {
+      id: 'f'.repeat(32),
+      name: `_openworld._udp.${host}`,
+      type: 'TXT',
+      content: 'foreign',
+    });
+    const before = f.dnsCalls.length;
+    expect(
+      await getGameConnectionAvailability(f.db, f.context, 'openworld', { subdomain }, f.options),
+    ).toEqual({ available: true, hostname: host });
+    expect(f.dnsCalls.slice(before)).toEqual(['GET']);
+    await reconcileExternalServices(f.db, f.options);
+    expect(
+      (await updateServerDns(f.db, f.context, f.serverId, f.id, { subdomain }, f.options))
+        .connection.displayAddress,
+    ).toBe(`${host}:27123`);
+    await f.db
+      .updateTable('openworld_server_profiles')
+      .where('server_id', '=', f.serverId)
+      .set({ version: 'a1.2.10' })
+      .execute();
+    expect((await reconcileExternalServices(f.db, f.options)).failed).toBe(1);
+    expect(f.records.get('f'.repeat(32))?.content).toBe('foreign');
+    expect((await listServerDns(f.db, f.context, f.serverId))[0]?.connection.displayAddress).toBe(
+      `${host}:27123`,
+    );
+  });
+  it('publishes Openworld SRV only after a version upgrade and withdraws it on downgrade despite a lost delete acknowledgement', async () => {
+    const f = await legacyOpenworldDns('active', 'a1.2.9');
+    const version = (value: string) =>
+      f.db
+        .updateTable('openworld_server_profiles')
+        .set({ version: value })
+        .where('server_id', '=', f.serverId)
+        .execute();
+    const preview = () =>
+      previewServerDns(f.db, f.context, f.serverId, { subdomain: f.subdomain }, f.options);
+    const reconcile = async () => (await reconcileExternalServices(f.db, f.options)).failed;
+    const display = async () =>
+      (await listServerDns(f.db, f.context, f.serverId))[0]?.connection.displayAddress;
+    const explicit = `${f.host}:27123`;
+    // Even a mixed-transport allocation must publish the declared UDP port.
+    await f.db
+      .updateTable('server_allocations')
+      .where('server_id', '=', f.serverId)
+      .set({ protocols: ['tcp', 'udp'] })
+      .execute();
+    expect(await preview()).toMatchObject({
+      displayAddress: explicit,
+      records: [expect.objectContaining({ type: 'A' })],
+    });
+    expect(await reconcile()).toBe(0);
+    expect([...f.records.values()]).toEqual([f.address]);
+    await version('a1.2.10');
+    expect((await preview()).displayAddress).toBe(f.host);
+    expect(await display()).toBe(explicit);
+    expect(await reconcile()).toBe(0);
+    expect(await display()).toBe(f.host);
+    expect(f.records.size).toBe(2);
+    await version('a1.2.9');
+    expect(await display()).toBe(explicit);
+    f.loseDns();
+    expect(await reconcile()).toBe(1);
+    expect([...f.records.values()]).toEqual([f.address]);
+    expect(await reconcile()).toBe(0);
+    const row = await f.db
+      .selectFrom('dns_assignments')
+      .select(['state', 'ledger', 'plan'])
+      .where('id', '=', f.id)
+      .executeTakeFirstOrThrow();
+    expect(row).toMatchObject({
+      state: 'active',
+      ledger: [expect.objectContaining({ record: expect.objectContaining({ type: 'A' }) })],
+    });
+    expect(row.plan).not.toHaveProperty('reconcileSrv');
+    expect(await display()).toBe(explicit);
+    expect(
+      await f.db
+        .selectFrom('openworld_dashboard_dns')
+        .select('hostname')
+        .where('server_id', '=', f.serverId)
+        .executeTakeFirst(),
+    ).toEqual({ hostname: f.host });
+    expect(f.dnsCalls.filter((method) => method === 'DELETE')).toHaveLength(1);
+    expect(f.dnsCalls).not.toContain('PUT');
+  });
+
+  it('recreates Openworld SRV when an upgrade follows an unacknowledged downgrade deletion', async () => {
+    const f = await legacyOpenworldDns();
+    const version = (value: string) =>
+      f.db
+        .updateTable('openworld_server_profiles')
+        .set({ version: value })
+        .where('server_id', '=', f.serverId)
+        .execute();
+    const reconcile = async () => (await reconcileExternalServices(f.db, f.options)).failed;
+    expect(await reconcile()).toBe(0);
+    await version('a1.2.9');
+    f.loseDns();
+    expect(await reconcile()).toBe(1);
+    expect([...f.records.values()]).toEqual([f.address]);
+    await version('a1.2.10');
+    expect((await listServerDns(f.db, f.context, f.serverId))[0]?.connection.displayAddress).toBe(
+      `${f.host}:27123`,
+    );
+    expect(await reconcile()).toBe(0);
+    expect([...f.records.values()]).toEqual([
+      f.address,
+      expect.objectContaining({ type: 'SRV', name: f.service }),
+    ]);
+    expect((await listServerDns(f.db, f.context, f.serverId))[0]?.connection.displayAddress).toBe(
+      f.host,
+    );
+  });
+  it('recovers an unacknowledged Openworld SRV on a pending rename if its server downgrades', async () => {
+    const f = await legacyOpenworldDns();
+    expect((await reconcileExternalServices(f.db, f.options)).failed).toBe(0);
+    f.loseDns('SRV');
+    await expect(
+      updateServerDns(f.db, f.context, f.serverId, f.id, { subdomain: 'pending-name' }, f.options),
+    ).rejects.toThrow();
+    expect([...f.records.values()].filter((r) => r.type === 'SRV')).toHaveLength(2);
+    await f.db
+      .updateTable('openworld_server_profiles')
+      .set({ version: 'a1.2.9' })
+      .where('server_id', '=', f.serverId)
+      .execute();
+    expect((await reconcileExternalServices(f.db, f.options)).failed).toBe(0);
+    expect([...f.records.values()]).toEqual([
+      expect.objectContaining({ name: 'pending-name.example.test', type: 'A' }),
+    ]);
+    expect((await listServerDns(f.db, f.context, f.serverId))[0]?.connection.displayAddress).toBe(
+      'pending-name.example.test:27123',
+    );
+  });
+
+  it('retains a changed Openworld SRV and its address until provider ownership and contents are verified', async () => {
+    const f = await legacyOpenworldDns();
+    expect((await reconcileExternalServices(f.db, f.options)).failed).toBe(0);
+    const obj = [...f.records.entries()].find(([, r]) => r.type === 'SRV');
+    if (!obj) throw Error('Missing service record');
+    const [id, srv] = obj;
+    const downgrade = f.db
+      .updateTable('openworld_server_profiles')
+      .set({ version: 'a1.2.9' })
+      .where('server_id', '=', f.serverId);
+    await downgrade.execute();
+    for (const mismatch of [{ comment: 'foreign' }, { ttl: 999 }]) {
+      f.records.set(id, { ...srv, ...mismatch });
+      expect((await reconcileExternalServices(f.db, f.options)).failed).toBe(1);
+      expect(f.records.size).toBe(2);
+      expect(f.dnsCalls).not.toContain('DELETE');
+      expect((await listServerDns(f.db, f.context, f.serverId))[0]).toMatchObject({
+        state: 'active',
+        connection: { displayAddress: `${f.host}:27123` },
+      });
+    }
+    f.records.set(id, srv);
+    expect((await reconcileExternalServices(f.db, f.options)).failed).toBe(0);
+    expect([...f.records.values()]).toEqual([f.address]);
+  });
+  it('upgrades confirmed Openworld hosts to UDP SRV while preserving the address and web publication through collision and lost response', async () => {
+    const f = await legacyOpenworldDns();
+    const publication = () =>
+      f.db
+        .selectFrom('openworld_dashboard_dns')
+        .select('hostname')
+        .where('server_id', '=', f.serverId)
+        .executeTakeFirst();
+    const assignment = async () => (await listServerDns(f.db, f.context, f.serverId))[0];
+    await f.db
+      .updateTable('gateway_routes')
+      .where('server_id', '=', f.serverId)
+      .set({ public_port: 28111 })
+      .execute();
+    const foreignId = 'd'.repeat(32);
+    f.records.set(foreignId, {
+      id: foreignId,
+      type: 'SRV',
+      name: f.service,
+      ttl: 120,
+      data: { priority: 0, weight: 0, port: 27123, target: f.host },
+      comment: 'foreign',
+      proxied: false,
+    });
+    const conflict = await reconcileExternalServices(f.db, f.options);
+    expect(conflict.failed).toBe(1);
+    expect(await assignment()).toMatchObject({
+      state: 'active',
+      connection: { displayAddress: `${f.host}:27123` },
+    });
+    expect(await publication()).toEqual({ hostname: f.host });
+    expect(f.records.get(foreignId)?.comment).toBe('foreign');
+    f.records.delete(foreignId);
+    f.loseDns();
+    expect((await reconcileExternalServices(f.db, f.options)).failed).toBe(1);
+    expect(await publication()).toEqual({ hostname: f.host });
+    expect((await assignment())?.connection.displayAddress).toBe(`${f.host}:27123`);
+    expect((await reconcileExternalServices(f.db, f.options)).failed).toBe(0);
+    expect(await assignment()).toMatchObject({
+      state: 'active',
+      connection: { displayAddress: f.host, port: 28111 },
+    });
+    expect([...f.records.values()]).toEqual([
+      f.address,
+      expect.objectContaining({
+        type: 'SRV',
+        name: f.service,
+        data: { priority: 0, weight: 0, port: 28111, target: f.host },
+      }),
+    ]);
+    const calls = f.dnsCalls.length;
+    await reconcileExternalServices(f.db, f.options);
+    expect(f.dnsCalls).toHaveLength(calls);
+    expect(f.dnsCalls.filter((c) => c === 'POST')).toHaveLength(2);
+    expect(f.dnsCalls).not.toContain('PUT');
+    expect(f.dnsCalls).not.toContain('DELETE');
+  });
+  it.each(['rename', 'delete'] as const)(
+    'recovers an unacknowledged Openworld SRV during %s',
+    async (action) => {
+      const f = await legacyOpenworldDns();
+      f.loseDns();
+      expect((await reconcileExternalServices(f.db, f.options)).failed).toBe(1);
+      expect(f.records.size).toBe(2);
+      if (action === 'delete') {
+        await deleteServerDns(f.db, f.context, f.serverId, f.id, f.options);
+        expect(f.records.size).toBe(0);
+      } else {
+        const renamed = await updateServerDns(
+          f.db,
+          f.context,
+          f.serverId,
+          f.id,
+          { subdomain: 'new-openworld' },
+          f.options,
+        );
+        expect(renamed.connection.displayAddress).toBe('new-openworld.example.test');
+        expect([...f.records.values()].map((r) => r.name).sort()).toEqual([
+          '_openworld._udp.new-openworld.example.test',
+          'new-openworld.example.test',
+        ]);
+      }
+    },
+  );
   it('persists DNS ownership before effects, updates and releases hostname only after safe cleanup', async () => {
     const f = await fixture(),
       assignmentId = randomUUID();

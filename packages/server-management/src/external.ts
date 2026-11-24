@@ -906,7 +906,12 @@ export async function reconcileExternalServices(
   const assignments = await db
     .selectFrom('dns_assignments')
     .selectAll()
-    .where('state', 'not in', ['active', 'deleted'])
+    .where((eb) =>
+      eb.or([
+        eb('state', 'not in', ['active', 'deleted']),
+        eb.and([eb('state', '=', 'active'), sql<boolean>`plan @> '{"reconcileSrv":true}'::jsonb`]),
+      ]),
+    )
     .orderBy('updated_at')
     .limit(100)
     .execute();
@@ -1004,7 +1009,12 @@ export async function reconcileExternalServices(
             .selectAll()
             .where('id', '=', row.id)
             .executeTakeFirstOrThrow();
-          if (current.state !== 'deleted') await runDns(connection, current, options);
+          if (
+            current.state !== 'deleted' &&
+            (current.state !== 'active' ||
+              (current.plan as { reconcileSrv?: boolean }).reconcileSrv)
+          )
+            await runDns(connection, current, options);
         }),
       );
       recovered++;

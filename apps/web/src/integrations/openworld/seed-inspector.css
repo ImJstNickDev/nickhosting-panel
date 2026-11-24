@@ -1,0 +1,56 @@
+.ow-seed .ow-heading {
+  flex-wrap: wrap;
+  gap: 0.6rem;
+}
+.ow-seed-value {
+  margin: 1rem 0;
+  padding: 0.7rem 0;
+  border-block: 1px solid var(--line);
+}
+.ow-seed-value dt {
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+.ow-seed-value dd {
+  margin: 0.3rem 0;
+  overflow-wrap: anywhere;
+  font-size: 1.1rem;
+}
+.ow-seed-catalog h3 {
+  margin: 0;
+}
+.ow-seed-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.8rem;
+  align-items: end;
+  margin: 1rem 0;
+}
+.ow-seed-controls > * {
+  min-width: 0;
+  max-width: 100%;
+}
+.ow-seed-catalog ul {
+  list-style: none;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(14rem, 100%), 1fr));
+  gap: 0 1rem;
+}
+.ow-seed-catalog li {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  border-top: 1px solid var(--line);
+  padding: 0.55rem 0;
+  overflow-wrap: anywhere;
+  min-width: 0;
+}
+.ow-seed-catalog i {
+  display: block;
+  width: 0.75rem;
+  height: 0.75rem;
+  border-radius: 3px;
+  border: 1px solid #0003;
+  flex-shrink: 0;
+}

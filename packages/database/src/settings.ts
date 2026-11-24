@@ -14,7 +14,7 @@ import { evaluateGameAccess, gameManifestSchema, gameRolloutSchema } from '@nick
 import { type Kysely, sql, type Transaction } from 'kysely';
 import type { PoolClient } from 'pg';
 import type { Database } from './index.js';
-import { notifyGatewayChange } from './job-notifications.js';
+import { notifyGatewayChange, requeueOpenworldPublications } from './job-notifications.js';
 import { assertStoragePolicyIdle } from './storage-policy.js';
 
 type DB = Kysely<Database> | Transaction<Database>;
@@ -53,6 +53,55 @@ export async function recordAudit(
     .execute();
 }
 
+async function assertResourceSettingsFit(
+  tx: Transaction<Database>,
+  previous: Readonly<PlatformConfig>,
+  next: Readonly<PlatformConfig>,
+) {
+  await assertStoragePolicyIdle(tx);
+  // Policy changes must validate already committed reservations under the same
+  // lock as admission; switching storage modes cannot hide existing use.
+  const reservations = await tx.selectFrom('resource_reservations').selectAll().execute();
+  const servers = await tx
+    .selectFrom('managed_servers as s')
+    .innerJoin('runtime_egg_mappings as m', 'm.id', 's.mapping_id')
+    .select(['s.owner_id', 's.limits', 'm.feature_limits'])
+    .where('s.deleted_at', 'is', null)
+    .execute();
+  const exceptions = await tx.selectFrom('resource_user_limits').selectAll().execute();
+  const storageBudgets = await tx.selectFrom('storage_user_budgets').selectAll().execute();
+  if (servers.length > 0 && next.storagePolicy !== previous.storagePolicy)
+    throw new DomainError('conflict', 409, { reason: 'storage_policy_transition_required' });
+  const owners = new Set([
+    ...reservations.map((r) => r.owner_id),
+    ...servers.map((s) => s.owner_id),
+  ]);
+  for (const owner of owners) {
+    const exception = exceptions.find(
+      (e) => e.user_id === owner && (!e.expires_at || e.expires_at > new Date()),
+    );
+    const memory = exception?.memory_mib ?? next.defaultUserMemoryMiB;
+    const cpu = exception?.cpu_percent ?? next.defaultUserCpuPercent;
+    const storageBudget = storageBudgets.find((budget) => budget.user_id === owner);
+    const storage = Number(
+      storageBudget
+        ? (storageBudget.storage_mib ?? next.defaultUserStorageMiB)
+        : (exception?.storage_mib ?? next.defaultUserStorageMiB),
+    );
+    const active = reservations.filter((r) => r.owner_id === owner);
+    if (
+      active.reduce((s, r) => s + r.memory_mib, 0) > memory ||
+      active.reduce((s, r) => s + r.cpu_percent, 0) > cpu ||
+      (next.storagePolicy === 'PER_USER_BUDGET' &&
+        storage > 0 &&
+        servers
+          .filter((r) => r.owner_id === owner)
+          .reduce((s, r) => s + r.limits.disk * (1 + r.feature_limits.backups), 0) > storage)
+    )
+      throw new DomainError('conflict');
+  }
+}
+
 export async function updateSettings(
   db: Kysely<Database>,
   context: AuthContext,
@@ -63,10 +112,14 @@ export async function updateSettings(
   const parsedPatch = platformConfigPatchSchema.safeParse(patch);
   if (!parsedPatch.success) throw new DomainError('configuration_invalid');
   patch = parsedPatch.data;
+  const fields = Object.keys(parsedPatch.data);
+  const onlyNpmSettings =
+    fields.length > 0 && fields.every((field) => field === 'npmApiUrl' || field === 'npmAcmeEmail');
   return db.transaction().execute(async (tx) => {
-    await sql`select pg_advisory_xact_lock(hashtextextended(current_schema() || ':resources', 0))`.execute(
-      tx,
-    );
+    if (!onlyNpmSettings)
+      await sql`select pg_advisory_xact_lock(hashtextextended(current_schema() || ':resources', 0))`.execute(
+        tx,
+      );
     await sql`select pg_advisory_xact_lock(hashtextextended(current_schema() || ':settings', 0))`.execute(
       tx,
     );
@@ -75,7 +128,8 @@ export async function updateSettings(
       .select('value')
       .where('key', '=', 'platform')
       .executeTakeFirst();
-    assertConfigWritable(patch, resolveConfig(previous?.value ?? {}, env));
+    const current = resolveConfig(previous?.value ?? {}, env);
+    assertConfigWritable(patch, current);
     const value = {
       ...(normalizeLegacyContentSettings(previous?.value ?? {}) as Partial<PlatformConfig>),
       ...patch,
@@ -85,52 +139,22 @@ export async function updateSettings(
     for (const key of Object.keys(value) as Array<keyof PlatformConfig>)
       if (value[key] === undefined) delete value[key];
     const resolved = resolveConfig(value, env);
-    await assertStoragePolicyIdle(tx);
-    // Policy changes must validate already committed reservations under the same
-    // lock as admission; switching storage modes cannot hide existing use.
-    const reservations = await tx.selectFrom('resource_reservations').selectAll().execute();
-    const servers = await tx
-      .selectFrom('managed_servers as s')
-      .innerJoin('runtime_egg_mappings as m', 'm.id', 's.mapping_id')
-      .select(['s.owner_id', 's.limits', 'm.feature_limits'])
-      .where('s.deleted_at', 'is', null)
-      .execute();
-    const exceptions = await tx.selectFrom('resource_user_limits').selectAll().execute();
-    const storageBudgets = await tx.selectFrom('storage_user_budgets').selectAll().execute();
-    if (
-      servers.length > 0 &&
-      resolved.values.storagePolicy !==
-        resolveConfig(previous?.value ?? {}, env).values.storagePolicy
-    )
-      throw new DomainError('conflict', 409, { reason: 'storage_policy_transition_required' });
-    const owners = new Set([
-      ...reservations.map((r) => r.owner_id),
-      ...servers.map((s) => s.owner_id),
-    ]);
-    for (const owner of owners) {
-      const exception = exceptions.find(
-        (e) => e.user_id === owner && (!e.expires_at || e.expires_at > new Date()),
-      );
-      const memory = exception?.memory_mib ?? resolved.values.defaultUserMemoryMiB;
-      const cpu = exception?.cpu_percent ?? resolved.values.defaultUserCpuPercent;
-      const storageBudget = storageBudgets.find((budget) => budget.user_id === owner);
-      const storage = Number(
-        storageBudget
-          ? (storageBudget.storage_mib ?? resolved.values.defaultUserStorageMiB)
-          : (exception?.storage_mib ?? resolved.values.defaultUserStorageMiB),
-      );
-      const active = reservations.filter((r) => r.owner_id === owner);
+    if ('npmApiUrl' in patch) {
+      const oldUrl = current.values.npmApiUrl;
+      const newUrl = resolved.values.npmApiUrl;
       if (
-        active.reduce((s, r) => s + r.memory_mib, 0) > memory ||
-        active.reduce((s, r) => s + r.cpu_percent, 0) > cpu ||
-        (resolved.values.storagePolicy === 'PER_USER_BUDGET' &&
-          storage > 0 &&
-          servers
-            .filter((r) => r.owner_id === owner)
-            .reduce((s, r) => s + r.limits.disk * (1 + r.feature_limits.backups), 0) > storage)
+        oldUrl &&
+        new URL(oldUrl).origin !== (newUrl && new URL(newUrl).origin) &&
+        (env[envName('npmAccessToken', env)] ||
+          (await tx
+            .selectFrom('encrypted_secrets')
+            .select('name')
+            .where('name', '=', 'npmAccessToken')
+            .executeTakeFirst()))
       )
         throw new DomainError('conflict');
     }
+    if (!onlyNpmSettings) await assertResourceSettingsFit(tx, current.values, resolved.values);
     await tx
       .insertInto('platform_settings')
       .values({ key: 'platform', value })
@@ -150,7 +174,8 @@ export async function updateSettings(
       'autoWakeUserAccess' in patch
     )
       await notifyGatewayChange(tx);
-    await recordAudit(tx, context, 'settings.updated', { fields: Object.keys(patch) });
+    if ('npmApiUrl' in patch || 'npmAcmeEmail' in patch) await requeueOpenworldPublications(tx);
+    await recordAudit(tx, context, 'settings.updated', { fields });
     return resolved;
   });
 }
@@ -166,6 +191,8 @@ export const secretNames = [
   'cloudflareApiToken',
   'gatewayControlToken',
   'curseforgeApiKey',
+  'metivaAccessToken',
+  'npmAccessToken',
 ] as const;
 export type SecretName = (typeof secretNames)[number];
 const secretEnv: Record<SecretName, string> = {
@@ -179,17 +206,54 @@ const secretEnv: Record<SecretName, string> = {
   cloudflareApiToken: 'NH_CLOUDFLARE_API_TOKEN',
   gatewayControlToken: 'NH_GATEWAY_CONTROL_TOKEN',
   curseforgeApiKey: 'NH_CURSEFORGE_API_KEY',
+  metivaAccessToken: 'NH_METIVA_ACCESS_TOKEN',
+  npmAccessToken: 'NH_NPM_ACCESS_TOKEN',
 };
+
+export function gameMetivaSecret(gameId: string): `metiva:${string}` {
+  if (!/^[a-z][a-z0-9-]{0,63}$/.test(gameId)) throw new DomainError('validation_failed');
+  return `metiva:${gameId}`;
+}
+
+type StoredSecret = SecretName | ReturnType<typeof gameMetivaSecret>;
+
+function envName(name: StoredSecret, env: Environment): string {
+  if (name === 'npmAccessToken') {
+    if (env.NH_DEPLOYMENT_ENV === 'development') return 'NH_DEV_NPM_ACCESS_TOKEN';
+    if (env.NH_DEPLOYMENT_ENV === 'production') return 'NH_PROD_NPM_ACCESS_TOKEN';
+    return secretEnv.npmAccessToken;
+  }
+  if (name !== 'metivaAccessToken' && !name.startsWith('metiva:'))
+    return secretEnv[name as SecretName];
+  const suffix =
+    name === 'metivaAccessToken' ? '' : `_${name.slice(7).toUpperCase().replaceAll('-', '_')}`;
+  // The container entrypoint preserves its own deployment's scoped variables.
+  // A deployed process must not consume a local or other deployment's credential.
+  switch (env.NH_DEPLOYMENT_ENV) {
+    case 'development':
+      return `NH_DEV_METIVA_ACCESS_TOKEN${suffix}`;
+    case 'production':
+      return `NH_PROD_METIVA_ACCESS_TOKEN${suffix}`;
+    case undefined:
+      return `NH_METIVA_ACCESS_TOKEN${suffix}`;
+    default:
+      throw new DomainError('configuration_invalid');
+  }
+}
 
 export async function getSecret(
   db: DB,
   codec: SecretCodec,
-  name: SecretName,
+  name: StoredSecret,
   env: Environment = {},
 ) {
-  const override = env[secretEnv[name]];
+  const override = env[envName(name, env)];
   if (override !== undefined) {
-    if (!override.trim()) throw new DomainError('configuration_invalid');
+    if (
+      !override.trim() ||
+      (name === 'npmAccessToken' && !env[envName(name, env).replace('ACCESS_TOKEN', 'API_URL')])
+    )
+      throw new DomainError('configuration_invalid');
     return override;
   }
   const row = await db
@@ -197,7 +261,13 @@ export async function getSecret(
     .select('envelope')
     .where('name', '=', name)
     .executeTakeFirst();
-  return row ? codec.decrypt(row.envelope, name) : undefined;
+  if (!row) return;
+  if (name === 'npmAccessToken') {
+    const { npmApiUrl } = (await getSettings(db, env)).values;
+    if (!npmApiUrl) throw new DomainError('configuration_invalid');
+    return codec.decrypt(row.envelope, `${name}:${new URL(npmApiUrl).origin}`);
+  }
+  return codec.decrypt(row.envelope, name);
 }
 
 /** Only presence/source can be returned to HTTP clients. */
@@ -207,9 +277,9 @@ export async function secretStatus(db: DB, env: Environment = {}) {
     .filter((name) => name !== 'pterodactylClientKey')
     .map((name) => ({
       name,
-      configured: env[secretEnv[name]] !== undefined || rows.some((r) => r.name === name),
-      source: env[secretEnv[name]] !== undefined ? 'environment' : 'database',
-      locked: env[secretEnv[name]] !== undefined,
+      configured: env[envName(name, env)] !== undefined || rows.some((r) => r.name === name),
+      source: env[envName(name, env)] !== undefined ? 'environment' : 'database',
+      locked: env[envName(name, env)] !== undefined,
     }));
 }
 
@@ -217,14 +287,33 @@ export async function storeSecret(
   db: Kysely<Database>,
   context: AuthContext,
   codec: SecretCodec,
-  name: SecretName,
+  name: StoredSecret,
   value: string,
   env: Environment = {},
+  expectedOrigin?: string,
 ) {
   regularOwner(context);
-  if (env[secretEnv[name]] !== undefined) throw new DomainError('conflict');
-  const envelope = codec.encrypt(value, name);
+  if (env[envName(name, env)] !== undefined) throw new DomainError('conflict');
+  if (
+    (name === 'metivaAccessToken' || name.startsWith('metiva:')) &&
+    !/^mtv_[A-Za-z0-9_-]{1,1024}$/.test(value)
+  )
+    throw new DomainError('validation_failed');
+  if (name === 'npmAccessToken' && !/^[A-Za-z0-9._~-]{10,4096}$/.test(value))
+    throw new DomainError('validation_failed');
   await db.transaction().execute(async (tx) => {
+    let binding: string = name;
+    if (name === 'npmAccessToken') {
+      await sql`select pg_advisory_xact_lock(hashtextextended(current_schema() || ':settings', 0))`.execute(
+        tx,
+      );
+      const { npmApiUrl } = (await getSettings(tx, env)).values;
+      if (!npmApiUrl || !expectedOrigin || new URL(npmApiUrl).origin !== expectedOrigin)
+        throw new DomainError('conflict');
+      binding = `${name}:${expectedOrigin}`;
+      await requeueOpenworldPublications(tx);
+    }
+    const envelope = codec.encrypt(value, binding);
     await tx
       .insertInto('encrypted_secrets')
       .values({ name, envelope })
@@ -232,6 +321,60 @@ export async function storeSecret(
       .execute();
     await recordAudit(tx, context, 'secret.updated', { name });
   });
+}
+
+export async function clearProviderSecret(
+  db: Kysely<Database>,
+  context: AuthContext,
+  name: 'metivaAccessToken' | 'npmAccessToken' | ReturnType<typeof gameMetivaSecret>,
+  env: Environment = {},
+) {
+  regularOwner(context);
+  if (env[envName(name, env)] !== undefined) throw new DomainError('conflict');
+  await db.transaction().execute(async (tx) => {
+    if (name === 'npmAccessToken') {
+      await sql`select pg_advisory_xact_lock(hashtextextended(current_schema() || ':settings', 0))`.execute(
+        tx,
+      );
+      await requeueOpenworldPublications(tx);
+    }
+    await tx.deleteFrom('encrypted_secrets').where('name', '=', name).execute();
+    await recordAudit(tx, context, 'secret.removed', { name });
+  });
+}
+
+export async function getGameMetivaStatus(
+  db: DB,
+  context: AuthContext,
+  gameId: string,
+  env: Environment = {},
+) {
+  regularOwner(context);
+  const name = gameMetivaSecret(gameId);
+  const rows = await db
+    .selectFrom('encrypted_secrets')
+    .select('name')
+    .where('name', 'in', [name, 'metivaAccessToken'])
+    .execute();
+  const configured = (id: StoredSecret) =>
+    env[envName(id, env)] !== undefined || rows.some((row) => row.name === id);
+  return {
+    configured: configured(name),
+    inherited: configured('metivaAccessToken'),
+    locked: env[envName(name, env)] !== undefined,
+  };
+}
+
+export async function getGameMetivaToken(
+  db: DB,
+  codec: SecretCodec,
+  gameId: string,
+  env: Environment = {},
+) {
+  return (
+    (await getSecret(db, codec, gameMetivaSecret(gameId), env)) ??
+    getSecret(db, codec, 'metivaAccessToken', env)
+  );
 }
 
 export async function saveBootstrapConfiguration(
@@ -273,7 +416,7 @@ export async function saveBootstrapConfiguration(
     ['pterodactylApplicationKey', input.pterodactylApplicationKey],
   ];
   for (const [name, value] of entries) {
-    if (value && env[secretEnv[name]] === undefined)
+    if (value && env[envName(name, env)] === undefined)
       await client.query(
         'INSERT INTO encrypted_secrets(name,envelope) VALUES ($1,$2) ON CONFLICT(name) DO UPDATE SET envelope=excluded.envelope,updated_at=now()',
         [name, JSON.stringify(codec.encrypt(value, name))],

@@ -178,6 +178,9 @@ shared UI.
   Uniqueness is reserved in PostgreSQL, not assumed from randomness. Minecraft
   declares `_minecraft._tcp` SRV support so the primary game address omits its
   explicit port. Other roles/transports retain their ports.
+  A compiled integration may narrow its declared connection mode for the installed
+  release. DNS publication and player addresses use the same resolved mode. Openworld
+  enables UDP service discovery starting with a1.2.10.
 - `shared-host`: the integration declares a default label and whether users may
   replace it with a personal hostname. Shared hosts always show the assigned port;
   they have integration/domain ownership independent of any server's lifecycle.

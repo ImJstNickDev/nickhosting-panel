@@ -2,8 +2,12 @@ import { randomBytes } from 'node:crypto';
 import { type AuthContext, SecretCodec } from '@nickhosting/core';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
+  clearProviderSecret,
   createDatabase,
   gameCatalog,
+  gameMetivaSecret,
+  getGameMetivaStatus,
+  getGameMetivaToken,
   getSecret,
   getSettings,
   migrate,
@@ -90,6 +94,29 @@ describe('PostgreSQL platform authority', () => {
       .executeTakeFirstOrThrow();
     expect(() => codec.decrypt(stored.envelope, 'another-record')).toThrow('secret_invalid');
   });
+  it('keeps the scoped NPM bearer encrypted and binds edits to its configured API origin', async () => {
+    const db = database.db;
+    const bearer = randomBytes(30).toString('base64url');
+    await updateSettings(db, owner, {
+      npmApiUrl: 'https://proxy.example.test',
+      npmAcmeEmail: 'ca@example.test',
+    });
+    await expect(
+      storeSecret(db, owner, codec, 'npmAccessToken', bearer, {}, 'https://another.example.test'),
+    ).rejects.toMatchObject({ code: 'conflict' });
+    await storeSecret(db, owner, codec, 'npmAccessToken', bearer, {}, 'https://proxy.example.test');
+    await expect(
+      getSecret(db, codec, 'npmAccessToken', { NH_NPM_API_URL: 'https://another.example.test' }),
+    ).rejects.toMatchObject({ code: 'secret_invalid' });
+    expect(JSON.stringify(await secretStatus(db))).not.toContain(bearer);
+    expect(await getSecret(db, codec, 'npmAccessToken')).toBe(bearer);
+    await expect(
+      updateSettings(db, owner, { npmApiUrl: 'https://another.example.test' }),
+    ).rejects.toMatchObject({ code: 'conflict' });
+    await clearProviderSecret(db, owner, 'npmAccessToken');
+    await updateSettings(db, owner, { npmApiUrl: 'https://another.example.test' });
+    expect(await getSecret(db, codec, 'npmAccessToken')).toBeUndefined();
+  });
   it('completes bootstrap after legitimate early settings/secret writes without discarding other settings', async () => {
     const client = await database.pool.connect();
     const value = randomBytes(32).toString('base64url');
@@ -125,6 +152,57 @@ describe('PostgreSQL platform authority', () => {
     } finally {
       await reopened.db.destroy();
     }
+  });
+  it('protects Metiva tokens at both scopes, inherits and restores the platform token', async () => {
+    const db = database.db;
+    const localName = gameMetivaSecret('openworld');
+    const local = `mtv_${randomBytes(30).toString('hex')}`;
+    const global = `mtv_${randomBytes(30).toString('hex')}`;
+    await storeSecret(db, owner, codec, 'metivaAccessToken', global);
+    expect(await getGameMetivaToken(db, codec, 'openworld')).toBe(global);
+    await storeSecret(db, owner, codec, localName, local);
+    expect(await getGameMetivaToken(db, codec, 'openworld')).toBe(local);
+    expect(await getGameMetivaToken(db, codec, 'other')).toBe(global);
+    expect(await getGameMetivaStatus(db, owner, 'openworld')).toEqual({
+      configured: true,
+      inherited: true,
+      locked: false,
+    });
+    await expect(storeSecret(db, member, codec, localName, global)).rejects.toMatchObject({
+      code: 'forbidden',
+    });
+    await expect(
+      clearProviderSecret(db, owner, localName, { NH_METIVA_ACCESS_TOKEN_OPENWORLD: local }),
+    ).rejects.toMatchObject({ code: 'conflict' });
+    await expect(
+      clearProviderSecret(
+        db,
+        {
+          ...owner,
+          subjectUserId: 'member',
+          ownerElevation: true,
+          sessionType: 'support',
+          support: {
+            id: 'fixture',
+            reason: 'support fixture',
+            startedAt: new Date(),
+            lastActivityAt: new Date(),
+            expiresAt: new Date(Date.now() + 60_000),
+            revokedAt: null,
+          },
+        },
+        localName,
+      ),
+    ).rejects.toMatchObject({ code: 'forbidden' });
+    const stored = JSON.stringify(
+      (await database.pool.query('SELECT * FROM encrypted_secrets')).rows,
+    );
+    expect(stored).not.toContain(local);
+    expect(stored).not.toContain(global);
+    await clearProviderSecret(db, owner, localName);
+    expect(await getGameMetivaToken(db, codec, 'openworld')).toBe(global);
+    await clearProviderSecret(db, owner, 'metivaAccessToken');
+    expect(await getGameMetivaToken(db, codec, 'openworld')).toBeUndefined();
   });
   it('persists canonical rollout and filters catalog by actual user authority', async () => {
     const manifest = {

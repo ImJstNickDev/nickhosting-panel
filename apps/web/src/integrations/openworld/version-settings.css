@@ -1,0 +1,95 @@
+.ow-version-row,
+.ow-version-choice {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 1rem 2rem;
+}
+.ow-version-row > div,
+.ow-update-route > div {
+  display: grid;
+  gap: 0.25rem;
+}
+.ow-version-row strong,
+.ow-update-route strong {
+  font-size: 1.2rem;
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+.ow-update-route > span {
+  color: var(--muted);
+}
+.ow-version-row .muted,
+.ow-update-route > div > span {
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+.ow-version-choice {
+  align-items: end;
+  gap: 0.75rem;
+  margin-top: 1.25rem;
+}
+.ow-version-choice .field {
+  margin: 0;
+}
+.ow-update-dialog {
+  width: min(30rem, calc(100% - 2rem));
+}
+.ow-update-dialog form {
+  display: grid;
+  text-align: start;
+  gap: 1rem;
+}
+.ow-update-options .field {
+  margin: 0;
+}
+.ow-update-route > div:last-child {
+  text-align: end;
+}
+.ow-update-route {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  align-items: center;
+  gap: 0.75rem;
+  margin: 0;
+  padding: 0.85rem 0 1rem;
+  border-bottom: 1px solid var(--line);
+}
+.ow-update-route strong {
+  margin: 0;
+  font-weight: 650;
+}
+.ow-update-options {
+  display: grid;
+  gap: 0.65rem;
+}
+.ow-update-options input {
+  max-width: 8rem;
+}
+.ow-update-dialog form p {
+  margin: 0;
+  font-size: 0.9rem;
+  line-height: 1.4;
+}
+.ow-update-dialog .actions {
+  justify-content: end;
+}
+.ow-update-progress .provisioning-links {
+  flex-wrap: wrap;
+}
+@media (max-width: 650px) {
+  .ow-update-progress .provisioning-stages {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    row-gap: 0.5rem;
+  }
+  .ow-update-progress .provisioning-stages li:nth-child(3n)::after {
+    display: none;
+  }
+}
+
+.ow-update-options .workspace-switch-field {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}

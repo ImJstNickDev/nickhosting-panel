@@ -143,6 +143,144 @@ describe('durable explicit Gateway route registry', () => {
     expect(second.routes[0]?.revision).toBe(first.routes[0]?.revision);
   });
 
+  it('keeps a pinned Openworld route throughout an update notice and releases only the verified target on restart', async () => {
+    const route = await setGatewayRoute(f.db, f.owner, { ...input(), transport: 'udp' }, env);
+    await f.db
+      .insertInto('game_integrations')
+      .values({ id: 'openworld', version: '1.0.0', manifest: {} })
+      .onConflict((c) => c.column('id').doNothing())
+      .execute();
+    await f.db
+      .updateTable('runtime_egg_mappings')
+      .set({ game_id: 'openworld', runtime_id: 'dedicated' })
+      .where('id', '=', f.mappingId)
+      .execute();
+    const source = { version: 'a1.2.9', sha256: 'a'.repeat(64), size: 1234 };
+    const target = { ...source, version: 'a1.2.10', sha256: 'b'.repeat(64) };
+    const plan = {
+      openworldUpdate: {
+        source,
+        target,
+        waitForEmpty: false,
+        delaySeconds: 60,
+        backupBefore: false,
+      },
+    };
+    await f.db
+      .insertInto('openworld_server_profiles')
+      .values({ server_id: serverId, ...source })
+      .execute();
+    await f.db
+      .updateTable('gateway_server_states')
+      .set({ protocol_id: 'openworld', game_version: source.version })
+      .where('server_id', '=', serverId)
+      .execute();
+    const op = await f.db
+      .selectFrom('server_operations')
+      .select('job_id')
+      .where('server_id', '=', serverId)
+      .executeTakeFirstOrThrow();
+    await f.db
+      .updateTable('server_operations')
+      .set({ action: 'reinstall', plan: JSON.stringify(plan) })
+      .where('job_id', '=', op.job_id)
+      .execute();
+    await f.db
+      .updateTable('managed_servers')
+      .set({ active_operation_id: op.job_id })
+      .where('id', '=', serverId)
+      .execute();
+    await f.db
+      .insertInto('openworld_server_updates')
+      .values({ job_id: op.job_id, server_id: serverId, phase: 'preparing' })
+      .execute();
+    const snapshot = async () =>
+      (await getGatewaySnapshot(f.db, env)).routes.map((r) => [r.id, r.protocol?.gameVersion]);
+    expect(await snapshot()).toEqual([[route.id, source.version]]);
+    for (const phase of [
+      'waiting-empty',
+      'notice',
+      'cancelled',
+      'stopping',
+      'installing',
+      'verifying',
+      'starting',
+    ] as const) {
+      await f.db
+        .updateTable('openworld_server_updates')
+        .set({ phase })
+        .where('job_id', '=', op.job_id)
+        .execute();
+      expect(await snapshot()).toEqual(
+        ['waiting-empty', 'notice', 'cancelled', 'stopping'].includes(phase)
+          ? [[route.id, source.version]]
+          : [],
+      );
+    }
+    await f.db
+      .updateTable('openworld_server_updates')
+      .set({ phase: 'stopping' })
+      .where('job_id', '=', op.job_id)
+      .execute();
+    const currentRoute = async () =>
+      (await getGatewaySnapshot(f.db, env)).routes.find((r) => r.id === route.id);
+    expect((await currentRoute())?.presentation?.stopping).toBeUndefined();
+    await f.db
+      .updateTable('server_operations')
+      .set({
+        plan: JSON.stringify({
+          openworldUpdate: { ...plan.openworldUpdate, waitForEmpty: true, delaySeconds: 0 },
+        }),
+      })
+      .where('job_id', '=', op.job_id)
+      .execute();
+    expect(await currentRoute()).toMatchObject({
+      mode: expect.any(String),
+      presentation: { stopping: true },
+    });
+    await f.db
+      .updateTable('openworld_server_updates')
+      .set({ phase: 'waiting-empty' })
+      .where('job_id', '=', op.job_id)
+      .execute();
+    const reopened = await currentRoute();
+    expect(reopened?.id).toBe(route.id);
+    expect(reopened?.presentation?.stopping).toBeUndefined();
+    await f.db
+      .updateTable('openworld_server_updates')
+      .set({ phase: 'stopping' })
+      .where('job_id', '=', op.job_id)
+      .execute();
+    await f.db
+      .updateTable('server_operations')
+      .set({ plan: JSON.stringify({ ...plan, backupOfflineConfirmed: true }) })
+      .where('job_id', '=', op.job_id)
+      .execute();
+    expect(await snapshot()).toEqual([]);
+    await f.db
+      .updateTable('openworld_server_updates')
+      .set({ phase: 'starting' })
+      .where('job_id', '=', op.job_id)
+      .execute();
+    await f.db
+      .updateTable('server_operations')
+      .set({ plan: JSON.stringify({ ...plan, openworldVersionVerified: true }) })
+      .where('job_id', '=', op.job_id)
+      .execute();
+    expect(await snapshot()).toEqual([]);
+    await f.db
+      .updateTable('openworld_server_profiles')
+      .set(target)
+      .where('server_id', '=', serverId)
+      .execute();
+    expect(await snapshot()).toEqual([]);
+    await f.db
+      .updateTable('gateway_server_states')
+      .set({ game_version: target.version })
+      .where('server_id', '=', serverId)
+      .execute();
+    expect(await snapshot()).toEqual([[route.id, target.version]]);
+  });
   it('withdraws an active reinstall without renewing its lease, then restores its route', async () => {
     const route = await setGatewayRoute(f.db, f.owner, input(), env);
     const before = await getGatewaySnapshot(f.db, env);

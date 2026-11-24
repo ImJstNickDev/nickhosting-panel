@@ -32,6 +32,7 @@ import {
   resolveBackupMode,
 } from './backup-policy.js';
 import { effectiveNodeOverhead } from './configuration.js';
+import type { GameUpdateHooks } from './game-version-update.js';
 import { isGatewayConsoleSleep } from './gateway-console-contract.js';
 import { reconcileGatewayState } from './gateway-orchestration.js';
 import {
@@ -56,6 +57,8 @@ import { assertNoPendingUpload } from './upload-admission.js';
 
 type Server = Selectable<Database['managed_servers']>;
 type Operation = Selectable<Database['server_operations']>;
+class UpdateStopDeferred extends Error {}
+
 type Result =
   | 'succeeded'
   | 'failed'
@@ -162,7 +165,13 @@ export interface LifecycleOptions {
     };
   } | null>;
   /** Game hooks run under the same pinned server lock and durable effect journal. */
+  gameVersionUpdate?: (context: GameLifecycleContext) => Promise<GameUpdateHooks | undefined>;
+  gameInstallerEnvironment?: (
+    context: GameLifecycleContext,
+    current?: ApplicationServer,
+  ) => Promise<Record<string, string> | undefined>;
   configureGameProvision?: (context: GameLifecycleContext) => Promise<boolean>;
+  prepareGameStart?: (context: GameLifecycleContext) => Promise<void>;
   finalizeGameStart?: (context: GameLifecycleContext) => Promise<boolean>;
   cleanupGameSecrets?: (serverId: string, db: Kysely<Database>) => Promise<void>;
   prepareGameStop?: (context: GameLifecycleContext) => Promise<void>;
@@ -315,6 +324,14 @@ const installed = (remote: ApplicationServer) =>
   !remote.status && (remote.container.installed === true || remote.container.installed === 1);
 const installationPending = (remote: ApplicationServer) =>
   remote.status === 'installing' || !remote.container.installed;
+const updateRequiresStoppedProcess = (operation: Pick<Operation, 'action' | 'phase' | 'plan'>) =>
+  operation.action === 'reinstall' &&
+  operation.plan.managedVersionUpdate === true &&
+  operation.plan.backupOfflineConfirmed === true &&
+  operation.plan.gameVersionVerified !== true &&
+  operation.plan.gameUpdatePreinstallFailure === undefined &&
+  operation.plan.backupFailed !== true &&
+  operation.phase !== 'backup_resume';
 /** Only pre-effect mod mutations can own a reservation recreated by reconciliation. */
 const pendingSatisfactoryMods = (
   operation: Pick<Operation, 'action' | 'phase' | 'effect_state' | 'plan'>,
@@ -349,7 +366,7 @@ function processStartTime(value: unknown): bigint | null {
 }
 
 /** A PostgreSQL session lock spans bounded provider calls but no DB transaction does. */
-async function withServerLock<T>(
+export async function withServerLock<T>(
   db: Kysely<Database>,
   serverId: string,
   work: (connection: Kysely<Database>) => Promise<T>,
@@ -684,17 +701,27 @@ export async function processServerOperation(
         })
         .execute();
     };
+    const managedUpdate =
+      operation.action === 'reinstall' && operation.plan.managedVersionUpdate === true;
+    let updateHooks: GameUpdateHooks | undefined;
+    const versionUpdate = async () => {
+      updateHooks ??= await options.gameVersionUpdate?.(gameContext());
+      if (!updateHooks) throw new DomainError('configuration_invalid');
+      return updateHooks;
+    };
     const wait = async (
       reason = 'waiting',
       errorCode: string | null = null,
       minimumDelayMs = 0,
+      nextCheck?: Date,
     ): Promise<Result> => {
       const poll = typeof operation.plan.pollCount === 'number' ? operation.plan.pollCount + 1 : 1;
       const processConfirmation =
         options.observeProcessStart !== undefined &&
         (['start', 'restart'].includes(operation.action) ||
           (operation.action === 'provision' && operation.phase === 'initial_start') ||
-          (operation.action === 'backup' && operation.phase === 'backup_resume')) &&
+          ((operation.action === 'backup' || managedUpdate) &&
+            operation.phase === 'backup_resume')) &&
         [
           'power_confirmation',
           'start_terminal_unproven',
@@ -715,6 +742,7 @@ export async function processServerOperation(
           ? 2000
           : Math.min(10_000, 1_000 * 2 ** Math.min(poll, 4));
       let next = new Date(nowOf(options).getTime() + delay + Math.floor(Math.random() * 500));
+      if (nextCheck) next = nextCheck;
       const notBefore = nowOf(options).getTime() + minimumDelayMs;
       await db.transaction().execute(async (tx) => {
         await tx
@@ -723,7 +751,10 @@ export async function processServerOperation(
           .where('id', '=', jobId)
           .forUpdate()
           .executeTakeFirstOrThrow();
-        if (['provision', 'reinstall'].includes(operation.action)) {
+        if (
+          ['provision', 'reinstall'].includes(operation.action) &&
+          (!managedUpdate || reason.startsWith('installation'))
+        ) {
           const receipt = await tx
             .selectFrom('server_events')
             .select('id')
@@ -758,6 +789,12 @@ export async function processServerOperation(
           )
             next = nowOf(options);
         }
+        if (
+          managedUpdate &&
+          nextCheck &&
+          (await (await versionUpdate()).cancelled({ ...gameContext(), db: tx }))
+        )
+          next = nowOf(options);
         // A provider cooldown also survives an installation/backup notification:
         // neither that event nor a recreated worker may retry before Retry-After.
         next = new Date(Math.max(next.getTime(), notBefore));
@@ -985,6 +1022,7 @@ export async function processServerOperation(
             .where('id', '=', server.id)
             .where('active_operation_id', '=', jobId)
             .execute();
+          if (managedUpdate) await (await versionUpdate()).finish(tx, jobId, success);
           await tx
             .updateTable('operation_jobs')
             .set({
@@ -1122,7 +1160,7 @@ export async function processServerOperation(
         }),
       );
     };
-    const recoverModReservation = async (): Promise<boolean> => {
+    const recoverOfflineReservation = async (): Promise<boolean> => {
       const reserved = await db
         .selectFrom('resource_reservations')
         .select('operation_id')
@@ -1171,21 +1209,29 @@ export async function processServerOperation(
           .forUpdate()
           .executeTakeFirst();
         if (!reservation) return true;
+        const versionUpdate = updateRequiresStoppedProcess(current);
+        const installer = await tx
+          .selectFrom('installation_reservations')
+          .select('operation_id')
+          .where('server_id', '=', server.id)
+          .executeTakeFirst();
         if (
           fresh.deleted_at ||
           fresh.active_operation_id !== jobId ||
           fresh.node_id !== server.node_id ||
           fresh.owner_id !== server.owner_id ||
-          fresh.installation_state !== 'installed' ||
+          (fresh.installation_state !== 'installed' &&
+            !(
+              versionUpdate &&
+              (fresh.installation_state === 'installing' ||
+                (fresh.installation_state === 'failed' &&
+                  current.plan.installationEffectPrepared === true))
+            )) ||
           current.lease_token !== token ||
-          !pendingSatisfactoryMods(current) ||
+          (!versionUpdate && !pendingSatisfactoryMods(current)) ||
           reservation.operation_id !== jobId ||
           reservation.physical_host_id !== node.physical_host_id ||
-          (await tx
-            .selectFrom('installation_reservations')
-            .select('server_id')
-            .where('server_id', '=', server.id)
-            .executeTakeFirst())
+          (installer && !(versionUpdate && installer.operation_id === jobId))
         )
           return false;
         await tx
@@ -1213,7 +1259,14 @@ export async function processServerOperation(
           .forShare()
           .execute();
         const remote = await ownedRemote(tx, fresh, options);
-        if (!installed(remote)) return false;
+        // The installer has its own capacity claim. Releasing the stopped game's
+        // claim cannot release installer capacity or confirm installer completion.
+        const knownInstallerState =
+          versionUpdate &&
+          current.plan.installationEffectPrepared === true &&
+          (['install_failed', 'reinstall_failed'].includes(remote.status ?? '') ||
+            (installer?.operation_id === jobId && installationPending(remote)));
+        if (!installed(remote) && !knownInstallerState) return false;
         const observerPreflight = options.verifyObservationHost?.(server.id, tx);
         await observerPreflight;
         if (
@@ -1228,7 +1281,21 @@ export async function processServerOperation(
           .where('server_id', '=', server.id)
           .where('operation_id', '=', jobId)
           .execute();
-        await event('servers.operation.stop_confirmed', { source: 'content_quiescence' }, tx);
+        if (versionUpdate)
+          await tx
+            .updateTable('managed_servers')
+            .set({
+              runtime_state: 'offline',
+              readiness: 'unknown',
+              last_observed_at: nowOf(options),
+            })
+            .where('id', '=', server.id)
+            .execute();
+        await event(
+          'servers.operation.stop_confirmed',
+          { source: versionUpdate ? 'version_update_quiescence' : 'content_quiescence' },
+          tx,
+        );
         return true;
       });
     };
@@ -1285,6 +1352,7 @@ export async function processServerOperation(
       if (
         !onlineWorldContent &&
         !metadataContent &&
+        !(managedUpdate && ['backup_stop', 'backup_resume'].includes(phase)) &&
         [
           'configure',
           'reinstall',
@@ -1333,7 +1401,7 @@ export async function processServerOperation(
                 acknowledged: false,
                 // Backup completion, retention and resume are distinct effects. A
                 // rejected earlier phase cannot label an admitted resume as rejected.
-                ...(operation.action === 'backup'
+                ...(operation.action === 'backup' || (managedUpdate && phase === 'backup_resume')
                   ? { rejected: false, rejectionCode: undefined }
                   : {}),
                 waitReason: null,
@@ -1395,6 +1463,7 @@ export async function processServerOperation(
         try {
           if (operation.plan.gatewayAutomation !== undefined)
             assertGatewaySleepFence(operation.plan, nowOf(options));
+          if (finalPowerIdentity) await options.prepareGameStart?.(gameContext());
           if (worldFileContent) {
             // Revalidate current local identity and policy after durable intent.
             // A changed mapping/ownership cannot borrow an earlier remote proof.
@@ -1536,6 +1605,7 @@ export async function processServerOperation(
       try {
         result = await timed('provider_effect', () => perform(verifiedServer));
       } catch (error) {
+        if (error instanceof UpdateStopDeferred) return false;
         const modContent = operation.plan.satisfactoryContent as
           | { kind?: string; mode?: string }
           | undefined;
@@ -1597,7 +1667,15 @@ export async function processServerOperation(
           await options.verifyObservationHost?.(server.id, db);
           if (mutating)
             await timed('authorization', () => options.authorizeEffect(jobId, server.id, db));
-          await timed('provider_identity', () => ownedRemote(db, server, options));
+          const verified = await timed('provider_identity', () => ownedRemote(db, server, options));
+          if (
+            managedUpdate &&
+            mutating &&
+            !(await options.confirmAlreadyStopped?.(server.id, db, {
+              providerServer: Promise.resolve(verified),
+            }))
+          )
+            return false;
           return true;
         } catch {
           return false;
@@ -1953,10 +2031,33 @@ export async function processServerOperation(
         },
       );
     };
+    const deferUpdateStop = async () => {
+      const hooks = await versionUpdate();
+      await db.transaction().execute(async (tx) => {
+        await hooks.deferStop(tx, jobId);
+        const attempts = { ...(operation.plan.effectAttempts as Record<string, number>) };
+        delete attempts.backup_stop;
+        await update(
+          {
+            phase: 'planned',
+            effect_state: 'none',
+            effect_started_at: null,
+            plan: {
+              ...operation.plan,
+              backupWasRunning: undefined,
+              backupPriorIntent: undefined,
+              backupGatewayGeneration: undefined,
+              effectAttempts: attempts,
+            },
+          },
+          tx,
+        );
+      });
+    };
     const prepareStandaloneBackup = async (): Promise<boolean> => {
       const request = backupOptionsSchema.parse(operation.plan.backupOptions ?? {});
       const policy = await options.backupPolicy?.(gameContext());
-      const mode = resolveBackupMode(request.mode, policy);
+      const mode = managedUpdate ? 'offline' : resolveBackupMode(request.mode, policy);
       if (operation.plan.backupMode !== mode)
         await update({ plan: { ...operation.plan, backupMode: mode } });
       if (mode === 'offline' && operation.plan.backupOfflineConfirmed !== true) {
@@ -1989,7 +2090,10 @@ export async function processServerOperation(
           });
         }
         if (operation.plan.backupWasRunning === true && operation.phase !== 'backup_stop') {
-          await effect('backup_stop', async (verifiedServer) => {
+          const stopped = await effect('backup_stop', async (verifiedServer) => {
+            if (managedUpdate) {
+              await (await versionUpdate()).beforeStop(gameContext()).catch(() => {});
+            }
             await options.prepareGameStop?.(gameContext());
             await options.adapter.stopWithConfirmation(
               server.pterodactyl_id ?? 0,
@@ -1999,6 +2103,13 @@ export async function processServerOperation(
                 beforePower: async () => {
                   await ownedRemote(db, server, options);
                   await options.authorizeEffect(jobId, server.id, db);
+                  if (managedUpdate) {
+                    if (!(await (await versionUpdate()).allowStop(gameContext()))) {
+                      await deferUpdateStop();
+                      throw new UpdateStopDeferred();
+                    }
+                    await update({ plan: { ...operation.plan, gameUpdateStopHandedOff: true } });
+                  }
                 },
                 authorize: async () => {
                   try {
@@ -2017,6 +2128,7 @@ export async function processServerOperation(
               },
             );
           });
+          if (!stopped) return false;
         }
         // Recovery may prove that the temporary stop completed even after its reply was lost.
         if (!options.confirmAlreadyStopped || !(await options.confirmAlreadyStopped(server.id, db)))
@@ -2033,7 +2145,10 @@ export async function processServerOperation(
             })
             .where('id', '=', server.id)
             .execute();
-          if (typeof operation.plan.backupGatewayGeneration === 'string')
+          if (
+            (!managedUpdate || operation.plan.backupWasRunning === true) &&
+            typeof operation.plan.backupGatewayGeneration === 'string'
+          )
             await tx
               .updateTable('gateway_server_states')
               .set({
@@ -2059,7 +2174,10 @@ export async function processServerOperation(
           plan: { ...operation.plan, backupOfflineConfirmed: true },
         });
       }
-      if (operation.plan.backupPrepared !== true) {
+      if (
+        (!managedUpdate || operation.plan.backupBefore === true) &&
+        operation.plan.backupPrepared !== true
+      ) {
         await update({ plan: { ...operation.plan, backupPreparationStarted: true } });
         try {
           await options.prepareBackup?.(gameContext(), mode);
@@ -2234,6 +2352,12 @@ export async function processServerOperation(
           });
         }
       }
+      return resumeStoppedServer(mode, success);
+    };
+    const resumeStoppedServer = async (
+      mode: 'offline' | 'live',
+      success: boolean,
+    ): Promise<Result> => {
       if (
         mode !== 'offline' ||
         operation.plan.backupWasRunning !== true ||
@@ -2298,7 +2422,11 @@ export async function processServerOperation(
             },
           });
           await blockBackupResume(safeError(error).code);
-          return finish(success, false, success ? null : 'integration_unavailable');
+          return finish(
+            managedUpdate ? false : success,
+            false,
+            managedUpdate ? safeError(error).code : success ? null : 'integration_unavailable',
+          );
         }
       }
       if (!options.observeProcessStart || !operation.effect_started_at)
@@ -2351,9 +2479,11 @@ export async function processServerOperation(
         });
         await blockBackupResume(String(operation.plan.rejectionCode ?? 'integration_unavailable'));
         return finish(
-          operation.plan.backupComplete === true,
+          !managedUpdate && operation.plan.backupComplete === true,
           false,
-          operation.plan.backupComplete === true ? null : 'integration_unavailable',
+          !managedUpdate && operation.plan.backupComplete === true
+            ? null
+            : 'integration_unavailable',
         );
       }
       if (
@@ -2614,6 +2744,45 @@ export async function processServerOperation(
       }
       return finish(true, true, null, false, true);
     };
+    const updateBackupDidFail = () =>
+      managedUpdate &&
+      operation.plan.installationEffectPrepared !== true &&
+      operation.plan.backupOfflineConfirmed === true &&
+      (operation.plan.backupFailed === true ||
+        (operation.phase === 'backup' &&
+          operation.plan.rejected === true &&
+          operation.effect_state === 'none'));
+    const resumeAfterUpdateBackupFailure = async () => {
+      if (operation.plan.backupFailed !== true)
+        await update({ plan: { ...operation.plan, backupFailed: true } });
+      return resumeStoppedServer('offline', false);
+    };
+    const resumeUnchangedVersion = async (code: string) => {
+      // No installer dispatch occurred. Release its claim before reacquiring the
+      // ordinary compute reservation used to restore the previous service.
+      if (operation.plan.gameUpdatePreinstallFailure === undefined)
+        await db.transaction().execute(async (tx) => {
+          await lockResources(tx);
+          await tx
+            .deleteFrom('installation_reservations')
+            .where('server_id', '=', server.id)
+            .where('operation_id', '=', jobId)
+            .execute();
+          if (operation.plan.previousInstallationState === 'installed')
+            await tx
+              .updateTable('managed_servers')
+              .set({ installation_state: 'installed' })
+              .where('id', '=', server.id)
+              .execute();
+          await update({ plan: { ...operation.plan, gameUpdatePreinstallFailure: code } }, tx);
+        });
+      return resumeStoppedServer('offline', false);
+    };
+    const resumeUpdatedServer = async () => {
+      if (operation.plan.backupWasRunning === true)
+        await (await versionUpdate()).stage(gameContext(), 'starting');
+      return resumeStoppedServer('offline', true);
+    };
     try {
       const command = parseCommand(job.command);
       if (
@@ -2622,6 +2791,36 @@ export async function processServerOperation(
         command.payload.operationId !== jobId
       )
         throw new DomainError('validation_failed');
+      if (managedUpdate) {
+        if (await (await versionUpdate()).cancelled(gameContext())) return finish(false);
+        if (operation.phase === 'backup_resume' && operation.plan.rejected === true)
+          return recoverRejectedBackup();
+        if (
+          operation.phase === 'backup_stop' &&
+          operation.plan.gameUpdateStopHandedOff !== true &&
+          operation.plan.rejected !== true
+        ) {
+          // A worker interrupted before the final player-count check cannot have sent power.
+          await deferUpdateStop();
+          return wait('game_update_wait');
+        }
+        if (typeof operation.plan.gameUpdatePreinstallFailure === 'string')
+          return resumeUnchangedVersion(operation.plan.gameUpdatePreinstallFailure);
+        if (updateBackupDidFail()) return resumeAfterUpdateBackupFailure();
+        if (operation.plan.gameVersionVerified === true) return resumeUpdatedServer();
+        if (operation.plan.backupOfflineConfirmed !== true) {
+          const hooks = await versionUpdate();
+          if (!options.confirmAlreadyStopped) throw new DomainError('configuration_invalid');
+          const confirmed = options.confirmAlreadyStopped;
+          const phase = await hooks.prepare(
+            gameContext(),
+            () => confirmed(server.id, db),
+            () => nowOf(options),
+          );
+          if (phase.state === 'cancelled') return finish(false);
+          if (phase.state === 'wait') return wait('game_update_wait', null, 0, phase.next);
+        }
+      }
       if (operation.plan.rejected === true)
         return operation.action === 'backup'
           ? recoverRejectedBackup()
@@ -2678,7 +2877,14 @@ export async function processServerOperation(
             )
               throw new DomainError('allocation_unavailable');
             await options.reserveInstallation(server.id, jobId, db);
-            await effect('provision', () => options.adapter.createServer(plan));
+            const installEnvironment = await options.gameInstallerEnvironment?.(gameContext());
+            await effect('provision', () =>
+              options.adapter.createServer(
+                installEnvironment
+                  ? { ...plan, environment: { ...plan.environment, ...installEnvironment } }
+                  : plan,
+              ),
+            );
             remote = await options.adapter.findServerByExternalId(server.external_id);
           }
           if (!remote) return wait('provision_outcome_unknown');
@@ -3184,6 +3390,9 @@ export async function processServerOperation(
           await update({ plan: { ...operation.plan, transitionObserved: true } });
         return wait('power_confirmation');
       }
+      if (managedUpdate && operation.plan.backupOfflineConfirmed !== true) {
+        if (!(await prepareStandaloneBackup())) return wait('game_update_stop');
+      }
       if (operation.action === 'backup') {
         if (operation.plan.backupComplete === true || operation.plan.backupFailed === true)
           return completeStandaloneBackup();
@@ -3217,8 +3426,19 @@ export async function processServerOperation(
           }))
         )
           throw new DomainError('operation_uncertain');
+      } else if (managedUpdate) {
+        // Reconfirm after the persisted offline proof; never install over an
+        // independently (re)started process. A running installer has its own receipt.
+        if (!(await recoverOfflineReservation()))
+          return wait('game_update_stop', 'operation_uncertain');
+        await requireQuiescentReservation();
+        if (
+          operation.plan.installationEffectPrepared !== true &&
+          !(await options.confirmAlreadyStopped?.(server.id, db))
+        )
+          return wait('game_update_stop');
       } else if (!onlineWorldContent && !metadataContent) {
-        if (pendingSatisfactoryMods(operation) && !(await recoverModReservation()))
+        if (pendingSatisfactoryMods(operation) && !(await recoverOfflineReservation()))
           return wait('offline_confirmation', 'operation_uncertain');
         await requireQuiescentReservation();
         if (!(await offline())) return wait('offline_confirmation');
@@ -3230,6 +3450,7 @@ export async function processServerOperation(
         return finish(true);
       }
       if (operation.plan.backupBefore === true && operation.plan.backupComplete !== true) {
+        if (managedUpdate) await (await versionUpdate()).stage(gameContext(), 'backup');
         if (!(await backup())) return wait('backup_confirmation');
       }
       if (operation.action === 'delete') {
@@ -3402,6 +3623,7 @@ export async function processServerOperation(
         // Game configuration may add durable phases after the installer. Never
         // interpret those phases as permission to run the installer again.
         if (operation.plan.installationEffectPrepared !== true) {
+          if (managedUpdate) await (await versionUpdate()).stage(gameContext(), 'installing');
           if (!options.reserveInstallation) throw new DomainError('configuration_invalid');
           await options.reserveInstallation(server.id, jobId, db);
           if (operation.plan.previousInstallationState === undefined)
@@ -3415,6 +3637,44 @@ export async function processServerOperation(
             .execute();
           await progress('installing');
           options.onInstallationAvailable?.(jobId, server.id);
+          const installEnvironment = await options.gameInstallerEnvironment?.(
+            gameContext(),
+            remote,
+          );
+          if (installEnvironment) {
+            // Refresh a version-scoped download URL when the previous installation's
+            // URL has expired. Keep it out of the durable job and event journal.
+            const original = await db
+              .selectFrom('server_operations')
+              .select('plan')
+              .where('server_id', '=', server.id)
+              .where('action', '=', 'provision')
+              .orderBy('job_id')
+              .limit(1)
+              .executeTakeFirstOrThrow();
+            const provision = provisionPlanSchema.parse(original.plan.provision);
+            const current = remote.container.environment;
+            if (
+              !current ||
+              provision.eggId !== remote.egg ||
+              provision.dockerImage !== remote.container.image
+            )
+              throw new DomainError('conflict');
+            const environment = Object.fromEntries(
+              Object.entries(provision.environment).map(([key, defaultValue]) => [
+                key,
+                current[key] ?? defaultValue,
+              ]),
+            );
+            await gameContext().authorize();
+            await options.adapter.updateStartup(remote.id, {
+              egg: remote.egg,
+              image: remote.container.image,
+              startup: remote.container.startup_command,
+              environment: { ...environment, ...installEnvironment },
+              skip_scripts: false,
+            });
+          }
           await effect('reinstall', async () => {
             await options.adapter.reinstallWithConfirmation(
               server.pterodactyl_id ?? 0,
@@ -3452,6 +3712,13 @@ export async function processServerOperation(
             !(await options.configureGameProvision(gameContext()))
           )
             return wait('game_configuration');
+          if (managedUpdate) {
+            const hooks = await versionUpdate();
+            await hooks.stage(gameContext(), 'verifying');
+            await hooks.verify(gameContext());
+            await update({ plan: { ...operation.plan, gameVersionVerified: true } });
+            return resumeUpdatedServer();
+          }
           return finish(true, true);
         }
         return wait('installation');
@@ -3629,6 +3896,16 @@ export async function processServerOperation(
         await update({ plan: { ...operation.plan, backupFailed: true } });
         return completeStandaloneBackup();
       }
+      if (
+        managedUpdate &&
+        operation.plan.backupOfflineConfirmed === true &&
+        operation.plan.installationEffectPrepared !== true &&
+        operation.phase !== 'backup_resume' &&
+        error instanceof DomainError &&
+        ['resources_unavailable', 'configuration_invalid', 'allocation_unavailable'].includes(code)
+      )
+        return resumeUnchangedVersion(code);
+      if (updateBackupDidFail()) return resumeAfterUpdateBackupFailure();
       if (operation.plan.rejected === true || operation.plan.backupFailed === true)
         return finish(false, false, code);
       if (operation.effect_state === 'prepared' || operation.effect_state === 'uncertain')
@@ -3917,6 +4194,10 @@ export async function reconcileManagedServer(
       .limit(1)
       .executeTakeFirst();
     const restart = latestPower?.action === 'restart';
+    const resumedOperation =
+      (latestPower?.action === 'backup' ||
+        (latestPower?.action === 'reinstall' && latestPower.plan.managedVersionUpdate === true)) &&
+      latestPower.plan.backupResumeOutcome === 'succeeded';
     const epoch = processStartTime(
       restart ? latestPower?.plan.restartProcessStartedAt : latestPower?.plan.startProcessStartedAt,
     );
@@ -3931,14 +4212,11 @@ export async function reconcileManagedServer(
     if (
       reservation &&
       latestPower &&
-      ['start', 'restart', 'provision', 'backup'].includes(latestPower.action) &&
-      (latestPower.phase === 'complete' ||
-        (latestPower.action === 'backup' &&
-          latestPower.plan.backupResumeOutcome === 'succeeded')) &&
+      (['start', 'restart', 'provision', 'backup'].includes(latestPower.action) ||
+        resumedOperation) &&
+      (latestPower.phase === 'complete' || resumedOperation) &&
       (latestPower.job_state === 'succeeded' ||
-        (latestPower.job_state === 'failed' &&
-          latestPower.action === 'backup' &&
-          latestPower.plan.backupResumeOutcome === 'succeeded')) &&
+        (latestPower.job_state === 'failed' && resumedOperation)) &&
       latestPower.effect_state === 'confirmed' &&
       latestPower.effect_started_at &&
       (restart ? latestPower.plan.restartConfirmed : latestPower.plan.startConfirmed) === true &&
@@ -3962,7 +4240,7 @@ export async function reconcileManagedServer(
       }
     }
   }
-  const activeModOperation =
+  const activeOfflineOperation =
     server.active_operation_id &&
     current.current_state !== 'offline' &&
     server.runtime_state === 'offline'
@@ -3973,9 +4251,19 @@ export async function reconcileManagedServer(
           .where('server_id', '=', server.id)
           .executeTakeFirst()
       : undefined;
+  // A resources sample may predate the stop inside an ongoing version update.
+  if (
+    activeOfflineOperation &&
+    updateRequiresStoppedProcess(activeOfflineOperation) &&
+    options.confirmAlreadyStopped
+  ) {
+    suppressCachedRunning = await options.confirmAlreadyStopped(server.id, db, {
+      providerServer: Promise.resolve(remote),
+    });
+  }
   const activeStoppedMods =
-    activeModOperation &&
-    pendingSatisfactoryMods(activeModOperation) &&
+    activeOfflineOperation &&
+    pendingSatisfactoryMods(activeOfflineOperation) &&
     server.installation_state === 'installed' &&
     installed(remote) &&
     !(await db

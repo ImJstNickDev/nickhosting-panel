@@ -6,8 +6,9 @@ export interface ServerPermissionDefinition {
   key: string;
   resource: string;
   kind: 'read' | 'write' | 'additional';
-  legacy: 'read' | 'operate' | 'manage';
+  legacy: 'read' | 'operate' | 'manage' | 'explicit';
   labelKey?: string;
+  descriptionKey?: string;
   resourceLabelKey?: string;
 }
 export type ServerPermissionKey = string;
@@ -47,12 +48,23 @@ export function legacyServerPermissionKeys(
   return definitions
     .filter(
       (definition) =>
-        role === 'owner' ||
-        (definition.resource !== 'subusers' &&
-          (role === 'manager' ||
-            definition.legacy === 'read' ||
-            (role === 'operator' && definition.legacy === 'operate'))),
+        definition.legacy !== 'explicit' &&
+        (role === 'owner' ||
+          (definition.resource !== 'subusers' &&
+            (role === 'manager' ||
+              definition.legacy === 'read' ||
+              (role === 'operator' && definition.legacy === 'operate')))),
     )
+    .map(({ key }) => key);
+}
+
+/** Native administrative access can be inherited only from ownership of the actual server. */
+export function ownerServerPermissionKeys(
+  definitions: readonly ServerPermissionDefinition[],
+  personalOwner: boolean,
+) {
+  return definitions
+    .filter((item) => personalOwner || item.legacy !== 'explicit')
     .map(({ key }) => key);
 }
 
@@ -66,7 +78,10 @@ export function assertServerPermissionKeys(
   const known = new Map(definitions.map((definition) => [definition.key, definition]));
   for (const key of keys) {
     const definition = known.get(key);
-    if (!definition || !keys.includes(`${definition.resource}.read`))
+    if (
+      !definition ||
+      (definition.legacy !== 'explicit' && !keys.includes(`${definition.resource}.read`))
+    )
       throw new DomainError('validation_failed');
   }
 }

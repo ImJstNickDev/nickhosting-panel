@@ -1,0 +1,263 @@
+.ow-map-views {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 3px;
+  padding: 3px;
+  margin-bottom: 16px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+}
+.ow-map-views button.secondary {
+  min-height: 34px;
+  padding: 5px 14px;
+  border: 0;
+  box-shadow: none;
+  color: var(--muted);
+  background: transparent;
+  font-size: 0.85rem;
+}
+.ow-map-views button[aria-pressed="true"] {
+  background: #e3eee9;
+  color: var(--ow-primary);
+}
+.ow-map-counts,
+.ow-orbit-facts {
+  margin: 0 0 16px;
+  font-variant-numeric: tabular-nums;
+}
+.ow-map-counts {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+.ow-map-counts dt,
+.ow-orbit-facts dt,
+.ow-map-layer-note {
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+.ow-map-counts dd {
+  margin: 3px 0 0;
+  font-size: 1.3rem;
+  font-weight: 650;
+}
+.ow-species-scroll {
+  max-height: 300px;
+  overflow: auto;
+}
+.ow-species {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.85rem;
+}
+.ow-species th,
+.ow-species td {
+  text-align: start;
+  font-weight: 450;
+  padding: 7px 0;
+  border-bottom: 1px solid var(--line);
+  overflow-wrap: anywhere;
+}
+.ow-species thead th {
+  position: sticky;
+  top: 0;
+  background: var(--surface);
+  color: var(--muted);
+  font-size: 0.76rem;
+}
+.ow-species tr > :last-child {
+  text-align: end;
+  font-variant-numeric: tabular-nums;
+  padding-inline-start: 8px;
+}
+.ow-creature-pin,
+.ow-map-key i.ow-creature-dot {
+  background: #efae66;
+  border: 1.5px solid #4a2e14;
+  border-radius: 50%;
+}
+.ow-creature-pin {
+  position: absolute;
+  width: 10px;
+  height: 10px;
+  transform: translate(-50%, -50%);
+  box-shadow: 0 0 0 1px #fff8;
+}
+.ow-space-plot {
+  min-width: 0;
+}
+.ow-space-select {
+  margin: 0 0 10px;
+}
+.ow-space-select .field {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.ow-space-select select {
+  min-width: 0;
+  width: auto;
+}
+.ow-space-stage {
+  position: relative;
+  overflow: hidden;
+  width: 100%;
+  aspect-ratio: 27 / 20;
+  border-radius: 8px;
+  background: #16242c;
+  color: #f7f9fa;
+  isolation: isolate;
+}
+.ow-space-stage svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+.ow-orbit-axis,
+.ow-orbit-ring {
+  fill: none;
+  vector-effect: non-scaling-stroke;
+  stroke: #58717f;
+  stroke-width: 1px;
+}
+.ow-orbit-axis {
+  stroke: #334752;
+  stroke-dasharray: 3 5;
+}
+.ow-space-stage button.ow-orbit-body {
+  position: absolute;
+  display: grid;
+  place-items: center;
+  transform: translate(-50%, -50%);
+  width: 24px;
+  height: 24px;
+  min-width: 0;
+  min-height: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  box-shadow: none;
+}
+.ow-orbit-body i {
+  height: 9px;
+  width: 9px;
+  border-radius: 50%;
+  background: #92cada;
+  box-shadow: 0 0 0 1px #16242c;
+}
+.ow-orbit-light i {
+  width: 13px;
+  height: 13px;
+  background: #f1c46b;
+}
+.ow-orbit-body[aria-pressed="true"] i {
+  outline: 1px solid #f5f5f0;
+  outline-offset: 3px;
+}
+.ow-orbit-body:focus-visible {
+  outline: 2px solid white;
+  z-index: 2;
+}
+.ow-orbit-checkpoint,
+.ow-orbit-traveler {
+  stroke: white;
+  stroke-width: 1px;
+  vector-effect: non-scaling-stroke;
+}
+.ow-orbit-traveler {
+  fill: #eecb70;
+}
+.ow-map-key .ow-key-traveler {
+  background: #eecb70;
+  clip-path: polygon(50% 0, 100% 100%, 0 100%);
+}
+.ow-map-key .ow-key-checkpoint {
+  background: #629776;
+  border-radius: 0;
+}
+.ow-orbit-facts > div,
+.ow-orbit-roster li {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 5px 0;
+}
+.ow-orbit-facts dd,
+.ow-orbit-roster small {
+  margin: 0;
+  text-align: end;
+  overflow-wrap: anywhere;
+  font-size: 0.85rem;
+}
+.ow-orbit-details button.ow-orbit-link {
+  min-height: 0;
+  color: var(--ow-primary);
+  border: 0;
+  padding: 0;
+  background: transparent;
+  box-shadow: none;
+  text-decoration: underline;
+  overflow-wrap: anywhere;
+}
+.ow-orbit-roster {
+  margin: 16px 0 0;
+  border-top: 1px solid var(--line);
+  padding-top: 14px;
+}
+.ow-orbit-roster ul {
+  max-height: 180px;
+  overflow: auto;
+  list-style: none;
+  padding: 0;
+  margin: 5px 0;
+}
+.ow-orbit-roster li {
+  align-items: baseline;
+  overflow-wrap: anywhere;
+}
+.ow-orbit-roster li,
+.ow-orbit-roster .ow-empty {
+  font-size: 0.85rem;
+}
+.ow-orbit-roster small {
+  color: var(--muted);
+  font-size: 0.75rem;
+}
+
+.ow-orbit-body span {
+  position: absolute;
+  top: 100%;
+  left: 50%;
+  transform: translateX(-50%);
+  color: white;
+  background: #16242cdd;
+  padding: 1px 3px;
+  border-radius: 2px;
+  display: none;
+  font-size: 0.7rem;
+  max-width: 96px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  pointer-events: none;
+}
+.ow-orbit-body[aria-pressed="true"] span,
+.ow-orbit-body:hover span,
+.ow-orbit-body:focus-visible span {
+  display: block;
+}
+.ow-map-layer-note {
+  margin: 9px 0 0;
+}
+
+.ow-session-spawning {
+  border-block-start: 1px solid var(--line);
+  padding-block: 0.7rem;
+}
+.ow-session-spawning small {
+  display: block;
+  margin-block-start: 0.2rem;
+  color: var(--muted);
+}

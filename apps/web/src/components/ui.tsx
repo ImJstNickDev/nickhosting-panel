@@ -64,7 +64,11 @@ export function ErrorNotice({ error, retry }: { error: unknown; retry?: () => vo
   const normalized = error instanceof ApiError ? error : apiError(error);
   return (
     <div className="notice error" role="alert">
-      <p>{t(normalized.messageKey)}</p>
+      <p>
+        {normalized.code === 'rate_limited' && normalized.retryAfterSeconds
+          ? t('web.rateLimitedRetry', { seconds: normalized.retryAfterSeconds })
+          : t(normalized.messageKey)}
+      </p>
       {normalized.requestId && normalized.messageKey !== 'auth.step_up_required' && (
         <small>{t('web.errorReference', { id: normalized.requestId })}</small>
       )}

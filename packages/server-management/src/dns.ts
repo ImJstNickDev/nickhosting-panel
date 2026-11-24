@@ -19,6 +19,7 @@ import {
 import {
   CloudflareDnsProvider,
   type ConnectionPlan,
+  type DnsRecord,
   type OwnedDnsRecord,
   ProviderRateLimitError,
   planConnection,
@@ -26,6 +27,7 @@ import {
 import { evaluateGameAccess, gameManifestSchema } from '@nickhosting/game-sdk';
 import type { Kysely, Selectable } from 'kysely';
 import { z } from 'zod';
+import { effectiveConnectionMode } from './connection-address.js';
 import { cachedDnsAvailability } from './dns-availability.js';
 import { reserveDnsWizardHostname } from './dns-reservations.js';
 import { dnsLocked, type ExternalServiceOptions, locked } from './external.js';
@@ -43,6 +45,9 @@ type DnsIntent = Authority & {
   scope: string;
   connection: ConnectionPlan;
   confirmedConnection?: ConnectionPlan;
+  // The current connection stays published while its version-dependent SRV is reconciled.
+  reconcileSrv?: true;
+  preparedSrv?: Extract<DnsRecord, { type: 'SRV' }>;
   action: 'apply' | 'delete';
   domainId?: string;
   sharedHostId?: string;
@@ -70,18 +75,28 @@ const dnsRequest = serverConnectionRequest.extend({
 });
 async function integration(db: Kysely<Database>, serverId: string) {
   const server = await db
-    .selectFrom('managed_servers')
-    .selectAll()
-    .where('id', '=', serverId)
+    .selectFrom('managed_servers as s')
+    .innerJoin('runtime_egg_mappings as m', 'm.id', 's.mapping_id')
+    .innerJoin('game_integrations as g', 'g.id', 'm.game_id')
+    .leftJoin('game_connection_versions as p', (join) =>
+      join.onRef('p.server_id', '=', 's.id').onRef('p.game_id', '=', 'm.game_id'),
+    )
+    .selectAll('s')
+    .select(['g.id as gameId', 'g.manifest', 'p.version as installedVersion'])
+    .where('s.id', '=', serverId)
     .executeTakeFirst();
   if (!server || server.deleted_at) throw new DomainError('not_found');
-  const game = await db
-    .selectFrom('runtime_egg_mappings as m')
-    .innerJoin('game_integrations as g', 'g.id', 'm.game_id')
-    .select(['g.id', 'g.manifest'])
-    .where('m.id', '=', server.mapping_id)
-    .executeTakeFirstOrThrow();
-  return { server, gameId: game.id, manifest: parse(gameManifestSchema, game.manifest) };
+  const manifest = parse(gameManifestSchema, server.manifest);
+  return {
+    server,
+    gameId: server.gameId,
+    manifest,
+    connection: effectiveConnectionMode(
+      manifest.connection,
+      server.gameId,
+      server.installedVersion,
+    ),
+  };
 }
 export async function getServerConnectionOptions(
   db: Kysely<Database>,
@@ -91,7 +106,7 @@ export async function getServerConnectionOptions(
 ) {
   await authorizeServer(db, context, serverId, 'network.read');
   const [game, settings] = await Promise.all([integration(db, serverId), getSettings(db, env)]);
-  const options = resolveDnsOptions(settings.values, game.manifest.connection, game.gameId);
+  const options = resolveDnsOptions(settings.values, game.connection, game.gameId);
   const ready =
     options.mode === 'static-host-port' ||
     (await secretStatus(db, env)).some((s) => s.name === 'cloudflareApiToken' && s.configured);
@@ -157,7 +172,8 @@ async function prepareGameConnectionLookup(
     (d) => d.id === (domainId ?? choices.defaultDomainId),
   );
   if (!domain || !choices.configured) throw new DomainError('configuration_invalid');
-  return { connection, config, domain };
+  // The wizard has no installed profile. Check release-dependent service names at publication.
+  return { connection: effectiveConnectionMode(connection, gameId, null), config, domain };
 }
 export async function getGameConnectionAvailability(
   db: Kysely<Database>,
@@ -379,6 +395,51 @@ export async function releaseServerDnsClaims(
 ) {
   await releaseNames(db, serverId, null, options);
 }
+async function connectionEndpoint(
+  db: Kysely<Database>,
+  game: Awaited<ReturnType<typeof integration>>,
+  portRole?: string,
+) {
+  const { server, manifest } = game;
+  const allocations = await db
+    .selectFrom('server_allocations')
+    .selectAll()
+    .where('server_id', '=', server.id)
+    .execute();
+  const allocation = portRole
+    ? allocations.find((a) => a.role === portRole)
+    : allocations.find((a) => a.is_primary);
+  if (!allocation || !manifest.ports.some((p) => p.role === allocation.role))
+    throw new DomainError('configuration_invalid');
+  const direct = server.connection_mode === 'direct' ? allocation.direct_endpoint : null;
+  if (server.connection_mode === 'direct' && !direct)
+    throw new DomainError('configuration_invalid');
+  const srv =
+    game.connection.mode === 'custom-subdomain' && allocation.is_primary
+      ? game.connection.srv
+      : undefined;
+  const route =
+    server.connection_mode === 'gateway'
+      ? await db
+          .selectFrom('gateway_routes')
+          .select(['public_port', 'transport'])
+          .where('allocation_id', '=', allocation.id)
+          .where('server_id', '=', server.id)
+          .where('enabled', '=', true)
+          .execute()
+      : [];
+  // Only the public endpoint is suitable for clients resolving an SRV record.
+  // The game transport stays the same when this version cannot discover it through SRV.
+  const declared =
+    manifest.connection.mode === 'custom-subdomain' && allocation.is_primary
+      ? manifest.connection.srv
+      : undefined;
+  const transport = srv?.proto ?? declared?.proto ?? allocation.protocols[0];
+  const port = direct?.port ?? route.find((r) => r.transport === transport)?.public_port;
+  if (!port || !transport || !allocation.protocols.includes(transport))
+    throw new DomainError('configuration_invalid');
+  return { direct, srv, port };
+}
 async function connectionPlan(
   db: Kysely<Database>,
   serverId: string,
@@ -387,40 +448,10 @@ async function connectionPlan(
   ownerId?: string,
 ) {
   const request = parse(dnsRequest, input);
-  const { server, manifest, gameId } = await integration(db, serverId);
+  const game = await integration(db, serverId);
+  const { manifest, gameId } = game;
   const { values: config } = await getSettings(db, options.env);
-  const allocations = await db
-    .selectFrom('server_allocations')
-    .selectAll()
-    .where('server_id', '=', serverId)
-    .execute();
-  const allocation = request.portRole
-    ? allocations.find((a) => a.role === request.portRole)
-    : allocations.find((a) => a.is_primary);
-  if (!allocation || !manifest.ports.some((p) => p.role === allocation.role))
-    throw new DomainError('configuration_invalid');
-  const direct = server.connection_mode === 'direct' ? allocation.direct_endpoint : null;
-  if (server.connection_mode === 'direct' && !direct)
-    throw new DomainError('configuration_invalid');
-  const srv =
-    manifest.connection.mode === 'custom-subdomain' && allocation.is_primary
-      ? manifest.connection.srv
-      : undefined;
-  const route =
-    server.connection_mode === 'gateway'
-      ? await db
-          .selectFrom('gateway_routes')
-          .select(['public_port', 'transport'])
-          .where('allocation_id', '=', allocation.id)
-          .where('enabled', '=', true)
-          .execute()
-      : [];
-  // Legacy fixtures/installations have no route yet; a published Gateway address
-  // always takes precedence over its private backend allocation.
-  const port =
-    direct?.port ??
-    route.find((r) => r.transport === (srv?.proto ?? allocation.protocols[0]))?.public_port;
-  if (!port) throw new DomainError('configuration_invalid');
+  const { direct, srv, port } = await connectionEndpoint(db, game, request.portRole);
   if (manifest.connection.mode === 'static-host-port') {
     if (request.subdomain || request.domainId) throw new DomainError('validation_failed');
     const host =
@@ -449,8 +480,6 @@ async function connectionPlan(
     ? (domain.target ?? config.dnsTarget)
     : (direct?.hostname ?? domain.target ?? config.dnsTarget);
   if (!target) throw new DomainError('configuration_invalid');
-  if (srv && !allocation.protocols.includes(srv.proto))
-    throw new DomainError('configuration_invalid');
   let label = request.subdomain
     ? validateDnsLabel(request.subdomain, config)
     : shared
@@ -511,6 +540,8 @@ export async function previewServerDns(
 }
 function publicDns(row: DnsRow) {
   const intent = row.plan as DnsIntent;
+  const confirmed = row.state === 'active' ? intent.connection : intent.confirmedConnection;
+  const visible = confirmed ?? intent.connection;
   return {
     id: row.id,
     serverId: row.server_id,
@@ -518,9 +549,12 @@ function publicDns(row: DnsRow) {
     domainId: intent.domainId ?? 'legacy',
     shared: Boolean(intent.sharedHostId),
     connection:
-      row.state === 'active'
-        ? intent.connection
-        : (intent.confirmedConnection ?? intent.connection),
+      confirmed && !intent.reconcileSrv
+        ? confirmed
+        : {
+            ...visible,
+            displayAddress: `${visible.hostname}:${visible.port}`,
+          },
     updatedAt: row.updated_at,
   };
 }
@@ -565,12 +599,12 @@ async function authorizeIntent(db: Kysely<Database>, row: DnsRow, intent: DnsInt
     );
   }
 }
-export async function runDns(
+async function assignmentProvider(
   db: Kysely<Database>,
   row: DnsRow,
+  intent: DnsIntent,
   options: ExternalServiceOptions,
-): Promise<DnsRow> {
-  const intent = row.plan as DnsIntent;
+) {
   const { config, provider } = await dnsProvider(db, options);
   const expected = fingerprint(
     intent.version === 1 ? [intent.zoneId, intent.instanceId] : [intent.instanceId],
@@ -586,6 +620,96 @@ export async function runDns(
     serverId: row.server_id,
     assignmentId: row.ownership_token,
   };
+  return { provider, ownership };
+}
+
+/** Preserve the acknowledged-lost create when an Owner renames the host or a retry finds a different port. */
+async function recoverPreparedSrv(
+  db: Kysely<Database>,
+  row: DnsRow,
+  intent: DnsIntent,
+  options: ExternalServiceOptions,
+) {
+  const ledger = row.ledger as OwnedDnsRecord[];
+  if (
+    !intent.preparedSrv ||
+    ledger.some(
+      (e) =>
+        e.zoneId === intent.zoneId &&
+        e.record.name === intent.preparedSrv?.name &&
+        e.record.type === 'SRV',
+    )
+  )
+    return ledger;
+  const { provider, ownership } = await assignmentProvider(db, row, intent, options);
+  const recovered = await provider.inspectOwned({
+    zoneId: intent.zoneId,
+    ownership,
+    desired: [intent.preparedSrv],
+  });
+  if (!recovered.length) return ledger;
+  ledger.push(...recovered);
+  await db
+    .updateTable('dns_assignments')
+    .set({ ledger: JSON.stringify(ledger), updated_at: now(options) })
+    .where('id', '=', row.id)
+    .execute();
+  return ledger;
+}
+
+async function reconcileSrvPlan(db: Kysely<Database>, row: DnsRow, intent: DnsIntent) {
+  const game = await integration(db, row.server_id);
+  const address = intent.connection.records[0];
+  const { hostname } = intent.connection;
+  const declared =
+    game.manifest.connection.mode === 'custom-subdomain' && game.manifest.connection.srv;
+  if (!declared) throw new DomainError('configuration_invalid');
+  const serviceName = `${declared.service}._${declared.proto}.${hostname}`;
+  const reservation = await db
+    .selectFrom('dns_hostname_reservations')
+    .select('owner_id')
+    .where('hostname', '=', hostname)
+    .where('release_after', 'is', null)
+    .executeTakeFirst();
+  if (
+    game.server.active_operation_id ||
+    !game.server.pterodactyl_uuid ||
+    intent.sharedHostId ||
+    !address ||
+    address.type === 'SRV' ||
+    intent.connection.records.length > 2 ||
+    intent.connection.records.slice(1).some((r) => r.type !== 'SRV' || r.name !== serviceName) ||
+    (intent.preparedSrv && intent.preparedSrv.name !== serviceName) ||
+    address.name !== row.hostname ||
+    hostname !== row.hostname ||
+    reservation?.owner_id !== row.id
+  )
+    throw new DomainError('conflict');
+  const { port, srv } = await connectionEndpoint(db, game, intent.request?.portRole);
+  const dot = hostname.indexOf('.');
+  // Keep the exact confirmed address and provider zone, including already-generated labels.
+  const planned = planConnection({
+    mode: 'custom-subdomain',
+    subdomain: hostname.slice(0, dot),
+    zoneName: hostname.slice(dot + 1),
+    port,
+    target: address,
+    ttl: address.ttl,
+    srv: srv ? { service: srv.service, protocol: srv.proto } : undefined,
+  });
+  const record = planned.records[1];
+  if ((record && record.type !== 'SRV') || !isDeepStrictEqual(planned.records[0], address))
+    throw new DomainError('configuration_invalid');
+  return { planned, record, serviceName };
+}
+
+export async function runDns(
+  db: Kysely<Database>,
+  row: DnsRow,
+  options: ExternalServiceOptions,
+): Promise<DnsRow> {
+  const intent = row.plan as DnsIntent;
+  const { provider, ownership } = await assignmentProvider(db, row, intent, options);
   let ledger = row.ledger as OwnedDnsRecord[];
   const persist = () =>
     db
@@ -615,25 +739,79 @@ export async function runDns(
     if (intent.action === 'apply') {
       await authorizeIntent(db, row, intent);
       await options.verifyServer(db, row.server_id);
+      let published = intent.connection;
+      let serviceName: string | undefined;
+      const activeServiceChange = row.state === 'active' && intent.reconcileSrv;
+      if (intent.reconcileSrv) {
+        const current = await reconcileSrvPlan(db, row, intent);
+        published = current.planned;
+        serviceName = current.serviceName;
+        const previous =
+          intent.preparedSrv ?? intent.connection.records.find((r) => r.type === 'SRV');
+        if (!isDeepStrictEqual(previous, current.record)) {
+          // An uncertain POST may have reached the provider before its record ID was saved.
+          ledger = await recoverPreparedSrv(db, row, { ...intent, preparedSrv: previous }, options);
+        }
+        if (current.record && !isDeepStrictEqual(current.record, intent.preparedSrv)) {
+          intent.preparedSrv = current.record;
+          await db
+            .updateTable('dns_assignments')
+            .set({ plan: JSON.stringify(intent), updated_at: now(options) })
+            .where('id', '=', row.id)
+            .execute();
+        }
+      }
       if (!intent.sharedHostId) {
         const changes = await provider.plan({
           zoneId: intent.zoneId,
           ownership,
-          desired: intent.connection.records,
+          desired: published.records,
           ledger: ledger.filter((r) => r.zoneId === intent.zoneId),
         });
+        // A version change on an active host may only touch its declared service name.
+        if (
+          activeServiceChange &&
+          changes.some((c) => c.record.type !== 'SRV' || c.record.name !== serviceName)
+        )
+          throw new DomainError('conflict');
+        for (const change of changes) {
+          if (!activeServiceChange || change.action !== 'delete') continue;
+          // Require the provider contents to match the acknowledged record or the
+          // last prepared write whose acknowledgement might have been lost.
+          const inspect = (record: DnsRecord) =>
+            provider.inspectOwned({ zoneId: intent.zoneId, ownership, desired: [record] });
+          let verified: OwnedDnsRecord[];
+          try {
+            verified = await inspect(change.previous.record);
+          } catch (error) {
+            if (!(error instanceof DomainError && error.code === 'conflict' && intent.preparedSrv))
+              throw error;
+            verified = await inspect(intent.preparedSrv);
+          }
+          if (verified[0]?.id !== change.previous.id) throw new DomainError('conflict');
+        }
         await provider.apply(changes, callbacks);
-        await provider.apply(
-          ledger
-            .filter(
-              (entry) =>
-                entry.zoneId !== intent.zoneId ||
-                !intent.connection.records.some(
-                  (desired) =>
-                    desired.name === entry.record.name && desired.type === entry.record.type,
-                ),
+        // Clear stale IDs too when a previous delete completed but its acknowledgement was lost.
+        const obsolete = ledger.filter((entry) => {
+          const local = entry.zoneId === intent.zoneId;
+          if (
+            activeServiceChange &&
+            (!local || entry.record.type !== 'SRV' || entry.record.name !== serviceName)
+          )
+            return false;
+          return (
+            !local ||
+            !published.records.some(
+              (r) => r.name === entry.record.name && r.type === entry.record.type,
             )
-            .map((previous) => ({ action: 'delete' as const, previous, record: previous.record })),
+          );
+        });
+        await provider.apply(
+          obsolete.map((previous) => ({
+            action: 'delete' as const,
+            previous,
+            record: previous.record,
+          })),
           callbacks,
         );
       } else if (ledger.length) {
@@ -650,7 +828,13 @@ export async function runDns(
         .updateTable('dns_assignments')
         .set({
           state: 'active',
-          plan: JSON.stringify({ ...intent, confirmedConnection: intent.connection }),
+          plan: JSON.stringify({
+            ...intent,
+            connection: published,
+            confirmedConnection: published,
+            reconcileSrv: undefined,
+            preparedSrv: undefined,
+          }),
           updated_at: now(options),
         })
         .where('id', '=', row.id)
@@ -661,7 +845,9 @@ export async function runDns(
         for (const recovered of await provider.inspectOwned({
           zoneId: intent.zoneId,
           ownership,
-          desired: intent.connection.records,
+          desired: intent.preparedSrv
+            ? [...intent.connection.records, intent.preparedSrv]
+            : intent.connection.records,
         }))
           if (!ledger.some((e) => e.id === recovered.id && e.zoneId === recovered.zoneId)) {
             ledger.push(recovered);
@@ -687,7 +873,12 @@ export async function runDns(
     await db
       .updateTable('dns_assignments')
       .set({
-        state: intent.action === 'delete' ? 'deleting' : 'uncertain',
+        state:
+          intent.action === 'delete'
+            ? 'deleting'
+            : row.state === 'active' && intent.reconcileSrv
+              ? 'active'
+              : 'uncertain',
         updated_at: now(options),
       })
       .where('id', '=', row.id)
@@ -995,6 +1186,7 @@ export async function updateServerDns(
           )
         : undefined;
       const previous = row.plan as DnsIntent;
+      if (previous.preparedSrv) await recoverPreparedSrv(connection, row, previous, options);
       const intent: DnsIntent = {
         version: 2,
         context: verified,
@@ -1004,6 +1196,7 @@ export async function updateServerDns(
         scope: fingerprint([previous.instanceId]),
         connection: planned.connection,
         confirmedConnection: previous.connection,
+        ...(previous.reconcileSrv && !sharedHostId ? { reconcileSrv: true } : {}),
         request,
         action: 'apply',
         ...(sharedHostId ? { sharedHostId } : {}),

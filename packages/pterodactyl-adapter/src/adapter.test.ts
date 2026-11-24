@@ -121,6 +121,41 @@ function fileReadTiming(onStart: (name: string) => void = () => {}) {
 }
 
 describe('typed Pterodactyl boundary', () => {
+  it('requires the installer flag on startup updates and can attest the returned allocations', async () => {
+    const fetcher = vi.fn(async (url, init) => {
+      expect(new URL(url).pathname).toBe('/api/application/servers/20/startup');
+      expect(new URL(url).searchParams.get('include')).toBe('allocations');
+      expect(init?.method).toBe('PATCH');
+      expect(JSON.parse(String(init?.body))).toMatchObject({ skip_scripts: true });
+      return Response.json({
+        object: 'server',
+        attributes: {
+          ...server,
+          container: { ...server.container, skip_scripts: true },
+          relationships: { allocations: { object: 'list', data: [] } },
+        },
+      });
+    });
+    const adapter = createPterodactylAdapter({ ...config, fetcher });
+    const update = {
+      startup: 'fixture',
+      image: 'fixture:image',
+      environment: {},
+      egg: 4,
+      skip_scripts: true,
+    };
+    const response = await adapter.updateStartup(20, update, true);
+    expect(response.container.skip_scripts).toBe(true);
+    expect(response.relationships?.allocations?.data).toEqual([]);
+    expect(() =>
+      adapter.updateStartup(
+        20,
+        { ...update, skip_scripts: undefined } as unknown as typeof update,
+        true,
+      ),
+    ).toThrow('validation_failed');
+    expect(fetcher).toHaveBeenCalledTimes(1);
+  });
   it('deduplicates filtered server lookup, includes allocations and preserves bounded pagination across chunks', async () => {
     const uuids = Array.from(
       { length: 49 },

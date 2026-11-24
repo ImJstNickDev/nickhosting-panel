@@ -23,6 +23,7 @@ import {
 import { createTransport } from 'nodemailer';
 import { createApp } from './app.js';
 import { closeFileViewers, closeViewerArchives } from './file-viewers.js';
+import { createOpenworldDashboardIngress } from './openworld-dashboard-ingress.js';
 
 /** Explicit factory: importing API modules never opens sockets or changes the DB. */
 export async function createRuntime(env: Readonly<Record<string, string | undefined>>) {
@@ -136,21 +137,30 @@ export async function createRuntime(env: Readonly<Record<string, string | undefi
       cached = { signature, identity: value };
       return value;
     };
+    const management = () =>
+      createManagementRuntime({
+        db: database.db,
+        worldNotificationPool: database.pool.options.max === 1 ? undefined : database.pool,
+        codec,
+        env,
+        logger,
+        transportCoordinator,
+        directoryIdentityCache,
+        transferCache,
+      });
+    const createDashboardIngress = () => {
+      if (!initial.values.publicUrl) throw new DomainError('configuration_invalid');
+      return createOpenworldDashboardIngress({
+        db: database.db,
+        panelOrigin: initial.values.publicUrl,
+        management,
+      });
+    };
     const app = createApp({
       provisioningCache: transferCache,
       database,
       codec,
-      management: () =>
-        createManagementRuntime({
-          db: database.db,
-          worldNotificationPool: database.pool.options.max === 1 ? undefined : database.pool,
-          codec,
-          env,
-          logger,
-          transportCoordinator,
-          directoryIdentityCache,
-          transferCache,
-        }),
+      management,
       logger,
       defaultLocale: async (request) => (await requestSettings(request)).values.defaultLocale,
       identity,
@@ -164,6 +174,7 @@ export async function createRuntime(env: Readonly<Record<string, string | undefi
     });
     return {
       app,
+      createDashboardIngress,
       database,
       logger,
       config: initial.values,
