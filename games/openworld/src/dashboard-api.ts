@@ -13,8 +13,8 @@ const authSchema = z.object({ required: z.boolean(), loopback: z.boolean(), canA
 const loginSchema = z.object({ token: z.string().regex(/^[\x21-\x7e]{1,4096}$/) });
 
 export class OpenworldTokenExpired extends DomainError {
-  constructor() {
-    super('integration_unavailable');
+  constructor(code: 'integration_unavailable' | 'operation_uncertain' = 'integration_unavailable') {
+    super(code);
   }
 }
 

@@ -40,6 +40,8 @@ it('separates the roster and performance grants from inspection, moderation and 
       'game.openworld.dashboard.admin',
       'game.openworld.rules.view',
       'game.openworld.rules.manage',
+      'game.openworld.territory.manage',
+      'game.openworld.roles.manage',
       'game.openworld.bans.manage',
       'game.openworld.seed.inspect',
     ]),

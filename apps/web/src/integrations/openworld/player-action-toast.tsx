@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { useT } from '../../app/i18n.js';
 import type { ActionReceipt } from './player-actions.js';
+import { people } from './player-identity.js';
 import { key } from './telemetry.js';
 
 export function PlayerActionToast({
@@ -50,10 +51,12 @@ export function PlayerActionToast({
       <span role="status" aria-atomic="true">
         {receipt && (
           <span key={receipt.requestId}>
-            {t(key(screenshot ? 'screenshotRequested' : 'actionAccepted'), {
-              name: receipt.playerName,
-              action: t(key(`action.${receipt.kind}`)),
-            })}
+            {['ban', 'unban', 'role', 'member'].includes(receipt.kind)
+              ? t(people(`confirmed.${receipt.kind}`), { name: receipt.playerName })
+              : t(key(screenshot ? 'screenshotRequested' : 'actionAccepted'), {
+                  name: receipt.playerName,
+                  action: t(key(`action.${receipt.kind}`)),
+                })}
           </span>
         )}
       </span>

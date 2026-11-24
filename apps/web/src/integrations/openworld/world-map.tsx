@@ -3,12 +3,13 @@ import {
   maxOpenworldMapColumn,
   type OpenworldMapWorld,
 } from '../../../../../games/openworld/src/world-map.js';
+import { projectOpenworldPosition } from '../../../../../games/openworld/src/world-projection.js';
 import { useFormat, useT } from '../../app/i18n.js';
 import { Check, ErrorNotice, Loading, Select } from '../../components/ui.js';
 import { Pagination, SearchField } from '../../components/workspace-controls.js';
 import type { AtlasCameraSnapshot, AtlasMode } from './atlas-types.js';
 import { useFactoryConnection } from './factory-connection.js';
-import type { SeedLegend } from './map-atlas-data.js';
+import type { MapPalette, SeedLegend } from './map-atlas-data.js';
 import {
   CheckpointDialog,
   type CheckpointForm,
@@ -19,9 +20,10 @@ import {
 } from './map-checkpoints.js';
 import { CreaturePopulation, useCreatureLayer } from './map-creatures.js';
 import { factoryMapPoint, useFactoryData } from './map-factories.js';
-import { mapFocusQuery, mapSearchCoordinates, useMapPlayers } from './map-players.js';
+import { mapFocusQuery, mapSearchCoordinates, useMapPlayers, zoneMapFocus } from './map-players.js';
 import { mapKey as k, mapParams, scopeLost, useMapData } from './map-query.js';
 import { SpaceView } from './map-space.js';
+import { CreatureSpawning } from './map-spawning.js';
 import { type MapFace, MapViewport } from './map-viewport.js';
 import { type TelemetryViewProps, key as telemetryKey, withTelemetrySession } from './telemetry.js';
 import './world-map.css';
@@ -65,12 +67,37 @@ function MapSection(props: TelemetryViewProps) {
   const worlds = useMapData<WorldList>(props, '', running && canRead);
   const [initial] = useState(() => ({
     point: mapFocusQuery(),
+    zone: zoneMapFocus(),
     factory: new URLSearchParams(window.location.hash.slice(1)).get('origin') === 'factories',
   }));
   const inspect =
     props.permissionKeys.includes('game.openworld.players.read') &&
     props.permissionKeys.includes('game.openworld.players.inspect');
-  const entry = initial.factory || inspect ? initial.point : null;
+  const zone =
+    canRead && props.permissionKeys.includes('game.openworld.rules.view') ? initial.zone : null;
+  const zoneWorld = worlds.data?.worlds.find((w) => w.key === zone?.world);
+  const needsEdge = !!(zone && zoneWorld && !zoneWorld.faceEdgeMeters);
+  const palette = useMapData<MapPalette>(
+    props,
+    `/palette?${mapParams({ world: zoneWorld?.key ?? '', processRef: worlds.data?.processRef ?? '' })}`,
+    needsEdge && running,
+    undefined,
+    Infinity,
+  );
+  const zonePoint =
+    zone &&
+    zoneWorld &&
+    projectOpenworldPosition(
+      zone.lon,
+      zone.lat,
+      zoneWorld.faceEdgeMeters ?? palette.data?.faceEdgeMeters ?? 0,
+    );
+  const entry =
+    zonePoint && zone
+      ? { world: zone.world, ...zonePoint }
+      : initial.factory || inspect
+        ? initial.point
+        : null;
   return (
     <section className="ow-workspace ow-map" aria-label={t(k('title'))}>
       <div className="ow-panel">
@@ -83,7 +110,9 @@ function MapSection(props: TelemetryViewProps) {
           </p>
         ) : worlds.error ? (
           <ErrorNotice error={worlds.error} retry={() => void worlds.refetch()} />
-        ) : !worlds.data ? (
+        ) : needsEdge && palette.error ? (
+          <ErrorNotice error={palette.error} retry={() => void palette.refetch()} />
+        ) : !worlds.data || (needsEdge && !palette.data) ? (
           <Loading />
         ) : (
           <WorldBrowser
@@ -97,7 +126,7 @@ function MapSection(props: TelemetryViewProps) {
             server={props}
             data={worlds.data}
             entry={entry}
-            fromPlayer={!initial.factory && !!entry}
+            fromPlayer={!zone && !initial.factory && !!entry}
             reloadWorlds={worlds.refetch}
           />
         )}
@@ -770,6 +799,10 @@ function MapWorld({
                       </Select>
                     )}
                   </div>
+                  {grants.includes('game.openworld.rules.view') &&
+                    grants.includes('game.openworld.territory.manage') && (
+                      <CreatureSpawning key={processRef} server={server} processRef={processRef} />
+                    )}
                   <CreaturePopulation
                     query={creatures}
                     worldName={world.name || world.key}

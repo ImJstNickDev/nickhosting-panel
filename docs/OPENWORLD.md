@@ -294,14 +294,28 @@ inspection access. Administrative checkpoints require the checkpoint management
 permission. The orbital view omits checkpoint notes. Opening the terrain map alone
 does not request the factory, creature or orbital feeds.
 
-**Rules** shows the difficulty, game roles and their permissions, protected zones,
-planetary borders and bans on the running server. Access to this list is an
-explicit subuser permission. Two additional grants allow changing difficulty and
-lifting a ban by account UUID. The panel confirms changes by reading the resulting
-game state and keeps a receipt for each request. A repeated request with the same
-ID cannot send the command twice. On a1.2.9 the game's ban command identifies a
-connected player by name. Operators who can send console commands can use the
-server console for that operation.
+**Rules** opens on the world settings. The difficulty grant controls difficulty.
+The territory grant controls the seven global protection rules, eight local rules
+on existing zones, planetary borders and access to worlds and space. Zone entry is
+local. Zone geometry is created in game. A map reader can open a zone’s location
+on its planet. The Creatures panel in Map also lets a territory manager toggle
+natural spawning for the current server session. The global spawning rule in
+Rules persists across restarts.
+
+The **Permission groups** view shows the source and precedence of each game
+permission. A separate explicit grant allows group editing and assignment. Inherited
+permissions apply first, followed by the group's own ordered permissions. The
+last matching rule wins. These groups govern players inside Openworld. NickPanel
+subuser grants control who can use each editor. The panel verifies changes against
+game state and records the request ID for retries.
+
+In **Players**, managers can assign a group or zone membership from an account's
+profile with player inspection and the corresponding management grant. The **Banned**
+filter includes accounts missing from the saved directory. Roster access and ban
+management allow listing bans and revoking by account UUID. Issuing a ban also
+requires player inspection and moderation. On a1.2.9 and a1.2.10 the panel offers a new ban on a
+connected, unambiguously identified account. On a1.2.10 the native console
+rejected a known disconnected licensed account after the game had saved it.
 
 **Seed Inspector** has its own explicit grant. Inside NickPanel it shows the actual
 seed, spawn, world dimensions, planets, biomes, materials, structures and tree

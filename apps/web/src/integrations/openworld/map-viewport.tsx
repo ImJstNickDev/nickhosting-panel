@@ -183,7 +183,7 @@ function AtlasViewport(props: ViewProps & { unavailable: () => void }) {
     props.onRefreshIndex,
   );
   const query = mapParams({ world, processRef });
-  const palette = useMapData<MapPalette>(server, `/palette?${query}`);
+  const palette = useMapData<MapPalette>(server, `/palette?${query}`, true, undefined, Infinity);
   const legend = props.legend;
   const features = useFeatureLayer(
     server,

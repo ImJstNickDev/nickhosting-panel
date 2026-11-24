@@ -42,6 +42,10 @@ export function registerOpenworldRulesRoutes(
     c.header('Cache-Control', 'private, no-store');
     return c.json(await service.list(await options.principal(c), c.req.param('id')));
   });
+  app.get(`${path}/spawning`, async (c) => {
+    c.header('Cache-Control', 'private, no-store');
+    return c.json(await service.spawning(await options.principal(c), c.req.param('id')));
+  });
   app.post(path, async (c) => {
     c.header('Cache-Control', 'private, no-store');
     const who = await options.principal(c);

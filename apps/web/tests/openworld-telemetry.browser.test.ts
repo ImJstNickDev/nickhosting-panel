@@ -3616,3 +3616,225 @@ it('shows the archived head and body on a cold visit while the game is offline',
     await context.close();
   }
 });
+
+it('moderates a saved account from Players and finds an unindexed ban on desktop and mobile', async () => {
+  const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
+  const stem = 'bb18261c-b54a-4559-9921-414e517f0b96';
+  let bans = [{ uuid: stem, name: 'Aurora', reason: 'Griefing the observatory' }];
+  const requests: Record<string, unknown>[] = [];
+  try {
+    await serve(page);
+    await page.route('**/openworld/players/moderation/bans', (r) =>
+      r.fulfill({ json: { bans, mutable: true, onlineBan: true, processRef: 'a'.repeat(64) } }),
+    );
+    await page.route('**/openworld/players/saved/search', (r) =>
+      r.fulfill({
+        json: {
+          players: [{ uuid: archiveId, name: 'NorthStar', savedAt: instant }],
+          total: 1,
+          page: 1,
+          indexedAt: instant,
+        },
+      }),
+    );
+    await page.route(`**/openworld/players/saved/${archiveId}`, (r) =>
+      r.fulfill({
+        json: {
+          uuid: archiveId,
+          name: 'NorthStar',
+          savedAt: instant,
+          statsAt: null,
+          inventory: null,
+        },
+      }),
+    );
+    await page.route('**/openworld/players/moderation/roles/*', (r) =>
+      r.fulfill({
+        json: {
+          current: 'player',
+          roles: [
+            { key: 'player', name: 'Player' },
+            { key: 'ranger', name: 'Ranger' },
+          ],
+          processRef: 'a'.repeat(64),
+          mutable: true,
+        },
+      }),
+    );
+    await page.route('**/openworld/players/moderation/zones/*', (r) =>
+      r.fulfill({
+        json: {
+          zones: [{ id: 7, name: 'OldQuarry', world: 'Earth', member: false }],
+          processRef: 'a'.repeat(64),
+          mutable: true,
+        },
+      }),
+    );
+    await page.route('**/openworld/players/moderation', (r) => {
+      const { action, requestId } = r.request().postDataJSON();
+      requests.push(action);
+      if (action.kind === 'unban') bans = [];
+      return r.fulfill({ json: { requestId, outcome: 'accepted' } });
+    });
+    await page.goto(`${url}telemetry-fixture?section=players&accessEditor&moderator`);
+    await page.getByRole('link', { name: /NorthStar/ }).click();
+    await page.getByRole('button', { name: 'Server access' }).click();
+    await page.getByLabel('Assigned group').selectOption('ranger');
+    await page.screenshot({ path: `${shots}/player-access-desktop.png` });
+    await page.getByRole('button', { name: 'Save group' }).click();
+    await check(page.getByRole('dialog')).toHaveCount(0);
+    expect(requests[0]).toEqual({
+      kind: 'role',
+      role: 'ranger',
+      previous: 'player',
+      account: archiveId,
+      name: 'NorthStar',
+    });
+    await page.getByRole('button', { name: 'Server access' }).click();
+    await page.getByRole('button', { name: 'Zone membership' }).click();
+    await page.getByLabel('Zone', { exact: true }).selectOption('7');
+    await page.getByRole('button', { name: 'Add to zone' }).click();
+    await check(page.getByRole('dialog')).toHaveCount(0);
+    expect(requests[1]).toMatchObject({
+      kind: 'member',
+      zoneId: 7,
+      name: 'NorthStar',
+      member: true,
+    });
+    await page.getByRole('button', { name: 'Account ban' }).click();
+    await check(
+      page.getByText('This version requires the player to be online to apply a ban.'),
+    ).toBeVisible();
+    await check(page.getByRole('button', { name: 'Ban player' })).toBeDisabled();
+    await page.keyboard.press('Escape');
+    await page
+      .getByRole('link', { name: /Players/ })
+      .first()
+      .click();
+    await page.setViewportSize({ width: 390, height: 820 });
+    await page.getByRole('button', { name: 'Banned', exact: true }).click();
+    await check(page.getByText('Aurora', { exact: true })).toBeVisible();
+    await page.getByLabel('Search players by name or UUID').fill(stem.slice(0, 8));
+    await page.screenshot({ path: `${shots}/banned-mobile.png` });
+    await page.getByRole('button', { name: 'Lift ban' }).click();
+    await page.getByRole('dialog').getByRole('button', { name: 'Lift ban' }).click();
+    await check(page.getByRole('dialog')).toHaveCount(0);
+    expect(requests[2]).toEqual({ kind: 'unban', account: stem });
+    await check(page.locator('.ow-banned-list li')).toHaveCount(0);
+  } finally {
+    await page.close();
+  }
+});
+
+it('opens a zone on the measured planet face and changes session spawning on demand', async () => {
+  const page = await browser.newPage();
+  try {
+    const { paths } = await mapRoutes(page);
+    const processRef = 'f'.repeat(64);
+    let enabled = true,
+      reads = 0,
+      sends = 0;
+    await page.route('**/openworld/rules/spawning', (route) => {
+      reads++;
+      return route.fulfill({ json: { enabled, editable: true, processRef } });
+    });
+    await page.route('**/openworld/rules', (route) => {
+      const body = route.request().postDataJSON();
+      expect(body.processRef).toBe(processRef);
+      expect(body.action).toEqual({ kind: 'spawning', enabled: false });
+      enabled = false;
+      sends++;
+      return route.fulfill({ json: { requestId: body.requestId, outcome: 'accepted' } });
+    });
+    await page.goto(
+      `${url}telemetry-fixture?section=map&zoneAccess#origin=rules&world=earth&lon=90&lat=0`,
+    );
+    await check(page.locator('.ow-map-world-nav select').last()).toHaveValue('1');
+    expect(paths.some((p) => p.pathname.endsWith('/players'))).toBe(false);
+    expect(reads).toBe(0);
+    await page.getByRole('button', { name: 'Layers', exact: true }).click();
+    await page.getByRole('button', { name: 'Creatures', exact: true }).click();
+    const spawn = page.getByRole('checkbox', { name: 'Natural spawning' });
+    await check(spawn).toBeChecked();
+    await spawn.uncheck();
+    await check(spawn).not.toBeChecked();
+    await check(spawn).toBeEnabled();
+    expect(sends).toBe(1);
+    expect(reads).toBe(2);
+  } finally {
+    await page.close();
+  }
+});
+
+it('bans the verified connected account in Italian and removes access to moderation after grant revocation', async () => {
+  const page = await browser.newPage({ viewport: { width: 390, height: 820 }, locale: 'it-IT' });
+  try {
+    await page.addInitScript(() => localStorage.setItem('nh.locale', 'it'));
+    await serve(page);
+    await page.route('**/telemetry/players', (r) =>
+      r.fulfill({
+        json: {
+          source: 'live',
+          processRef: 'd'.repeat(64),
+          observedAt: instant,
+          gameVersion: 'a1.2.10',
+          data: { players: [{ ...person, account: archiveId, accountVerified: true }] },
+        },
+      }),
+    );
+    await page.route('**/players/moderation/bans', (r) =>
+      r.fulfill({ json: { mutable: true, onlineBan: true, bans: [], processRef: 'd'.repeat(64) } }),
+    );
+    let body: Record<string, unknown> | undefined;
+    await page.route('**/players/moderation', (r) => {
+      const request = r.request().postDataJSON();
+      body = request.action;
+      return r.fulfill({ json: { outcome: 'accepted', requestId: request.requestId } });
+    });
+    await page.goto(`${url}telemetry-fixture?section=players&accessEditor&moderator`);
+    await page.getByRole('link', { name: /Solstice/ }).click();
+    await page.getByRole('button', { name: 'Ban account' }).click();
+    const dialog = page.getByRole('dialog');
+    await dialog.getByLabel('Motivo (facoltativo)').fill('Prova privata');
+    await check(dialog.getByRole('button', { name: 'Banna giocatore' })).toBeEnabled();
+    await dialog.getByRole('button', { name: 'Banna giocatore' }).click();
+    await check(dialog).toHaveCount(0);
+    expect(body).toEqual({
+      account: archiveId,
+      name: 'Solstice',
+      kind: 'ban',
+      reason: 'Prova privata',
+    });
+    await check(
+      page.getByRole('status').filter({ hasText: 'Ban applicato a Solstice.' }),
+    ).toBeVisible();
+    await page.getByRole('button', { name: 'Ban account' }).click();
+    await page.evaluate(() =>
+      window.dispatchEvent(
+        new CustomEvent('fixture-revoke', { detail: 'game.openworld.bans.manage' }),
+      ),
+    );
+    await check(dialog).toHaveCount(0);
+    await check(page.getByRole('button', { name: 'Ban account' })).toHaveCount(0);
+  } finally {
+    await page.close();
+  }
+});
+
+it('uses the selected planet palette when a zone link has no world edge in the index', async () => {
+  const page = await browser.newPage();
+  try {
+    const { paths } = await mapRoutes(page);
+    await page.goto(
+      `${url}telemetry-fixture?section=map&zoneAccess#origin=rules&world=moon&lon=90&lat=0`,
+    );
+    const navigation = page.locator('.ow-map-world-nav select');
+    await check(navigation.first()).toHaveValue('moon');
+    await check(navigation.last()).toHaveValue('1');
+    const metadata = paths.filter((p) => p.pathname.endsWith('/palette'));
+    expect(metadata.filter((p) => p.searchParams.get('world') === 'moon')).toHaveLength(1);
+    expect(metadata.some((p) => p.searchParams.get('world') === 'earth')).toBe(false);
+  } finally {
+    await page.close();
+  }
+});

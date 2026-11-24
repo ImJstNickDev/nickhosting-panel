@@ -12,7 +12,7 @@ it('batches only regular, bounded rule files from the configured data directory'
   const list = vi.fn(async (dir: string) =>
     dir === ''
       ? [file('server.json'), file('roles.json'), file('saves', 'directory')]
-      : [file('zones.json'), file('private.json')],
+      : [file('zones.json'), file('borders.json'), file('private.json')],
   );
   const readMany = vi.fn<FilemanReadService['readMany']>(
     async (requests) => new Map(requests.map(({ path }) => [path, encode(path)])),
@@ -27,16 +27,22 @@ it('batches only regular, bounded rule files from the configured data directory'
   expect(await readOpenworldRuleFiles(files)).toEqual({
     roles: encode('roles.json'),
     zones: encode('saves/zones.json'),
+    borders: encode('saves/borders.json'),
   });
   expect(readMany.mock.calls[0]?.[0].map((r) => r.path)).toEqual([
     'roles.json',
     'saves/zones.json',
+    'saves/borders.json',
   ]);
   list.mockImplementation(async (dir) =>
     dir === ''
       ? [file('server.json'), file('roles.json', 'symlink'), file('saves', 'directory')]
       : [file('zones.json', 'file', 1024 * 1024)],
   );
-  expect(await readOpenworldRuleFiles(files)).toEqual({ roles: undefined, zones: undefined });
+  expect(await readOpenworldRuleFiles(files)).toEqual({
+    roles: undefined,
+    zones: undefined,
+    borders: undefined,
+  });
   expect(readMany).toHaveBeenCalledTimes(1);
 });

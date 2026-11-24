@@ -49,6 +49,7 @@ import { registerOpenworldDashboardSso } from './openworld-dashboard-sso.js';
 import { registerOpenworldInspectorRoutes } from './openworld-inspector.js';
 import { registerOpenworldPlayerActionRoutes } from './openworld-player-actions.js';
 import { registerOpenworldPlayerDirectoryRoutes } from './openworld-player-directory.js';
+import { registerOpenworldPlayerModerationRoutes } from './openworld-player-moderation.js';
 import { registerOpenworldRulesRoutes } from './openworld-rules.js';
 import { registerOpenworldThumbnailRoute } from './openworld-screenshot-thumbnails.js';
 import { registerOpenworldScreenshotRoutes } from './openworld-screenshots.js';
@@ -728,6 +729,7 @@ export function createApp(options: Options) {
   registerOpenworldThumbnailRoute(app, { db, principal, management: options.management });
   registerOpenworldScreenshotRoutes(app, { db, principal, management: options.management });
   registerOpenworldInspectorRoutes(app, { db, principal, management: options.management });
+  registerOpenworldPlayerModerationRoutes(app, { db, principal, management: options.management });
   registerOpenworldRulesRoutes(app, { db, principal, management: options.management });
   registerOpenworldWorldMapRoutes(app, {
     db,

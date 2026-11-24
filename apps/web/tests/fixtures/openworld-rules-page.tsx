@@ -13,7 +13,9 @@ const View = getGameSectionView(section?.renderer);
 if (!View) throw Error('Missing rules section');
 const permissions = params.has('restricted') ? [] : ['game.openworld.rules.view'];
 if (params.has('manage')) permissions.push('game.openworld.rules.manage');
-if (params.has('bans')) permissions.push('game.openworld.bans.manage');
+if (params.has('territory')) permissions.push('game.openworld.territory.manage');
+if (params.has('groups')) permissions.push('game.openworld.roles.manage');
+if (params.has('map')) permissions.push('game.openworld.map.read');
 if (params.has('consoleRead')) permissions.push('console.read');
 if (params.has('consoleCommand')) permissions.push('console.command');
 createRoot(document.getElementById('root') as HTMLElement).render(

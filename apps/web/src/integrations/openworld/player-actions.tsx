@@ -1,9 +1,10 @@
-import { type FormEvent, useRef, useState } from 'react';
+import { type FormEvent, type ReactNode, useRef, useState } from 'react';
 import type {
   OpenworldActionPlayer,
   OpenworldPlayerAction,
   OpenworldTeleportDestinations,
 } from '../../../../../games/openworld/src/player-actions.js';
+import type { ModerationChange } from '../../../../../games/openworld/src/player-moderation.js';
 import { ApiError, api } from '../../api/client.js';
 import { useT } from '../../app/i18n.js';
 import { Dialog, ErrorNotice, Input, Loading, Select, Textarea } from '../../components/ui.js';
@@ -11,7 +12,11 @@ import { playersBase, usePlayerResource } from './player-workspace.js';
 import { key, type ServerView } from './telemetry.js';
 
 type Kind = OpenworldPlayerAction['kind'];
-export type ActionReceipt = { requestId: string; kind: Kind; playerName: string };
+export type ActionReceipt = {
+  requestId: string;
+  kind: Kind | ModerationChange['kind'];
+  playerName: string;
+};
 type ActionTarget = { player: OpenworldActionPlayer; processRef: string };
 type Props = {
   server: ServerView;
@@ -20,6 +25,7 @@ type Props = {
   otherPlayers: OpenworldActionPlayer[];
   moderate: boolean;
   screenshots: boolean;
+  accountControls?: ReactNode;
   onAccepted: (receipt: ActionReceipt) => void;
 };
 
@@ -48,7 +54,7 @@ export function PlayerActions(props: Props) {
   const [choice, setChoice] = useState<Kind | null>(null);
   const [busy, setBusy] = useState(false);
   const kind = choice && allowed.includes(choice) ? choice : null;
-  if (!allowed.length) return null;
+  if (!allowed.length && !props.accountControls) return null;
   return (
     <aside className="ow-player-commands" aria-label={t(key('actions'))}>
       <h3>{t(key('actions'))}</h3>
@@ -80,6 +86,7 @@ export function PlayerActions(props: Props) {
             {t(key(`action.${k}`))}
           </button>
         ))}
+        {props.accountControls}
       </div>
       {kind && props.target && (
         <Dialog

@@ -5,14 +5,22 @@ import type { OpenworldNativeConnection } from './native-diagnostics.js';
 import { readNativeBytes } from './native-response.js';
 import type { OpenworldDifficulty } from './rules.js';
 
-type Command =
+export type OpenworldRuleCommand =
   | 'role list'
+  | 'role nodes'
+  | `role ${'create' | 'delete' | 'parent' | 'name' | 'color' | 'homes' | 'priority' | 'add' | 'remove' | 'default' | 'assign'} ${string}`
+  | `zone ${'global' | 'set' | 'preset' | 'radius' | 'priority' | 'color' | 'desc' | 'rename' | 'altitude' | 'delete' | 'member'} ${string}`
+  | `border ${'space' | 'world' | 'on' | 'off' | 'radius' | 'center'} ${string}`
+  | `ban ${string}`
+  | 'mobs on'
+  | 'mobs off'
   | 'zone list'
   | 'border info'
   | 'banlist'
   | 'difficulty'
   | `difficulty ${OpenworldDifficulty}`
   | `unban ${string}`;
+type Command = OpenworldRuleCommand;
 type CommandResult = { accepted: boolean; lines: string[] };
 const rowsSchema = z.object({
   last: z.number().int().nonnegative().safe(),
@@ -25,7 +33,7 @@ const record =
 const echo = /^web console \([^()\r\n]+\) > (.+?) {2}\(WebActions\.cpp:\d+\)$/;
 const output = /^console: (.+?) {2}\(ConsoleVerbs\.cpp:\d+\)$/;
 const completion =
-  /^EVT event=console\.(exec|reject) req=RULES verb=([a-z]+) {2}\(ConsoleVerbs\.cpp:\d+\)$/;
+  /^EVT event=console\.(exec|reject) req=(RULES|E7) verb=([a-z]+) {2}\(ConsoleVerbs\.cpp:\d+\)$/;
 
 async function json(native: OpenworldNativeConnection, url: URL, body?: { command: Command }) {
   if (!native.token) throw new DomainError('integration_unavailable');
@@ -99,7 +107,10 @@ export async function ruleReplies(
       } else if (active && active.thread === thread) {
         const end = completion.exec(msg);
         if (end) {
-          if (end[2] === active.cmd.split(' ')[0])
+          if (
+            end[3] === active.cmd.split(' ')[0] &&
+            end[2] === (end[3] === 'mobs' ? 'E7' : 'RULES')
+          )
             replies.set(active.cmd, { accepted: end[1] === 'exec', lines: active.lines });
           active = null;
         } else {
@@ -112,4 +123,16 @@ export async function ruleReplies(
       await new Promise((resolve) => setTimeout(resolve, 45));
   }
   return replies;
+}
+
+export async function readNaturalSpawning(native: OpenworldNativeConnection) {
+  try {
+    const status = await json(native, new URL('/api/live/status', native.origin));
+    return typeof status?.entities?.naturalSpawning === 'boolean'
+      ? (status.entities.naturalSpawning as boolean)
+      : null;
+  } catch (error) {
+    if (error instanceof OpenworldTokenExpired || !(error instanceof DomainError)) throw error;
+    return null;
+  }
 }

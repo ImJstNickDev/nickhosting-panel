@@ -24,6 +24,8 @@ function fixture() {
     });
   const fetcher: typeof fetch = async (input, init) => {
     const u = new URL(String(input));
+    if (u.pathname === '/api/live/status')
+      return Response.json({ entities: { naturalSpawning: true } });
     expect(u.origin + u.pathname).toBe('http://fixture/api/live/console');
     expect(new Headers(init?.headers).get('X-OW-Token')).toBe('fixture');
     expect(init?.redirect).toBe('error');
@@ -40,6 +42,10 @@ function fixture() {
     const cmd = JSON.parse(String(init.body)).command;
     sent.push(cmd);
     const lists: Record<string, string[]> = {
+      'role nodes': [
+        'Permissions (a role grants patterns: *, home.*, -command.tp; the last match decides):',
+        '  • home.set — Set homes.',
+      ],
       difficulty: [`Difficulty: ${state.level}. Test settings.`],
       'role list': [
         'Roles (the default one: player):',
@@ -113,7 +119,46 @@ it('projects rule groups, strips unrelated console and ban issuer, tolerates an 
   const partial = await readOpenworldRules(native, 'unverified');
   expect(partial.roles).toBeNull();
   expect(partial.bans).toHaveLength(2);
-  expect(partial.capabilities).toEqual({ difficulty: false, unban: false });
+  expect(Object.values(partial.capabilities).every((supported) => !supported)).toBe(true);
+});
+it('uses precise saved borders only when they agree with live geometry and guards conflicting edits', async () => {
+  const { native, sent } = fixture();
+  const saved = (radius: number) =>
+    bytes({
+      format: 1,
+      worlds: {
+        mars: { allowed: true, border: { enabled: true, centre: [-1.234561, 2.345671], radius } },
+      },
+    });
+  const read = async (radius: number) =>
+    (
+      await readOpenworldRules(native, 'a1.2.10', undefined, undefined, async () => saved(radius))
+    ).borders?.worlds.find((world) => world.world === 'Mars')?.border;
+  expect(await read(2492)).toEqual({
+    enabled: true,
+    radiusMeters: 2492,
+    longitude: -1.234561,
+    latitude: 2.345671,
+  });
+  expect(await read(5000)).toEqual({
+    radiusMeters: 2500,
+    longitude: -1.23456,
+    latitude: 2.34567,
+  });
+  const before = vi.fn(async () => {});
+  const action = { kind: 'borderRadius', world: 'mars', value: 5000 } as const;
+  await expect(
+    performOpenworldRule(native, 'a1.2.10', action, before, async () => ({ borders: saved(5000) })),
+  ).rejects.toMatchObject({ code: 'conflict' });
+  expect(before).not.toHaveBeenCalled();
+  const files = vi
+    .fn()
+    .mockResolvedValueOnce({ borders: saved(2492) })
+    .mockResolvedValueOnce({ borders: saved(5000) });
+  await expect(
+    performOpenworldRule(native, 'a1.2.10', action, before, files),
+  ).rejects.toMatchObject({ code: 'operation_uncertain' });
+  expect(sent.filter((cmd) => cmd === 'border radius 5000 mars')).toHaveLength(1);
 });
 it('reads configured permissions and flags without projecting player assignments', async () => {
   const { native, sent } = fixture();
@@ -177,6 +222,18 @@ it('requires a verified release, UUID and allowed action before dispatch', async
   const f = fixture();
   const before = vi.fn(async () => {});
   expect(canUnbanOpenworldAccount('guest:Ada')).toBe(false);
+  expect(
+    openworldRuleActionSchema.safeParse({ kind: 'globalFlag', flag: 'entry', value: 'deny' })
+      .success,
+  ).toBe(false);
+  expect(
+    openworldRuleActionSchema.safeParse({
+      kind: 'zoneFlag',
+      zoneId: 7,
+      flag: 'entry',
+      value: 'deny',
+    }).success,
+  ).toBe(true);
   expect(openworldRuleActionSchema.safeParse({ kind: 'ban', uuid: account }).success).toBe(false);
   expect(openworldRuleActionSchema.safeParse({ kind: 'unban', uuid: 'Ada\nstop' }).success).toBe(
     false,
@@ -197,4 +254,109 @@ it('falls back to native role and zone summaries if the optional file provider c
   expect(data.roles?.entries[0]?.permissions).toBeNull();
   expect(data.zones).toEqual([{ name: 'Harbor', world: 'Earth', description: '80 m' }]);
   expect(sent).toContain('role list');
+});
+
+it('allows the native tri-state rules at their supported scopes and protects the command boundary', () => {
+  expect(
+    openworldRuleActionSchema.safeParse({ kind: 'globalFlag', flag: 'pvp', value: 'default' })
+      .success,
+  ).toBe(true);
+  expect(
+    openworldRuleActionSchema.safeParse({ kind: 'globalFlag', flag: 'entry\nstop', value: 'deny' })
+      .success,
+  ).toBe(false);
+  expect(
+    openworldRuleActionSchema.safeParse({
+      kind: 'zoneDescription',
+      zoneId: 1,
+      value: 'first\nstop',
+    }).success,
+  ).toBe(false);
+  expect(
+    openworldRuleActionSchema.safeParse({ kind: 'roleParent', role: 'guest', value: 'admin\nstop' })
+      .success,
+  ).toBe(false);
+});
+
+it('reads active supported fields from a1.2.10 and hides moderation on a rules-only read', async () => {
+  const { native, sent } = fixture();
+  const data = await readOpenworldRules(
+    native,
+    'a1.2.10',
+    async () =>
+      bytes({
+        format: 2,
+        defaultRole: 'player',
+        roles: {
+          player: {
+            name: 'Player',
+            priority: 0,
+            color: '#ff9922',
+            maxHomes: 3,
+            permissions: ['home.*', '-home.set'],
+          },
+        },
+      }),
+    async () =>
+      bytes({
+        format: 1,
+        zones: [
+          {
+            id: 71,
+            name: 'Harbor',
+            world: 'earth',
+            shape: 'circle',
+            centre: [1, 3],
+            radius: 80,
+            altitude: [-5, 20],
+            priority: 4,
+            color: '#cc8844',
+            description: 'Town pier',
+            members: ['private-account'],
+            flags: { entry: 'deny' },
+          },
+        ],
+      }),
+    async () =>
+      bytes({
+        format: 1,
+        worlds: {
+          earth: { allowed: true, border: { enabled: false, centre: [10, 30], radius: 40 } },
+        },
+      }),
+    { includeBans: false },
+  );
+  expect(data.zones?.[0]).toMatchObject({
+    id: 71,
+    world: 'earth',
+    shape: 'circle',
+    centre: [1, 3],
+    memberCount: 1,
+    flags: [{ key: 'entry', value: 'deny' }],
+  });
+  expect(data.roles?.entries[0]).toMatchObject({
+    maxHomes: 3,
+    permissions: ['home.*', '-home.set'],
+  });
+  expect(data.capabilities).toMatchObject({
+    difficulty: true,
+    unban: false,
+    globals: true,
+    zones: true,
+    borders: true,
+    spawning: true,
+    roles: true,
+  });
+  expect(data.permissionNodes).toEqual(['home.set']);
+  expect(data.globalFlags).toEqual({});
+  expect(data.naturalSpawning).toBe(true);
+  expect(data.borders?.worlds[0]?.border).toEqual({
+    enabled: false,
+    longitude: 10,
+    latitude: 30,
+    radiusMeters: 40,
+  });
+  expect(data.bans).toBeNull();
+  expect(sent).not.toContain('banlist');
+  expect(JSON.stringify(data)).not.toContain('private-account');
 });

@@ -1,7 +1,12 @@
 import { type AuthContext, DomainError } from '@nickhosting/core';
 import { sql } from 'kysely';
-import type { OpenworldRuleAction } from '../../../games/openworld/src/rules.js';
 import {
+  type OpenworldRuleAction,
+  openworldRuleGrant,
+} from '../../../games/openworld/src/rules.js';
+import { readNaturalSpawning } from '../../../games/openworld/src/rules-console.js';
+import {
+  canEditOpenworldTerritory,
   performOpenworldRule,
   readOpenworldRules,
 } from '../../../games/openworld/src/rules-native.js';
@@ -22,7 +27,7 @@ type RulesOptions = OpenworldNativeOptions & {
     who: AuthContext,
     serverId: string,
     signal: AbortSignal,
-  ) => Promise<{ roles?: Uint8Array; zones?: Uint8Array }>;
+  ) => Promise<{ roles?: Uint8Array; zones?: Uint8Array; borders?: Uint8Array }>;
 };
 
 export function createOpenworldRules(options: RulesOptions) {
@@ -38,7 +43,7 @@ export function createOpenworldRules(options: RulesOptions) {
       const result = await reads.get(scope.liveKey, 0, () =>
         connect(scope, (origin, token, signal) => {
           let saved: ReturnType<NonNullable<RulesOptions['readFiles']>> | undefined;
-          const documents = (key: 'roles' | 'zones') =>
+          const documents = (key: 'roles' | 'zones' | 'borders') =>
             readFiles &&
             (async () => {
               saved ??= readFiles(who, serverId, signal);
@@ -49,14 +54,30 @@ export function createOpenworldRules(options: RulesOptions) {
             scope.version,
             documents('roles'),
             documents('zones'),
+            documents('borders'),
+            { includeBans: false },
           );
         }),
       );
       assertCurrentOpenworldScope(scope, await readOpenworldScope(db, serverId, reader));
       return { ...result, processRef: openworldProcessRef(scope) };
     },
+    async spawning(who: AuthContext, serverId: string) {
+      const reader = { who, resource: 'rules' as const, ruleGrant: 'territory.manage' as const };
+      const scope = await readOpenworldScope(db, serverId, reader);
+      if (scope.reason) throw new DomainError('game_not_ready');
+      const enabled = await connect(scope, (origin, token, signal) =>
+        readNaturalSpawning({ origin, token, signal, fetcher }),
+      );
+      assertCurrentOpenworldScope(scope, await readOpenworldScope(db, serverId, reader));
+      return {
+        processRef: openworldProcessRef(scope),
+        enabled,
+        editable: enabled !== null && canEditOpenworldTerritory(scope.version),
+      };
+    },
     async change(who: AuthContext, serverId: string, input: Request) {
-      const ruleGrant = input.action.kind === 'difficulty' ? 'rules.manage' : 'bans.manage';
+      const ruleGrant = openworldRuleGrant(input.action);
       const reader = { who, resource: 'rules', ruleGrant } as const;
       const scope = await readOpenworldScope(db, serverId, reader);
       const receipt = openworldActionReceipt(db, who, serverId, 'rule', input, {
@@ -90,6 +111,7 @@ export function createOpenworldRules(options: RulesOptions) {
                   if (signal.aborted) throw new DomainError('game_not_ready');
                   markDispatched();
                 },
+                readFiles ? () => readFiles(who, serverId, signal) : undefined,
               );
             }),
           ),

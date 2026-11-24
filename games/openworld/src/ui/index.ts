@@ -251,16 +251,22 @@ export const openworldUiModule = defineTrustedGameUiModule({
       ...openworldMapCatalogs.en,
       ...openworldFactoriesCatalogs.en,
       ...openworldRulesCatalogs.en,
+      'games.openworld.permissions.manageTerritory': 'Manage territory',
+      'games.openworld.permissions.manageTerritoryHelp':
+        'Change world rules, zone protections and travel restrictions.',
+      'games.openworld.permissions.manageRoles': 'Manage game roles',
+      'games.openworld.permissions.manageRolesHelp':
+        'Edit game permissions and assign roles to players, including administrative roles.',
       ...openworldSeedCatalogs.en,
       'games.openworld.permissions.viewRules': 'View server rules',
       'games.openworld.permissions.viewRulesHelp':
-        'View game roles, protected zones, planetary borders, difficulty and bans.',
+        'View game roles, protected zones, planetary borders and difficulty.',
       'games.openworld.permissions.manageRules': 'Change difficulty',
       'games.openworld.permissions.manageRulesHelp':
         'Change the game difficulty. Requires access to server rules.',
       'games.openworld.permissions.manageBans': 'Manage persistent bans',
       'games.openworld.permissions.manageBansHelp':
-        'Lift account bans by UUID. Requires access to server rules.',
+        'View and lift bans in Players. Issuing a ban also requires Moderate players.',
       'games.openworld.permissions.inspectSeed': 'Inspect the world seed',
       'games.openworld.permissions.inspectSeedHelp':
         'View the seed and locate resources in unexplored terrain.',
@@ -300,16 +306,22 @@ export const openworldUiModule = defineTrustedGameUiModule({
       ...openworldMapCatalogs.it,
       ...openworldFactoriesCatalogs.it,
       ...openworldRulesCatalogs.it,
+      'games.openworld.permissions.manageTerritory': 'Gestisci il territorio',
+      'games.openworld.permissions.manageTerritoryHelp':
+        'Modifica regole globali, protezioni delle zone e limiti di viaggio.',
+      'games.openworld.permissions.manageRoles': 'Gestisci i ruoli di gioco',
+      'games.openworld.permissions.manageRolesHelp':
+        'Modifica i permessi di gioco e assegna ruoli ai giocatori, anche amministrativi.',
       ...openworldSeedCatalogs.it,
       'games.openworld.permissions.viewRules': 'Consulta le regole del server',
       'games.openworld.permissions.viewRulesHelp':
-        'Mostra ruoli di gioco, zone protette, confini planetari, difficoltà e ban.',
+        'Mostra ruoli di gioco, zone protette, confini planetari e difficoltà.',
       'games.openworld.permissions.manageRules': 'Modifica la difficoltà',
       'games.openworld.permissions.manageRulesHelp':
         'Modifica la difficoltà del gioco. Richiede l’accesso alle regole del server.',
       'games.openworld.permissions.manageBans': 'Gestisci i ban persistenti',
       'games.openworld.permissions.manageBansHelp':
-        'Revoca i ban degli account per UUID. Richiede l’accesso alle regole del server.',
+        'Consulta e revoca i ban in Giocatori. Per applicarne uno serve anche il permesso di moderare i giocatori.',
       'games.openworld.permissions.inspectSeed': 'Ispeziona il seed del mondo',
       'games.openworld.permissions.inspectSeedHelp':
         'Mostra il seed e permette di localizzare risorse nel terreno inesplorato.',

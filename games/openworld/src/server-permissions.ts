@@ -2,6 +2,24 @@ import type { ServerPermissionDefinition } from '@nickhosting/core';
 
 export const openworldTelemetryPermissions: ServerPermissionDefinition[] = [
   {
+    key: 'game.openworld.territory.manage',
+    resource: 'game.openworld.territory',
+    kind: 'additional',
+    legacy: 'explicit',
+    labelKey: 'games.openworld.permissions.manageTerritory',
+    resourceLabelKey: 'games.openworld.rules.zones',
+    descriptionKey: 'games.openworld.permissions.manageTerritoryHelp',
+  },
+  {
+    key: 'game.openworld.roles.manage',
+    resource: 'game.openworld.roles',
+    kind: 'additional',
+    legacy: 'explicit',
+    labelKey: 'games.openworld.permissions.manageRoles',
+    resourceLabelKey: 'games.openworld.rules.roles',
+    descriptionKey: 'games.openworld.permissions.manageRolesHelp',
+  },
+  {
     key: 'game.openworld.rules.view',
     resource: 'game.openworld.rules',
     kind: 'additional',

@@ -112,8 +112,17 @@ export async function readOpenworldScope(
         playerGrant?: never;
         savedSkin: { account: string; view: 'head' | 'body'; hash: string };
       }
+    | {
+        who: AuthContext;
+        resource: 'player-moderation';
+        moderationGrant: 'bans.manage' | 'ban.create' | 'roles.manage' | 'territory.manage';
+      }
     | { who: AuthContext; resource: 'seed' }
-    | { who: AuthContext; resource: 'rules'; ruleGrant?: 'rules.manage' | 'bans.manage' }
+    | {
+        who: AuthContext;
+        resource: 'rules';
+        ruleGrant?: 'rules.manage' | 'bans.manage' | 'territory.manage' | 'roles.manage';
+      }
     | {
         who: AuthContext;
         resource: 'map';
@@ -225,6 +234,17 @@ export async function readOpenworldScope(
         (reader.ruleGrant && !keys.includes(`game.openworld.${reader.ruleGrant}`))
       )
         throw new DomainError('forbidden');
+    } else if (reader.resource === 'player-moderation') {
+      const canModerate =
+        reader.moderationGrant === 'ban.create'
+          ? keys.includes('game.openworld.bans.manage') &&
+            keys.includes('game.openworld.players.moderate')
+          : keys.includes(`game.openworld.${reader.moderationGrant}`);
+      const canSeeTarget =
+        reader.moderationGrant === 'bans.manage'
+          ? keys.includes('game.openworld.players.read')
+          : canInspectPlayers;
+      if (!canModerate || !canSeeTarget) throw new DomainError('forbidden');
     } else if (reader.resource === 'map') {
       canManageCheckpoints = keys.includes('game.openworld.checkpoints.manage');
       if (

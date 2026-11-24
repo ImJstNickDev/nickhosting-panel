@@ -55,17 +55,50 @@ const sample: OpenworldRulesSnapshot & { processRef: string } = {
         name: 'Moderator',
         priority: 50,
         parent: 'player',
-        permissions: ['admin.kick', 'admin.teleport'],
+        permissions: ['admin.kick', '-home.delete'],
+        color: '#876abb',
+        maxHomes: 10,
       },
-      { key: 'player', name: 'Player', priority: 0, parent: null, permissions: ['build', 'chat'] },
+      {
+        key: 'player',
+        name: 'Player',
+        priority: 0,
+        parent: null,
+        permissions: ['build', 'home.*'],
+        color: '#578160',
+        maxHomes: 3,
+      },
     ],
   },
   zones: [
     {
-      name: 'Old Harbour',
+      name: 'Harbour',
+      id: 1,
+      shape: 'circle',
+      centre: [3, 6],
+      radius: 50,
+      priority: 10,
+      color: '#39917c',
       world: 'earth',
-      description: 'Face 0 · 160, 240 m',
-      flags: [{ key: 'pvp', value: 'deny' }],
+      description: 'North coast trading port',
+      flags: [{ key: 'pvp', value: 'allow' }],
+    },
+    {
+      id: 2,
+      name: 'Citadel',
+      world: 'moon',
+      shape: 'polygon',
+      points: [
+        [8, 9],
+        [9, 10.1],
+        [11, 10.5],
+        [12, 9],
+        [10, 8.5],
+      ],
+      priority: 3,
+      color: '#8069a0',
+      flags: [{ key: 'build', value: 'deny' }],
+      description: 'Lunar outpost',
     },
   ],
   borders: {
@@ -83,7 +116,17 @@ const sample: OpenworldRulesSnapshot & { processRef: string } = {
     { uuid: accountId, name: 'Harbour Scout', reason: 'Repeated trespassing' },
     { uuid: 'guest:quay', name: 'Harbour Guest', reason: null },
   ],
-  capabilities: { difficulty: true, unban: true },
+  globalFlags: { pvp: 'deny', explosions: 'deny', build: 'allow' },
+  permissionNodes: ['build', 'admin.kick', 'home.set', 'home.delete'],
+  capabilities: {
+    difficulty: true,
+    unban: true,
+    globals: true,
+    zones: true,
+    borders: true,
+    roles: true,
+    spawning: true,
+  },
 };
 async function open(locale: 'en' | 'it', width: number) {
   const page = await browser.newPage({ locale, viewport: { width, height: 850 } });
@@ -112,134 +155,203 @@ async function open(locale: 'en' | 'it', width: number) {
       },
     }),
   );
+  page.setDefaultTimeout(4000);
   return page;
 }
-it('shows per-world rules and game permissions, confirms difficulty and a ban removal, and refreshes the verified result', async () => {
+it('edits a world rule, traces zone exceptions and inherited group permissions', async () => {
   const page = await open('en', 1152);
   try {
-    let state = structuredClone(sample);
-    const writes: {
-      requestId: string;
-      processRef: string;
-      action: { kind: string; uuid?: string; value?: 'hard' };
-    }[] = [];
-    const errors: string[] = [];
-    page.on('pageerror', (e) => errors.push(e.message));
+    const state = structuredClone(sample);
+    const writes: unknown[] = [];
+    let reads = 0;
     await page.route('**/openworld/rules', async (route) => {
-      if (route.request().method() === 'GET') return route.fulfill({ json: state });
+      if (route.request().method() === 'GET') {
+        reads++;
+        return route.fulfill({ json: state });
+      }
       const body = route.request().postDataJSON();
-      writes.push(body);
-      if (body.action.kind === 'unban')
-        state = { ...state, bans: state.bans?.filter((b) => b.uuid !== body.action.uuid) ?? null };
-      if (body.action.kind === 'difficulty') state = { ...state, difficulty: body.action.value };
+      writes.push(body.action);
+      if (body.action.kind === 'zoneFlag') {
+        const zone = state.zones?.find((z) => z.id === body.action.zoneId);
+        if (zone) zone.flags = (zone.flags ?? []).filter((f) => f.key !== body.action.flag);
+      }
+      if (body.action.kind === 'globalFlag')
+        state.globalFlags = { ...state.globalFlags, pvp: body.action.value };
       return route.fulfill({ json: { outcome: 'accepted', requestId: body.requestId } });
     });
-    await page.goto(`${url}&manage&bans&consoleRead&consoleCommand`);
+    await page.goto(`${url}&manage&territory&groups&map`);
     await see(page.getByRole('heading', { name: 'World rules' })).toBeVisible();
-    await see(page.getByText('Old Harbour')).toBeVisible();
-    await see(page.getByText('Denied', { exact: true })).toBeVisible();
-    await see(page.getByText('Closed', { exact: true })).toBeVisible();
-    await page.getByText('Moderator', { exact: true }).click();
-    await see(page.getByText('admin.kick, admin.teleport')).toBeVisible();
-    await see(page.getByText('Repeated trespassing')).toBeVisible();
-    await see(page.getByText('Radius 250 m · Longitude 2.5° · Latitude 3°')).toBeVisible();
-    await see(page.getByRole('link', { name: 'Open console' })).toHaveAttribute(
-      'href',
-      '/servers/10000000-0000-4000-8000-000000000001/console',
-    );
-    await page.screenshot({ path: `${shots}/rules-desktop.png`, fullPage: true });
-    await page.getByRole('button', { name: 'Change difficulty' }).click();
-    const dialog = page.getByRole('dialog');
-    await dialog.getByLabel('Difficulty', { exact: true }).selectOption('hard');
-    await dialog.getByRole('button', { name: 'Save changes' }).click();
-    await see(page.getByRole('status')).toHaveText('Difficulty updated.');
-    await see(page.getByText('Hard', { exact: true })).toBeVisible();
-    await page.getByRole('button', { name: 'Lift ban' }).click();
-    await see(dialog.getByText(accountId)).toBeVisible();
-    await dialog.getByRole('button', { name: 'Cancel' }).click();
-    expect(writes).toHaveLength(1);
-    await page.getByRole('button', { name: 'Lift ban' }).click();
-    await dialog.getByRole('button', { name: 'Lift ban' }).click();
     await see(page.getByText('Harbour Scout')).toHaveCount(0);
-    await see(page.getByText('Harbour Guest')).toBeVisible();
-    await see(page.getByRole('button', { name: 'Lift ban' })).toHaveCount(0);
-    expect(writes.map((w) => w.action)).toEqual([
-      { kind: 'difficulty', value: 'hard' },
-      { kind: 'unban', uuid: accountId },
+    await page.screenshot({ path: `${shots}/rules-editor-world.png`, fullPage: true });
+    await page.getByRole('button', { name: 'Harbour', exact: false }).click();
+    await see(page.getByRole('heading', { name: 'Harbour' })).toBeVisible();
+    await see(page.getByRole('link', { name: 'Open in Map' })).toBeVisible();
+    await see(page.getByText('World rule: Denied').first()).toBeVisible();
+    await page.screenshot({ path: `${shots}/rules-editor-zone.png`, fullPage: true });
+    await page.getByRole('button', { name: 'Player combat (PvP): Allowed', exact: true }).click();
+    const zoneEdit = page.getByRole('dialog');
+    await zoneEdit.getByLabel(/Use world rule/).check();
+    await zoneEdit.getByRole('button', { name: 'Save changes' }).click();
+    await see(
+      page.getByRole('button', { name: 'Player combat (PvP): Denied', exact: true }),
+    ).toBeVisible();
+    await page.getByRole('button', { name: 'World rules', exact: true }).click();
+    await page.getByRole('button', { name: 'Player combat (PvP): Denied' }).click();
+    const dialog = page.getByRole('dialog');
+    await dialog.getByLabel('Allowed', { exact: true }).check();
+    await dialog.getByRole('button', { name: 'Save changes' }).click();
+    await see(
+      page.getByRole('button', { name: 'Player combat (PvP): Allowed', exact: true }),
+    ).toBeVisible();
+    expect(writes).toEqual([
+      { kind: 'zoneFlag', zoneId: 1, flag: 'pvp', value: 'default' },
+      { kind: 'globalFlag', flag: 'pvp', value: 'allow' },
     ]);
-    expect(writes.every((w) => w.processRef === processRef && w.requestId.length === 36)).toBe(
-      true,
-    );
-    expect(errors).toEqual([]);
+    expect(reads).toBe(3);
+    await page.getByRole('button', { name: 'Permission groups', exact: true }).click();
+    await page.getByRole('button', { name: 'Moderator', exact: true }).click();
+    await see(page.getByRole('heading', { name: 'Moderator' })).toBeVisible();
+    await see(page.getByText('home.*', { exact: true })).toBeVisible();
+    await page.screenshot({ path: `${shots}/rules-editor-groups.png`, fullPage: true });
+    await page.getByRole('searchbox', { name: 'Filter permissions' }).fill('kick');
+    await see(page.getByText('admin.kick', { exact: true })).toBeVisible();
+    await see(page.getByText('home.*', { exact: true })).toHaveCount(0);
   } finally {
     await page.close();
   }
 });
-it('separates unavailable from empty on mobile, gates mutations by grant and suppresses reads while offline or forbidden', async () => {
+it('keeps a failed refresh readable, clears revoked access and reflows on mobile', async () => {
   const page = await open('it', 390);
   try {
-    let reads = 0,
-      forbidden = false;
-    await page.route('**/openworld/rules', (route) => {
+    let status = 200,
+      reads = 0;
+    await page.route('**/openworld/rules', (r) => {
       reads++;
-      return forbidden
-        ? route.fulfill({
-            status: 403,
-            json: { error: { code: 'forbidden', messageKey: 'errors.forbidden' } },
-          })
-        : route.fulfill({ json: { ...sample, zones: [], borders: null } });
+      return status === 200
+        ? r.fulfill({ json: sample })
+        : r.fulfill({
+            status,
+            json: {
+              error: {
+                code: status === 403 ? 'forbidden' : 'integration_unavailable',
+                messageKey: status === 403 ? 'errors.forbidden' : 'errors.integration_unavailable',
+              },
+            },
+          });
     });
     await page.goto(url);
-    await see(page.getByText('Nessuna zona protetta.')).toBeVisible();
-    await see(page.getByText('Non disponibile')).toBeVisible();
-    await see(page.getByText('Harbour Scout')).toBeVisible();
+    await see(page.getByRole('heading', { name: 'Regole del mondo' })).toBeVisible();
     await see(page.getByRole('button', { name: 'Cambia difficoltà' })).toHaveCount(0);
-    await see(page.getByRole('button', { name: 'Revoca ban' })).toHaveCount(0);
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(
       true,
     );
-    await page.screenshot({ path: `${shots}/rules-mobile-it.png`, fullPage: true });
-    forbidden = true;
-    await page.getByRole('button', { name: 'Aggiorna' }).click();
+    await page.screenshot({ path: `${shots}/rules-editor-mobile-it.png`, fullPage: true });
+    status = 503;
+    await page.getByRole('button', { name: 'Aggiorna', exact: true }).click();
     await see(page.getByRole('alert')).toBeVisible();
-    await see(page.getByText('Harbour Scout')).toHaveCount(0);
+    await see(page.getByText('Harbour')).toBeVisible();
+    status = 403;
+    await page.getByRole('button', { name: 'Aggiorna', exact: true }).click();
+    await see(page.getByText('Harbour')).toHaveCount(0);
+    status = 503;
+    await page.getByRole('alert').getByRole('button').click();
+    await see(page.getByRole('alert')).toContainText('Questa integrazione non è disponibile.');
+    await see(page.getByRole('alert').getByRole('button')).toBeVisible();
+    await see(page.getByText('Harbour')).toHaveCount(0);
     const count = reads;
-    await page.goto(`${url}&offline&consoleRead&consoleCommand`);
-    await see(page.getByRole('link', { name: 'Apri console' })).toHaveCount(0);
+    await page.goto(`${url}&offline`);
     await see(page.getByText('Avvia il server per consultare le regole.')).toBeVisible();
-    await page.goto(`${url}&restricted&manage&bans`);
+    await page.goto(`${url}&restricted`);
     await see(page.getByRole('alert')).toBeVisible();
     expect(reads).toBe(count);
   } finally {
     await page.close();
   }
 });
-it('prevents a repeated moderation command when the game outcome is uncertain', async () => {
+it('creates a group on mobile, adds an explicit denial and traces the inherited wildcard to its source', async () => {
+  const page = await open('en', 390);
+  try {
+    const state = structuredClone(sample);
+    const groups = state.roles?.entries;
+    if (!groups) throw Error('missing fixture groups');
+    const sent: unknown[] = [];
+    await page.route('**/openworld/rules', (route) => {
+      if (route.request().method() === 'GET') return route.fulfill({ json: state });
+      const body = route.request().postDataJSON(),
+        a = body.action;
+      sent.push(a);
+      if (a.kind === 'roleCreate')
+        groups.push({ key: a.role, name: a.role, priority: 1, parent: a.parent, permissions: [] });
+      if (a.kind === 'rolePermission')
+        groups.find((g) => g.key === a.role)?.permissions?.push(a.permission);
+      return route.fulfill({ json: { requestId: body.requestId, outcome: 'accepted' } });
+    });
+    await page.goto(`${url}&groups`);
+    await page.getByRole('button', { name: 'Permission groups', exact: true }).click();
+    await page.getByRole('button', { name: 'New group' }).click();
+    const dialog = page.getByRole('dialog');
+    await dialog.getByLabel('Group ID').fill('builder');
+    await dialog.getByRole('button', { name: 'Create group' }).click();
+    await see(page.getByRole('heading', { name: 'builder' })).toBeVisible();
+    await page.getByRole('button', { name: 'Add permission' }).click();
+    await dialog.getByLabel('Permission', { exact: true }).fill('home.delete');
+    await dialog.getByLabel('Denied', { exact: true }).check();
+    await dialog.getByRole('button', { name: 'Save changes' }).click();
+    await page.getByRole('searchbox', { name: 'Filter permissions' }).fill('home.delete');
+    await see(page.getByText('home.delete · Denied by builder')).toBeVisible();
+    await see(page.getByText('home.*', { exact: true })).toBeVisible();
+    await see(page.getByRole('button', { name: 'Remove home.*' })).toHaveCount(0);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(
+      true,
+    );
+    await page.screenshot({ path: `${shots}/rules-editor-mobile-group.png`, fullPage: true });
+    await page.setViewportSize({ width: 320, height: 740 });
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(
+      true,
+    );
+    expect(sent).toEqual([
+      { kind: 'roleCreate', role: 'builder', parent: 'player' },
+      { kind: 'rolePermission', role: 'builder', permission: '-home.delete', add: true },
+    ]);
+  } finally {
+    await page.close();
+  }
+});
+it('separates territory permission and keeps ambiguous zone targets and uncertain writes read-only', async () => {
   const page = await open('en', 900);
   try {
     let writes = 0;
+    const state = structuredClone(sample);
+    state.zones = [
+      { id: 11, name: 'Arena', world: 'earth', description: 'Capital', flags: [] },
+      { id: 12, name: 'Arena', world: 'moon', description: 'Colony', flags: [] },
+    ];
     await page.route('**/openworld/rules', (route) => {
-      if (route.request().method() === 'GET') return route.fulfill({ json: sample });
+      if (route.request().method() === 'GET') return route.fulfill({ json: state });
       writes++;
       return route.fulfill({
         status: 503,
         json: { error: { code: 'operation_uncertain', messageKey: 'errors.operation_uncertain' } },
       });
     });
-    for (const grants of ['consoleRead', 'consoleCommand', 'bans']) {
-      await page.goto(`${url}&${grants}`);
-      await see(page.getByRole('heading', { name: 'Banned players' })).toBeVisible();
-      await see(page.getByRole('link', { name: 'Open console' })).toHaveCount(0);
-    }
-    await see(page.getByRole('button', { name: 'Change difficulty' })).toHaveCount(0);
-    await page.getByRole('button', { name: 'Lift ban' }).click();
+    await page.goto(`${url}&manage`);
+    await see(page.getByRole('heading', { name: 'World rules' })).toBeVisible();
+    await see(page.getByRole('button', { name: 'Change difficulty' })).toBeVisible();
+    await see(page.getByRole('button', { name: 'Player combat (PvP): Denied' })).toHaveCount(0);
+    await page.goto(`${url}&territory`);
+    await page.getByRole('button', { name: 'Arena', exact: false }).first().click();
+    await see(page.getByRole('heading', { name: 'Arena' })).toBeVisible();
+    await see(page.getByRole('button', { name: 'Apply preset' })).toHaveCount(0);
+    await page.getByRole('button', { name: 'World rules', exact: true }).click();
+    await page.getByRole('button', { name: 'View worlds' }).click();
+    await page.getByRole('button', { name: /moon/i }).click();
+    await page.getByRole('button', { name: 'Edit Radius (m)' }).click();
     const dialog = page.getByRole('dialog');
-    await dialog.getByRole('button', { name: 'Lift ban' }).click();
+    await dialog.getByLabel('Radius (m)').fill('275');
+    await dialog.getByRole('button', { name: 'Save changes' }).click();
     await see(dialog.getByRole('alert')).toBeVisible();
-    await see(dialog.getByRole('button', { name: 'Lift ban' })).toBeDisabled();
+    await see(dialog.getByRole('button', { name: 'Save changes' })).toBeDisabled();
     expect(writes).toBe(1);
-    await dialog.getByRole('button', { name: 'Close', exact: true }).last().click();
-    await see(dialog).toHaveCount(0);
   } finally {
     await page.close();
   }

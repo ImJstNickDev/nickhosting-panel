@@ -22,7 +22,9 @@ vi.mock('../../../games/openworld/src/rules-native.js', () => ({
 
 const read = 'game.openworld.rules.view',
   write = 'game.openworld.rules.manage',
-  bans = 'game.openworld.bans.manage';
+  bans = 'game.openworld.bans.manage',
+  territory = 'game.openworld.territory.manage',
+  roles = 'game.openworld.roles.manage';
 let database: Awaited<ReturnType<typeof createTestDatabase>>;
 beforeAll(async () => {
   database = await createTestDatabase();
@@ -140,6 +142,24 @@ it('authorizes viewing rules independently from the seed, console, live moderati
   expect((await f.request(edit)).status).toBe(403);
 });
 
+it('keeps existing difficulty and ban grants independent of territory and role editing', async () => {
+  const f = await fixture();
+  await f.power('running');
+  await f.grant(read, write, bans);
+  const { processRef } = await (await f.request()).json();
+  const change = (action: unknown) => f.request({ requestId: randomUUID(), processRef, action });
+  const flag = { kind: 'globalFlag', flag: 'pvp', value: 'deny' };
+  const group = { kind: 'roleCreate', role: 'builders' };
+  expect((await change(flag)).status).toBe(403);
+  expect((await change(group)).status).toBe(403);
+  await f.grant(read, territory);
+  expect((await change(flag)).status).toBe(200);
+  expect((await change(group)).status).toBe(403);
+  await f.grant(read, roles);
+  expect((await change(group)).status).toBe(200);
+  expect((await change(flag)).status).toBe(403);
+});
+
 it('rechecks current rules access after a shared read and immediately before dispatch', async () => {
   const f = await fixture();
   await f.grant(read, write);
@@ -223,11 +243,18 @@ it('preserves uncertain requests and rejects a replaced process without sending 
 it('upgrades the stored Openworld permission declaration without changing unrelated entries or duplicating grants', async () => {
   await fixture();
   const original = openworldManifest.serverPermissions.filter(
-    (p) => ![read, write, bans, 'game.openworld.seed.inspect'].includes(p.key),
+    (p) => ![read, write, bans, territory, roles, 'game.openworld.seed.inspect'].includes(p.key),
   );
   const migration = await readFile(
     new URL(
       '../../../packages/database/migrations/085_openworld_rules_seed_permissions.sql',
+      import.meta.url,
+    ),
+    'utf8',
+  );
+  const editorMigration = await readFile(
+    new URL(
+      '../../../packages/database/migrations/099_openworld_world_and_role_permissions.sql',
       import.meta.url,
     ),
     'utf8',
@@ -240,6 +267,8 @@ it('upgrades the stored Openworld permission declaration without changing unrela
       .execute();
     await sql.raw(migration).execute(tx);
     await sql.raw(migration).execute(tx);
+    await sql.raw(editorMigration).execute(tx);
+    await sql.raw(editorMigration).execute(tx);
     const row = await tx
       .selectFrom('game_integrations')
       .select('manifest')

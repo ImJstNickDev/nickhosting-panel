@@ -1,5 +1,6 @@
 import { DomainError } from '@nickhosting/core';
-import { z } from 'zod';
+import { OpenworldTokenExpired } from './dashboard-api.js';
+
 import type { OpenworldNativeConnection } from './native-diagnostics.js';
 import {
   type OpenworldDifficulty,
@@ -8,7 +9,10 @@ import {
   openworldDifficulties,
   openworldRuleActionSchema,
 } from './rules.js';
-import { ruleReplies } from './rules-console.js';
+import { type OpenworldRuleCommand, readNaturalSpawning, ruleReplies } from './rules-console.js';
+import { fileContents, label, rolesFromFile, savedBorders } from './rules-documents.js';
+import { planOpenworldEditorAction } from './rules-edit.js';
+import { globalFlags, mergeZoneDetails, permissionNodes } from './rules-snapshot.js';
 
 type Snapshot = OpenworldRulesSnapshot;
 type ReadFile = () => Promise<Uint8Array | undefined>;
@@ -33,93 +37,13 @@ const verified = new Set([
   'a1.2.7',
   'a1.2.8',
   'a1.2.9',
+  'a1.2.10',
 ]);
-const key = z.string().regex(/^[a-z0-9_-]{1,32}$/);
-const label = z
-  .string()
-  .min(1)
-  .max(256)
-  .refine(
-    (value) => !Array.from(value).some((c) => c.charCodeAt(0) < 32 || c.charCodeAt(0) === 127),
-  );
-const roleFile = z.object({
-  format: z.literal(2),
-  defaultRole: key,
-  roles: z.record(
-    key,
-    z.object({
-      name: label,
-      priority: z.int(),
-      parent: key.nullish(),
-      permissions: z.array(z.string().regex(/^[a-zA-Z0-9.*_!-]{1,128}$/)).max(1024),
-    }),
-  ),
-});
-const zonesFile = z.object({
-  format: z.literal(1),
-  zones: z
-    .array(
-      z.object({
-        name: label,
-        world: key,
-        shape: z.enum(['circle', 'polygon']),
-        radius: z.number().nonnegative().optional(),
-        points: z
-          .array(z.tuple([z.number(), z.number()]))
-          .max(2000)
-          .optional(),
-        flags: z
-          .record(z.string().regex(/^[a-z0-9_.-]{1,100}$/), z.enum(['allow', 'deny']))
-          .optional(),
-      }),
-    )
-    .max(4096),
-});
-async function fileContents(read?: ReadFile) {
-  try {
-    const bytes = await read?.();
-    if (!bytes || bytes.byteLength > 1024 * 1024) return null;
-    return JSON.parse(new TextDecoder().decode(bytes));
-  } catch (error) {
-    if (
-      error instanceof DomainError &&
-      [
-        'unauthenticated',
-        'forbidden',
-        'provenance_mismatch',
-        'conflict',
-        'game_not_ready',
-      ].includes(error.code)
-    )
-      throw error;
-    return null;
-  }
+export function canChangeOpenworldLegacyRules(version: string) {
+  return verified.has(version);
 }
-function rolesFromFile(document: unknown): Snapshot['roles'] {
-  const result = roleFile.safeParse(document);
-  if (!result.success || Object.keys(result.data.roles).length > 512) return null;
-  return {
-    defaultRole: result.data.defaultRole,
-    entries: Object.entries(result.data.roles)
-      .map(([key, row]) => ({
-        key,
-        name: row.name,
-        priority: row.priority,
-        parent: row.parent ?? null,
-        permissions: row.permissions,
-      }))
-      .sort((a, b) => b.priority - a.priority || a.key.localeCompare(b.key)),
-  };
-}
-function zonesFromFile(document: unknown): Snapshot['zones'] {
-  const result = zonesFile.safeParse(document);
-  if (!result.success) return null;
-  return result.data.zones.map((z) => ({
-    name: z.name,
-    world: z.world,
-    description: z.shape === 'circle' && z.radius != null ? `${z.radius} m` : '',
-    flags: Object.entries(z.flags ?? {}).map(([key, value]) => ({ key, value })),
-  }));
+export function canEditOpenworldTerritory(version: string) {
+  return version === 'a1.2.10' || version === 'a1.2.9';
 }
 function parseRows<T>(lines: string[], parse: (line: string) => T | null): T[] | null {
   const rows: T[] = [];
@@ -177,7 +101,14 @@ function zones(reply: Reply): Snapshot['zones'] {
     return { name: m[1], world: m[2], description: radius ?? '' };
   });
 }
-function borders(reply: Reply): Snapshot['borders'] {
+// The console rounds values for display (including converting metres to kilometres).
+// Only use the file's extra precision when it agrees with that observation.
+function matchesDisplay(exact: number, displayed: string, scale = 1) {
+  const precision = displayed.split('.')[1]?.length ?? 0;
+  return Math.abs(exact / scale - Number(displayed)) <= 0.5 * 10 ** -precision + 1e-10;
+}
+function borders(reply: Reply, document?: unknown, verifyWorld?: string): Snapshot['borders'] {
+  const documents = savedBorders(document);
   if (!reply?.accepted) return null;
   const [title, ...lines] = reply.lines;
   const state = /^Travel rules: space is (open|closed)\.$/.exec(title ?? '')?.[1];
@@ -185,13 +116,31 @@ function borders(reply: Reply): Snapshot['borders'] {
   const worlds = parseRows(lines, (l) => {
     const m = /^ {2}• ([^:]{1,128}): (.+)$/.exec(l);
     if (!m?.[1] || !m[2] || !label.safeParse(m[1]).success) return null;
-    if (m[2] === 'open, no border' || m[2] === 'closed')
-      return { world: m[1], description: m[2] === 'closed' ? 'closed' : 'open' };
+    const world = m[1],
+      stored = documents?.[world.toLowerCase()];
+    const saved = stored?.border;
+    const savedGeometry = saved && {
+      enabled: saved.enabled,
+      longitude: saved.centre[0],
+      latitude: saved.centre[1],
+      radiusMeters: saved.radius,
+    };
+    const verify = verifyWorld?.toLowerCase() === world.toLowerCase();
+    if (m[2] === 'open, no border' || m[2] === 'closed') {
+      const closed = m[2] === 'closed';
+      const agrees = stored && stored.allowed === !closed && (closed || !stored.border.enabled);
+      if (verify && stored && !agrees) throw new DomainError('conflict');
+      return {
+        world,
+        description: closed ? 'closed' : 'open',
+        ...(agrees && savedGeometry ? { border: savedGeometry } : {}),
+      };
+    }
     const geometry =
       /^a border of (\d+(?:\.\d+)?) (m|km) around lon (-?\d+(?:\.\d+)?), lat (-?\d+(?:\.\d+)?)$/.exec(
         m[2],
       );
-    if (!geometry) return null;
+    if (!geometry?.[1] || !geometry[3] || !geometry[4]) return null;
     const radiusMeters = Number(geometry[1]) * (geometry[2] === 'km' ? 1000 : 1);
     const longitude = Number(geometry[3]),
       latitude = Number(geometry[4]);
@@ -202,11 +151,22 @@ function borders(reply: Reply): Snapshot['borders'] {
       Math.abs(latitude) > 90
     )
       return null;
-    return { world: m[1], description: 'bounded', border: { radiusMeters, longitude, latitude } };
+    const agrees =
+      stored?.allowed &&
+      saved?.enabled &&
+      matchesDisplay(saved.radius, geometry[1], geometry[2] === 'km' ? 1000 : 1) &&
+      matchesDisplay(saved.centre[0], geometry[3]) &&
+      matchesDisplay(saved.centre[1], geometry[4]);
+    if (verify && stored && !agrees) throw new DomainError('conflict');
+    return {
+      world,
+      description: 'bounded',
+      border: agrees && savedGeometry ? savedGeometry : { radiusMeters, longitude, latitude },
+    };
   });
   return worlds ? { spaceOpen: state === 'open', worlds } : null;
 }
-function bans(reply: Reply): Snapshot['bans'] {
+export function parseOpenworldBanList(reply: Reply): Snapshot['bans'] {
   if (!reply?.accepted) return null;
   const [title, ...lines] = reply.lines;
   if (title === 'Nobody is banned.' && !lines.length) return [];
@@ -235,49 +195,122 @@ export async function readOpenworldRules(
   version: string,
   readRoles?: ReadFile,
   readZones?: ReadFile,
+  readBorders?: ReadFile,
+  options?: { includeBans?: boolean },
 ): Promise<Snapshot> {
-  const [roleDoc, zoneDoc] = await Promise.all([fileContents(readRoles), fileContents(readZones)]);
+  const [roleDoc, zoneDoc, borderDoc] = await Promise.all([
+    fileContents(readRoles),
+    fileContents(readZones),
+    fileContents(readBorders),
+  ]);
   const fromFile = rolesFromFile(roleDoc);
-  const replies = await ruleReplies(native, [
-    ...(!fromFile ? ['role list' as const] : []),
-    'zone list',
-    'difficulty',
-    'border info',
-    'banlist',
+  const commands: OpenworldRuleCommand[] = ['zone list', 'difficulty', 'border info'];
+  if (!fromFile) commands.push('role list');
+  if (options?.includeBans !== false) commands.push('banlist');
+  const editing = canEditOpenworldTerritory(version);
+  if (editing) commands.push('role nodes');
+  const [replies, naturalSpawning] = await Promise.all([
+    ruleReplies(native, commands),
+    readNaturalSpawning(native),
   ]);
   const level = difficulty(replies.get('difficulty'));
-  const banRows = bans(replies.get('banlist'));
-  // Show live zones; enrich them only when their persisted world and name match.
-  const zoneKey = (zone: { world: string | null; name: string }) =>
-    JSON.stringify([zone.world?.toLowerCase(), zone.name]);
-  const knownZones = new Map(zonesFromFile(zoneDoc)?.map((z) => [zoneKey(z), z]));
-  const liveZones = zones(replies.get('zone list'));
+  const banRows = parseOpenworldBanList(replies.get('banlist'));
+  const global = globalFlags(replies.get('zone list'));
+  const liveZones = mergeZoneDetails(zones(replies.get('zone list')), zoneDoc);
+  const worldBorders = borders(replies.get('border info'), borderDoc);
   return {
     difficulty: level,
+    naturalSpawning,
+    globalFlags: global,
+    permissionNodes: permissionNodes(replies.get('role nodes')),
     roles: fromFile ?? roles(replies.get('role list')),
-    zones: liveZones?.map((z) => knownZones.get(zoneKey(z)) ?? z) ?? null,
-    borders: borders(replies.get('border info')),
+    zones: liveZones,
+    borders: worldBorders,
     bans: banRows,
     capabilities: {
       difficulty: verified.has(version) && level !== null,
       unban: verified.has(version) && banRows !== null,
+      globals: editing && global !== null,
+      zones: editing && !!liveZones?.some((z) => z.id !== undefined),
+      borders: editing && worldBorders !== null,
+      roles: editing && fromFile !== null,
+      spawning: editing && naturalSpawning !== null,
     },
   };
+}
+export type OpenworldRuleDocuments = {
+  roles?: Uint8Array;
+  zones?: Uint8Array;
+  borders?: Uint8Array;
+};
+type EditorState = Parameters<typeof planOpenworldEditorAction>[1];
+
+async function readEditorState(
+  native: OpenworldNativeConnection,
+  action: OpenworldRuleAction,
+  readFiles?: () => Promise<OpenworldRuleDocuments>,
+): Promise<EditorState> {
+  const state: EditorState = {};
+  if (action.kind === 'spawning') {
+    state.naturalSpawning = await readNaturalSpawning(native);
+    return state;
+  }
+  if (action.kind === 'globalFlag' || 'zoneId' in action) {
+    const [doc, replies] = await Promise.all([
+      'zoneId' in action
+        ? fileContents(readFiles && (async () => (await readFiles()).zones))
+        : null,
+      ruleReplies(native, ['zone list']),
+    ]);
+    state.globalFlags = globalFlags(replies.get('zone list'));
+    state.zones = mergeZoneDetails(zones(replies.get('zone list')), doc);
+    return state;
+  }
+  if ('role' in action) {
+    state.roles = rolesFromFile(
+      await fileContents(readFiles && (async () => (await readFiles()).roles)),
+    );
+    return state;
+  }
+  const [doc, replies] = await Promise.all([
+    fileContents(readFiles && (async () => (await readFiles()).borders)),
+    ruleReplies(native, ['border info']),
+  ]);
+  state.borders = borders(
+    replies.get('border info'),
+    doc,
+    'world' in action ? action.world : undefined,
+  );
+  return state;
 }
 export async function performOpenworldRule(
   native: OpenworldNativeConnection,
   version: string,
   input: OpenworldRuleAction,
   beforeDispatch: () => Promise<void>,
+  readFiles?: () => Promise<OpenworldRuleDocuments>,
 ) {
   const parsed = openworldRuleActionSchema.safeParse(input);
   if (!parsed.success) throw new DomainError('validation_failed');
   const action = parsed.data;
   if (!verified.has(version)) throw new DomainError('game_request_unsupported');
+  if (action.kind !== 'difficulty' && action.kind !== 'unban') {
+    if (!canEditOpenworldTerritory(version)) throw new DomainError('game_request_unsupported');
+    const read = () => readEditorState(native, action, readFiles);
+    const { command, matches } = planOpenworldEditorAction(action, await read());
+    return performVerifiedChange(native, command, beforeDispatch, async () => {
+      // Status is published on a separate tick. Never resubmit a write while waiting for it.
+      for (let attempt = 0; ; attempt++) {
+        if (matches(await read())) return true;
+        if (action.kind !== 'spawning' || attempt >= 6 || native.signal.aborted) return false;
+        await new Promise((resolve) => setTimeout(resolve, 230));
+      }
+    });
+  }
   const observe = action.kind === 'difficulty' ? 'difficulty' : 'banlist';
   const prior = (await ruleReplies(native, [observe])).get(observe);
   if (action.kind === 'unban') {
-    const old = bans(prior);
+    const old = parseOpenworldBanList(prior);
     if (!old) throw new DomainError('integration_unavailable');
     if (!old.some((row) => row.uuid === action.uuid)) throw new DomainError('not_found');
   } else if (!difficulty(prior)) throw new DomainError('integration_unavailable');
@@ -285,6 +318,24 @@ export async function performOpenworldRule(
     action.kind === 'unban'
       ? (`unban ${action.uuid}` as const)
       : (`difficulty ${action.value}` as const);
+  return performVerifiedChange(native, command, beforeDispatch, async () => {
+    const observed = (await ruleReplies(native, [observe])).get(observe);
+    if (action.kind === 'difficulty') {
+      if (difficulty(observed) === action.value) return true;
+    } else {
+      const rows = parseOpenworldBanList(observed);
+      if (rows && !rows.some((row) => row.uuid === action.uuid)) return true;
+    }
+    return false;
+  });
+}
+
+async function performVerifiedChange(
+  native: OpenworldNativeConnection,
+  command: OpenworldRuleCommand,
+  beforeDispatch: () => Promise<void>,
+  confirmed: () => Promise<boolean>,
+) {
   let dispatched = false;
   try {
     const change = (
@@ -295,17 +346,13 @@ export async function performOpenworldRule(
     ).get(command);
     if (change?.accepted === false) throw new DomainError('game_request_rejected');
     if (!change) throw new DomainError('operation_uncertain');
-    const observed = (await ruleReplies(native, [observe])).get(observe);
-    if (action.kind === 'difficulty') {
-      if (difficulty(observed) === action.value) return;
-    } else {
-      const rows = bans(observed);
-      if (rows && !rows.some((row) => row.uuid === action.uuid)) return;
-    }
+    if (await confirmed()) return;
     throw new DomainError('operation_uncertain');
   } catch (error) {
     if (!dispatched || (error instanceof DomainError && error.code === 'game_request_rejected'))
       throw error;
+    if (error instanceof OpenworldTokenExpired)
+      throw new OpenworldTokenExpired('operation_uncertain');
     throw new DomainError('operation_uncertain');
   }
 }

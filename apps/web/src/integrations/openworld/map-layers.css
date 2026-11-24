@@ -251,3 +251,13 @@
 .ow-map-layer-note {
   margin: 9px 0 0;
 }
+
+.ow-session-spawning {
+  border-block-start: 1px solid var(--line);
+  padding-block: 0.7rem;
+}
+.ow-session-spawning small {
+  display: block;
+  margin-block-start: 0.2rem;
+  color: var(--muted);
+}

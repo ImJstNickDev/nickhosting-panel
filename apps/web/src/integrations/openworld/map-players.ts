@@ -40,6 +40,30 @@ export function mapHref(serverId: string, p: Point) {
   });
   return `/servers/${encodeURIComponent(serverId)}/game/map#${hash}`;
 }
+export function zoneMapLink(serverId: string, world: string, longitude: number, latitude: number) {
+  const hash = new URLSearchParams({
+    origin: 'rules',
+    world,
+    lon: String(longitude),
+    lat: String(latitude),
+  });
+  return `/servers/${encodeURIComponent(serverId)}/game/map#${hash}`;
+}
+export function zoneMapFocus() {
+  const params = fragment();
+  const world = params.get('world'),
+    lon = number(params, 'lon'),
+    lat = number(params, 'lat');
+  return params.get('origin') === 'rules' &&
+    world &&
+    /^[a-zA-Z0-9_-]{1,128}$/.test(world) &&
+    Number.isFinite(lon) &&
+    Math.abs(lon) <= 180 &&
+    Number.isFinite(lat) &&
+    Math.abs(lat) <= 90
+    ? { world, lon, lat }
+    : null;
+}
 export function playerHref(serverId: string, p: MapPlayer, processRef: string) {
   return playerPath(serverId, {
     account: null,

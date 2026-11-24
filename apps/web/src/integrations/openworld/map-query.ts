@@ -17,7 +17,13 @@ export const scopeLost = (reason: unknown) =>
     reason.status === 403 ||
     reason.status === 404 ||
     (reason.status === 409 && reason.code !== 'game_request_unsupported'));
-export function useMapData<T>(s: ServerView, path: string, enabled = true, interval?: number) {
+export function useMapData<T>(
+  s: ServerView,
+  path: string,
+  enabled = true,
+  interval?: number,
+  staleTime = 0,
+) {
   return useQuery({
     queryKey: [...mapScope(s), path],
     queryFn: ({ signal }) => mapData<T>(s, path, signal),
@@ -25,7 +31,7 @@ export function useMapData<T>(s: ServerView, path: string, enabled = true, inter
     refetchInterval: (q) => (interval && !scopeLost(q.state.error) ? interval : false),
     refetchIntervalInBackground: false,
     gcTime: 0,
-    staleTime: 0,
+    staleTime,
     retry: false,
   });
 }

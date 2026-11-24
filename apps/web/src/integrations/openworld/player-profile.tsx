@@ -24,6 +24,7 @@ import {
   verifiedAccount,
 } from './player-identity.js';
 import { PlayerEquipment, PlayerInventory } from './player-inventory.js';
+import { canManagePlayerAccess, ProfileAccess } from './player-moderation.js';
 import { PlayerVitals } from './player-vitals.js';
 import { usePlayerResource } from './player-workspace.js';
 import {
@@ -58,7 +59,7 @@ export function PlayerProfile({
   onServerGallery,
   backTo,
 }: {
-  server: ServerView;
+  server: ServerView & { permissionKeys: readonly string[] };
   selected: Profile;
   connected?: Player;
   accountSessions: Player[];
@@ -151,6 +152,23 @@ export function PlayerProfile({
           processRef: session.processRef,
         }
       : null;
+  const accountControls =
+    account &&
+    captureAccount.safeParse(account).success &&
+    canManagePlayerAccess(server.permissionKeys) ? (
+      <ProfileAccess
+        server={server}
+        subject={{
+          account,
+          name: live ? selected.name : archive?.name || selected.name,
+          online: live,
+        }}
+        onAccepted={(r) => {
+          setReceipt(r);
+          onRequestAccepted(r);
+        }}
+      />
+    ) : null;
   function content() {
     if (tab === 'gallery' && account && canShowShots)
       return <PlayerGallery server={server} account={account} watchUntil={watchUntil} />;
@@ -288,7 +306,7 @@ export function PlayerProfile({
           </div>
         )}
         <div className={resourcePane || tab === 'network' ? 'ow-detail-content' : undefined}>
-          {tab === 'character' && (moderate || screenshots) ? (
+          {tab === 'character' && (moderate || screenshots || accountControls) ? (
             <div className={inspect ? 'ow-character-workspace' : undefined}>
               {(inspect || !live) && <div className="ow-character-main">{content()}</div>}
               <PlayerActions
@@ -297,6 +315,7 @@ export function PlayerProfile({
                 target={actionTarget}
                 awaitingConfirmation={source === 'live' && !actionTarget}
                 otherPlayers={otherPlayers}
+                accountControls={accountControls}
                 moderate={moderate}
                 screenshots={screenshots}
                 onAccepted={(r) => {

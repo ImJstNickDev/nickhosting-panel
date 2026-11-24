@@ -1,0 +1,53 @@
+.ow-access-dialog .dialog-close-icon {
+  display: grid;
+  place-items: center;
+  width: 34px;
+  min-height: 34px;
+  padding: 0;
+  color: var(--muted);
+  background: transparent;
+  border: 0;
+}
+.ow-access-dialog .dialog-close-icon:hover {
+  background: var(--surface-soft, #eef2f0);
+  color: inherit;
+}
+.ow-access-form {
+  display: grid;
+  gap: 1.05rem;
+  margin-block-start: 1.1rem;
+}
+.ow-access-person {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding-block-end: 0.95rem;
+  border-bottom: 1px solid var(--line);
+}
+.ow-access-person > div {
+  display: grid;
+  min-width: 0;
+  gap: 0.12rem;
+}
+.ow-access-person small,
+.ow-banned-list .ow-uuid {
+  overflow-wrap: anywhere;
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+}
+.ow-access-footer {
+  display: flex;
+  justify-content: flex-end;
+}
+.ow-banned-list li > button {
+  flex: none;
+  align-self: center;
+}
+@media (max-width: 480px) {
+  .ow-banned-list li {
+    flex-wrap: wrap;
+  }
+  .ow-banned-list li > button {
+    margin-inline-start: auto;
+  }
+}

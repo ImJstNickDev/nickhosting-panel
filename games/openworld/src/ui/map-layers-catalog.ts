@@ -2,6 +2,12 @@ const messages: Record<string, [string, string]> = {
   view: ['Map view', 'Vista della mappa'],
   terrain: ['Terrain', 'Terreno'],
   creatures: ['Creatures', 'Creature'],
+  sessionSpawning: ['Natural spawning', 'Spawn naturale'],
+  sessionSpawningHint: [
+    'All worlds · until the server restarts',
+    'Tutti i mondi · fino al riavvio del server',
+  ],
+  spawningUnknown: ['Spawning status unavailable', 'Stato dello spawn non disponibile'],
   space: ['Space', 'Spazio'],
   population: ['Active population in {world}', 'Popolazione attiva su {world}'],
   groundItems: ['Items on the ground', 'Oggetti a terra'],
